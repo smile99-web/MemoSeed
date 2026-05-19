@@ -1,0 +1,111 @@
+"use client";
+
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { FormEvent, useState } from "react";
+
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { login, saveAuthSession, validateEmail, validatePassword } from "@/lib/auth";
+
+interface LoginFormState {
+  email: string;
+  password: string;
+}
+
+interface LoginFormErrors {
+  email?: string;
+  password?: string;
+  form?: string;
+}
+
+export default function LoginPage() {
+  const router = useRouter();
+  const [form, setForm] = useState<LoginFormState>({ email: "", password: "" });
+  const [errors, setErrors] = useState<LoginFormErrors>({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const nextErrors: LoginFormErrors = {
+      email: validateEmail(form.email) ?? undefined,
+      password: validatePassword(form.password) ?? undefined,
+    };
+
+    if (nextErrors.email || nextErrors.password) {
+      setErrors(nextErrors);
+      return;
+    }
+
+    setIsSubmitting(true);
+    setErrors({});
+
+    try {
+      const auth = await login({ email: form.email.trim(), password: form.password });
+      saveAuthSession(auth);
+      router.push("/");
+    } catch (error) {
+      setErrors({ form: error instanceof Error ? error.message : "登录失败" });
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="flex min-h-screen items-center justify-center px-6 py-10">
+      <Card className="w-full max-w-md">
+        <CardHeader>
+          <CardTitle>登录 MemoSeed</CardTitle>
+          <CardDescription>进入你的英语长期记忆学习系统。</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form className="space-y-5" onSubmit={handleSubmit} noValidate>
+            <div className="space-y-2">
+              <label className="text-sm font-medium" htmlFor="email">
+                邮箱
+              </label>
+              <input
+                id="email"
+                type="email"
+                autoComplete="email"
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                value={form.email}
+                onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))}
+              />
+              {errors.email ? <p className="text-sm text-red-600">{errors.email}</p> : null}
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium" htmlFor="password">
+                密码
+              </label>
+              <input
+                id="password"
+                type="password"
+                autoComplete="current-password"
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                value={form.password}
+                onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
+              />
+              {errors.password ? <p className="text-sm text-red-600">{errors.password}</p> : null}
+            </div>
+
+            {errors.form ? <p className="text-sm text-red-600">{errors.form}</p> : null}
+
+            <Button className="w-full" disabled={isSubmitting} type="submit">
+              {isSubmitting ? "登录中..." : "登录"}
+            </Button>
+          </form>
+
+          <p className="mt-6 text-center text-sm text-muted-foreground">
+            还没有账号？{" "}
+            <Link className="font-medium text-primary hover:underline" href="/register">
+              立即注册
+            </Link>
+          </p>
+        </CardContent>
+      </Card>
+    </main>
+  );
+}

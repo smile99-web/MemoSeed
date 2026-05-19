@@ -1,0 +1,161 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("PRISMA_DATABASE_URL")
+}
+
+model User {
+  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email           String          @unique @db.VarChar(255)
+  username        String          @unique @db.VarChar(80)
+  hashedPassword  String          @map("hashed_password") @db.VarChar(255)
+  isActive        Boolean         @default(true) @map("is_active")
+  createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime        @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  learningItems   LearningItem[]
+  reviewLogs      ReviewLog[]
+  mistakeLogs     MistakeLog[]
+  dailyPlans      DailyPlan[]
+  aiDailyReports  AiDailyReport[]
+  refreshTokens   RefreshToken[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  tokenHash   String    @unique @map("token_hash") @db.VarChar(255)
+  isRevoked   Boolean   @default(false) @map("is_revoked")
+  expiresAt   DateTime  @map("expires_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  revokedAt   DateTime? @map("revoked_at") @db.Timestamptz(6)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+model LearningItem {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String        @map("user_id") @db.Uuid
+  itemType        String        @map("item_type") @db.VarChar(32)
+  englishText     String        @map("english_text") @db.Text
+  chineseText     String        @map("chinese_text") @db.Text
+  phonetic        String?       @db.VarChar(255)
+  difficultyLevel Int           @default(1) @map("difficulty_level")
+  source          String?       @db.VarChar(120)
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  memoryState     MemoryState?
+  reviewLogs      ReviewLog[]
+  mistakeLogs     MistakeLog[]
+
+  @@index([userId])
+  @@index([itemType])
+  @@unique([userId, englishText, itemType])
+  @@map("learning_items")
+}
+
+model MemoryState {
+  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  learningItemId  String       @unique @map("learning_item_id") @db.Uuid
+  intervalDays    Int          @default(0) @map("interval_days")
+  easeFactor      Float        @default(2.5) @map("ease_factor")
+  memoryStrength  Float        @default(0.0) @map("memory_strength")
+  forgetRisk      Float        @default(1.0) @map("forget_risk")
+  repetitionCount Int          @default(0) @map("repetition_count")
+  lapseCount      Int          @default(0) @map("lapse_count")
+  lastReviewedAt  DateTime?    @map("last_reviewed_at") @db.Timestamptz(6)
+  nextReviewAt    DateTime     @map("next_review_at") @db.Timestamptz(6)
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  learningItem    LearningItem @relation(fields: [learningItemId], references: [id], onDelete: Cascade)
+
+  @@index([nextReviewAt])
+  @@map("memory_states")
+}
+
+model ReviewLog {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId         String       @map("user_id") @db.Uuid
+  learningItemId String       @map("learning_item_id") @db.Uuid
+  reviewMode     String       @map("review_mode") @db.VarChar(32)
+  score          Int
+  isCorrect      Boolean      @map("is_correct")
+  responseText   String?      @map("response_text") @db.Text
+  durationSeconds Int         @default(0) @map("duration_seconds")
+  reviewedAt     DateTime     @default(now()) @map("reviewed_at") @db.Timestamptz(6)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  learningItem   LearningItem @relation(fields: [learningItemId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([learningItemId])
+  @@index([reviewedAt])
+  @@map("review_logs")
+}
+
+model MistakeLog {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId         String       @map("user_id") @db.Uuid
+  learningItemId String       @map("learning_item_id") @db.Uuid
+  mistakeType    String       @map("mistake_type") @db.VarChar(64)
+  expectedAnswer String       @map("expected_answer") @db.Text
+  actualAnswer   String       @map("actual_answer") @db.Text
+  isResolved     Boolean      @default(false) @map("is_resolved")
+  occurredAt     DateTime     @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  resolvedAt     DateTime?    @map("resolved_at") @db.Timestamptz(6)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  learningItem   LearningItem @relation(fields: [learningItemId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([learningItemId])
+  @@index([occurredAt])
+  @@map("mistake_logs")
+}
+
+model DailyPlan {
+  id                          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId                      String   @map("user_id") @db.Uuid
+  planDate                    DateTime @map("plan_date") @db.Date
+  warmupReviewMinutes         Int      @default(10) @map("warmup_review_minutes")
+  newLearningMinutes          Int      @default(20) @map("new_learning_minutes")
+  sentenceTrainingMinutes     Int      @default(20) @map("sentence_training_minutes")
+  mistakeReinforcementMinutes Int      @default(10) @map("mistake_reinforcement_minutes")
+  newWordLimit                Int      @default(0) @map("new_word_limit")
+  newPhraseLimit              Int      @default(0) @map("new_phrase_limit")
+  strategy                    Json     @default("{}")
+  createdAt                   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user                        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, planDate])
+  @@index([userId, planDate])
+  @@map("daily_plans")
+}
+
+model AiDailyReport {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId               String   @map("user_id") @db.Uuid
+  reportDate           DateTime @map("report_date") @db.Date
+  accuracyRate         Float    @default(0.0) @map("accuracy_rate")
+  spellingErrorRate    Float    @default(0.0) @map("spelling_error_rate")
+  sentenceErrorRate    Float    @default(0.0) @map("sentence_error_rate")
+  studyDurationMinutes Int      @default(0) @map("study_duration_minutes")
+  reviewBacklogCount   Int      @default(0) @map("review_backlog_count")
+  highForgetRiskCount  Int      @default(0) @map("high_forget_risk_count")
+  summary              String   @default("") @db.Text
+  nextDayStrategy      Json     @default("{}") @map("next_day_strategy")
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, reportDate])
+  @@index([userId, reportDate])
+  @@map("ai_daily_reports")
+}
