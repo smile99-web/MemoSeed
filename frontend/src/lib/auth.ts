@@ -75,6 +75,24 @@ export function getAccessToken(): string | null {
   return window.localStorage.getItem(accessTokenKey);
 }
 
+export function getAuthUser(): AuthUser | null {
+  const storedUser = window.localStorage.getItem(userKey);
+  if (!storedUser) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(storedUser) as AuthUser;
+  } catch {
+    clearAuthSession();
+    return null;
+  }
+}
+
+export function isAuthenticated(): boolean {
+  return Boolean(getAccessToken() && getAuthUser());
+}
+
 export function clearAuthSession(): void {
   window.localStorage.removeItem(accessTokenKey);
   window.localStorage.removeItem(refreshTokenKey);
@@ -88,9 +106,34 @@ export async function register(payload: RegisterPayload): Promise<AuthResponse> 
   });
 }
 
+export function getRefreshToken(): string | null {
+  return window.localStorage.getItem(refreshTokenKey);
+}
+
 export async function login(payload: LoginPayload): Promise<AuthResponse> {
   return apiRequest<AuthResponse, LoginPayload>("/auth/login", {
     method: "POST",
     body: payload,
   });
+}
+
+export async function refreshAccessToken(): Promise<string | null> {
+  const refreshToken = getRefreshToken();
+  if (!refreshToken) {
+    clearAuthSession();
+    return null;
+  }
+
+  try {
+    const tokens = await apiRequest<TokenPair, { refresh_token: string }>("/auth/refresh", {
+      method: "POST",
+      body: { refresh_token: refreshToken },
+    });
+    window.localStorage.setItem(accessTokenKey, tokens.access_token);
+    window.localStorage.setItem(refreshTokenKey, tokens.refresh_token);
+    return tokens.access_token;
+  } catch {
+    clearAuthSession();
+    return null;
+  }
 }

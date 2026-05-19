@@ -9,7 +9,7 @@ from passlib.context import CryptContext
 
 from app.core.config import settings
 
-password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+password_context = CryptContext(schemes=["bcrypt_sha256"], deprecated="auto")
 
 
 def create_access_token(subject: str, expires_delta: timedelta | None = None) -> str:

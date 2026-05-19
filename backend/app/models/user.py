@@ -10,6 +10,8 @@ from app.db.session import Base
 
 if TYPE_CHECKING:
     from app.models.ai_daily_report import AiDailyReport
+    from app.models.course import Course
+    from app.models.course_package import CoursePackage
     from app.models.daily_plan import DailyPlan
     from app.models.learning_item import LearningItem
     from app.models.refresh_token import RefreshToken
@@ -26,6 +28,8 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
+    course_packages: Mapped[list["CoursePackage"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    courses: Mapped[list["Course"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     learning_items: Mapped[list["LearningItem"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     daily_plans: Mapped[list["DailyPlan"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     ai_daily_reports: Mapped[list["AiDailyReport"]] = relationship(back_populates="user", cascade="all, delete-orphan")

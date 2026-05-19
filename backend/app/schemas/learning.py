@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 
 class LearningItemBase(BaseModel):
+    course_id: UUID | None = None
     item_type: str = Field(pattern="^(word|phrase|sentence)$")
     english_text: str = Field(min_length=1)
     chinese_text: str = Field(min_length=1)
@@ -37,3 +38,14 @@ class LearningImportResponse(BaseModel):
     total_rows: int
     items: list[LearningItemRead]
     skipped_items: list[ImportSkippedItem]
+
+
+class LearningTranslationRequest(BaseModel):
+    english_text: str = Field(min_length=1)
+    llm_base_url: str | None = None
+    llm_model: str | None = None
+
+
+class LearningTranslationResponse(BaseModel):
+    english_text: str
+    chinese_text: str

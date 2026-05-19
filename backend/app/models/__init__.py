@@ -1,4 +1,6 @@
 from app.models.ai_daily_report import AiDailyReport
+from app.models.course import Course
+from app.models.course_package import CoursePackage
 from app.models.daily_plan import DailyPlan
 from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
@@ -9,6 +11,8 @@ from app.models.user import User
 
 __all__ = [
     "AiDailyReport",
+    "Course",
+    "CoursePackage",
     "DailyPlan",
     "LearningItem",
     "MemoryState",

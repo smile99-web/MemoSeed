@@ -20,9 +20,31 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     revoked_at TIMESTAMPTZ
 );
 
+CREATE TABLE IF NOT EXISTS course_packages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name VARCHAR(120) NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS courses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    package_id UUID NOT NULL REFERENCES course_packages(id) ON DELETE CASCADE,
+    name VARCHAR(120) NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (package_id, name)
+);
+
 CREATE TABLE IF NOT EXISTS learning_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    course_id UUID REFERENCES courses(id) ON DELETE CASCADE,
     item_type VARCHAR(32) NOT NULL CHECK (item_type IN ('word', 'phrase', 'sentence')),
     english_text TEXT NOT NULL,
     chinese_text TEXT NOT NULL,
@@ -107,8 +129,12 @@ CREATE TABLE IF NOT EXISTS ai_daily_reports (
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token_hash ON refresh_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires_at ON refresh_tokens(expires_at);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_learning_items_user_english_type ON learning_items(user_id, lower(english_text), item_type);
+CREATE INDEX IF NOT EXISTS idx_course_packages_user_id ON course_packages(user_id);
+CREATE INDEX IF NOT EXISTS idx_courses_user_id ON courses(user_id);
+CREATE INDEX IF NOT EXISTS idx_courses_package_id ON courses(package_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_learning_items_user_course_english_type ON learning_items(user_id, course_id, lower(english_text), item_type);
 CREATE INDEX IF NOT EXISTS idx_learning_items_user_id ON learning_items(user_id);
+CREATE INDEX IF NOT EXISTS idx_learning_items_course_id ON learning_items(course_id);
 CREATE INDEX IF NOT EXISTS idx_learning_items_item_type ON learning_items(item_type);
 CREATE INDEX IF NOT EXISTS idx_memory_states_next_review_at ON memory_states(next_review_at);
 CREATE INDEX IF NOT EXISTS idx_review_logs_user_id ON review_logs(user_id);

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from io import BytesIO
-from re import search, split
+from re import search
 from uuid import UUID
 
 from openpyxl import load_workbook
@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.models.learning_item import LearningItem
 from app.schemas.learning import ImportSkippedItem
+from app.services.llm_translation import LlmTranslationSettings, needs_translation, translate_english_to_chinese
 
 SUPPORTED_IMPORT_EXTENSIONS = {".txt", ".xlsx"}
 
@@ -43,18 +44,30 @@ def classify_learning_item(english_text: str) -> str:
     return "phrase"
 
 
+def contains_chinese(value: str) -> bool:
+    return any("一" <= character <= "鿿" for character in value)
+
+
+def split_learning_line(stripped_line: str) -> tuple[str, str]:
+    for separator in ("\t", "|", "：", ":"):
+        if separator in stripped_line:
+            english_text, chinese_text = stripped_line.split(separator, 1)
+            return english_text.strip(), chinese_text.strip()
+
+    if "," in stripped_line:
+        english_text, possible_chinese_text = stripped_line.rsplit(",", 1)
+        if contains_chinese(possible_chinese_text):
+            return english_text.strip(), possible_chinese_text.strip()
+
+    return stripped_line, ""
+
+
 def parse_learning_line(line: str, source: str) -> ParsedLearningItem | None:
     stripped_line = line.strip()
     if not stripped_line:
         return None
 
-    columns = [part.strip() for part in split(r"\t|,|\||：|:", stripped_line, maxsplit=2) if part.strip()]
-    if len(columns) == 1:
-        english_text = columns[0]
-        chinese_text = "待补充"
-    else:
-        english_text = columns[0]
-        chinese_text = columns[1]
+    english_text, chinese_text = split_learning_line(stripped_line)
 
     return ParsedLearningItem(
         item_type=classify_learning_item(english_text),
@@ -100,7 +113,7 @@ def parse_xlsx_import(content: bytes, filename: str) -> ImportParseResult:
             continue
 
         english_text = values[0]
-        chinese_text = values[1] if len(values) > 1 and values[1] else "待补充"
+        chinese_text = values[1] if len(values) > 1 and values[1] else ""
         item_type = values[2].lower() if len(values) > 2 and values[2].lower() in {"word", "phrase", "sentence"} else classify_learning_item(english_text)
         phonetic = values[3] if len(values) > 3 and values[3] else None
         difficulty_level = parse_difficulty_level(values[4] if len(values) > 4 else "")
@@ -137,12 +150,23 @@ def normalize_english_text(value: str) -> str:
     return " ".join(value.strip().lower().split())
 
 
-def import_learning_items(db: Session, user_id: UUID, parsed_items: list[ParsedLearningItem]) -> tuple[list[LearningItem], list[ImportSkippedItem]]:
+def import_learning_items(
+    db: Session,
+    user_id: UUID,
+    course_id: UUID,
+    parsed_items: list[ParsedLearningItem],
+    translation_settings: LlmTranslationSettings | None = None,
+) -> tuple[list[LearningItem], list[ImportSkippedItem]]:
     imported_items: list[LearningItem] = []
     skipped_items: list[ImportSkippedItem] = []
     seen_keys: set[tuple[str, str]] = set()
 
-    existing_rows = db.execute(select(func.lower(LearningItem.english_text), LearningItem.item_type).where(LearningItem.user_id == user_id)).all()
+    existing_rows = db.execute(
+        select(func.lower(LearningItem.english_text), LearningItem.item_type).where(
+            LearningItem.user_id == user_id,
+            LearningItem.course_id == course_id,
+        )
+    ).all()
     existing_keys = {(normalize_english_text(row[0]), row[1]) for row in existing_rows}
 
     for parsed_item in parsed_items:
@@ -155,11 +179,23 @@ def import_learning_items(db: Session, user_id: UUID, parsed_items: list[ParsedL
             skipped_items.append(ImportSkippedItem(english_text=parsed_item.english_text, reason="Already exists"))
             continue
 
+        chinese_text = parsed_item.chinese_text.strip()
+        if needs_translation(chinese_text):
+            if translation_settings is None:
+                skipped_items.append(ImportSkippedItem(english_text=parsed_item.english_text, reason="缺少中文释义，且未配置可用的 LLM 翻译服务"))
+                continue
+            try:
+                chinese_text = translate_english_to_chinese(parsed_item.english_text, translation_settings)
+            except ValueError as exc:
+                skipped_items.append(ImportSkippedItem(english_text=parsed_item.english_text, reason=str(exc)))
+                continue
+
         learning_item = LearningItem(
             user_id=user_id,
+            course_id=course_id,
             item_type=parsed_item.item_type,
             english_text=parsed_item.english_text.strip(),
-            chinese_text=parsed_item.chinese_text.strip(),
+            chinese_text=chinese_text,
             phonetic=parsed_item.phonetic,
             difficulty_level=parsed_item.difficulty_level,
             source=parsed_item.source,
