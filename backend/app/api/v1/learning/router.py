@@ -7,15 +7,44 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core.config import settings as app_settings
 from app.db.session import get_db
 from app.models.course import Course
 from app.models.learning_item import LearningItem
+from app.models.mistake_log import MistakeLog
 from app.models.user import User
-from app.schemas.learning import LearningImportResponse, LearningItemCreate, LearningItemRead, LearningTranslationRequest, LearningTranslationResponse
+from app.schemas.learning import (
+    DynamicSentenceRequest,
+    DynamicSentenceResponse,
+    LearningImportResponse,
+    LearningItemCreate,
+    LearningItemRead,
+    LearningTranslationRequest,
+    LearningTranslationResponse,
+    WordMistakeLogRequest,
+    WordMistakeLogResponse,
+)
+from app.services.dynamic_sentence import generate_dynamic_review_sentence
 from app.services.learning_import import SUPPORTED_IMPORT_EXTENSIONS, import_learning_items, parse_txt_import, parse_xlsx_import
 from app.services.llm_translation import DEFAULT_LLM_TRANSLATION_SETTINGS, LlmTranslationSettings, translate_english_to_chinese
 
 router = APIRouter()
+
+
+def build_llm_translation_settings(
+    llm_provider: str | None,
+    llm_base_url: str | None,
+    llm_model: str | None,
+    llm_api_key: str | None,
+) -> LlmTranslationSettings:
+    base_settings = DEFAULT_LLM_TRANSLATION_SETTINGS
+    provider = llm_provider or app_settings.ai_provider or base_settings.provider
+    return LlmTranslationSettings(
+        provider=provider,
+        base_url=llm_base_url or app_settings.ai_base_url or base_settings.base_url,
+        model=llm_model or app_settings.ai_model or base_settings.model,
+        api_key=llm_api_key or app_settings.ai_api_key,
+    )
 
 
 @router.get("/items", response_model=list[LearningItemRead])
@@ -65,9 +94,12 @@ def translate_learning_text(
     payload: LearningTranslationRequest,
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> LearningTranslationResponse:
-    translation_settings = DEFAULT_LLM_TRANSLATION_SETTINGS
-    if payload.llm_base_url and payload.llm_model:
-        translation_settings = LlmTranslationSettings(base_url=payload.llm_base_url, model=payload.llm_model)
+    translation_settings = build_llm_translation_settings(
+        payload.llm_provider,
+        payload.llm_base_url,
+        payload.llm_model,
+        payload.llm_api_key,
+    )
 
     try:
         chinese_text = translate_english_to_chinese(payload.english_text, translation_settings)
@@ -75,6 +107,53 @@ def translate_learning_text(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     return LearningTranslationResponse(english_text=payload.english_text, chinese_text=chinese_text)
+
+
+@router.post("/word-mistakes", response_model=WordMistakeLogResponse, status_code=status.HTTP_201_CREATED)
+def create_word_mistake_log(
+    payload: WordMistakeLogRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> WordMistakeLogResponse:
+    learning_item = db.scalar(select(LearningItem).where(LearningItem.id == payload.learning_item_id, LearningItem.user_id == current_user.id))
+    if learning_item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning item not found")
+
+    mistake_log = MistakeLog(
+        user_id=current_user.id,
+        learning_item_id=learning_item.id,
+        mistake_type="word-spelling",
+        expected_answer=payload.expected_word.strip(),
+        actual_answer=payload.actual_word.strip(),
+        is_resolved=False,
+    )
+    db.add(mistake_log)
+    db.commit()
+    return WordMistakeLogResponse(logged_count=1)
+
+
+@router.post("/dynamic-sentences", response_model=DynamicSentenceResponse)
+def create_dynamic_sentence(
+    payload: DynamicSentenceRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> DynamicSentenceResponse:
+    translation_settings = build_llm_translation_settings(payload.llm_provider, payload.llm_base_url, payload.llm_model, payload.llm_api_key)
+    result = generate_dynamic_review_sentence(
+        db=db,
+        user_id=current_user.id,
+        course_id=payload.course_id,
+        current_sentence=payload.current_sentence,
+        mistaken_words=payload.mistaken_words,
+        settings=translation_settings,
+    )
+    return DynamicSentenceResponse(
+        english_text=result.english_text,
+        chinese_text=result.chinese_text,
+        focus_words=result.focus_words,
+        known_words=result.known_words,
+        weak_words=result.weak_words,
+    )
 
 
 @router.get("/items/{item_id}", response_model=LearningItemRead)
@@ -95,8 +174,10 @@ async def import_learning_items_file(
     db: Annotated[Session, Depends(get_db)],
     file: Annotated[UploadFile, File()],
     course_id: Annotated[UUID, Form()],
+    llm_provider: Annotated[str | None, Form()] = None,
     llm_base_url: Annotated[str | None, Form()] = None,
     llm_model: Annotated[str | None, Form()] = None,
+    llm_api_key: Annotated[str | None, Form()] = None,
 ) -> LearningImportResponse:
     course = db.scalar(select(Course).where(Course.id == course_id, Course.user_id == current_user.id))
     if course is None:
@@ -116,9 +197,7 @@ async def import_learning_items_file(
     else:
         parse_result = parse_xlsx_import(content, filename)
 
-    translation_settings = DEFAULT_LLM_TRANSLATION_SETTINGS
-    if llm_base_url and llm_model:
-        translation_settings = LlmTranslationSettings(base_url=llm_base_url, model=llm_model)
+    translation_settings = build_llm_translation_settings(llm_provider, llm_base_url, llm_model, llm_api_key)
 
     imported_items, duplicate_skipped_items = import_learning_items(db, current_user.id, course_id, parse_result.items, translation_settings)
     skipped_items = [*parse_result.skipped_items, *duplicate_skipped_items]

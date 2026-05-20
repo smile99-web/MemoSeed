@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     api_v1_prefix: str = "/api/v1"
 
-    backend_cors_origins: str = Field(default="http://localhost:3000", alias="BACKEND_CORS_ORIGINS")
+    backend_cors_origins: str = Field(default="http://localhost:3000,http://127.0.0.1:3000", alias="BACKEND_CORS_ORIGINS")
     database_url: str = Field(
         default="postgresql+psycopg://memoseed:memoseed_password@localhost:5432/memoseed",
         alias="DATABASE_URL",
@@ -23,8 +23,19 @@ class Settings(BaseSettings):
     jwt_refresh_token_expire_days: int = Field(default=30, alias="JWT_REFRESH_TOKEN_EXPIRE_DAYS")
 
     ai_provider: str | None = Field(default=None, alias="AI_PROVIDER")
+    ai_base_url: str | None = Field(default=None, alias="AI_BASE_URL")
     ai_api_key: str | None = Field(default=None, alias="AI_API_KEY")
     ai_model: str | None = Field(default=None, alias="AI_MODEL")
+
+    tts_provider: str | None = Field(default=None, alias="TTS_PROVIDER")
+    volcengine_tts_endpoint: str | None = Field(default=None, alias="VOLCENGINE_TTS_ENDPOINT")
+    volcengine_tts_app_id: str | None = Field(default=None, alias="VOLCENGINE_TTS_APP_ID")
+    volcengine_tts_access_token: str | None = Field(default=None, alias="VOLCENGINE_TTS_ACCESS_TOKEN")
+    volcengine_tts_secret_key: str | None = Field(default=None, alias="VOLCENGINE_TTS_SECRET_KEY")
+    volcengine_tts_resource_id: str | None = Field(default=None, alias="VOLCENGINE_TTS_RESOURCE_ID")
+    volcengine_tts_model: str | None = Field(default=None, alias="VOLCENGINE_TTS_MODEL")
+    volcengine_tts_english_voice: str | None = Field(default=None, alias="VOLCENGINE_TTS_ENGLISH_VOICE")
+    volcengine_tts_chinese_voice: str | None = Field(default=None, alias="VOLCENGINE_TTS_CHINESE_VOICE")
 
     @cached_property
     def cors_origins(self) -> list[str]:

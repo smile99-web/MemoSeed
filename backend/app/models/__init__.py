@@ -7,7 +7,9 @@ from app.models.memory_state import MemoryState
 from app.models.mistake_log import MistakeLog
 from app.models.refresh_token import RefreshToken
 from app.models.review_log import ReviewLog
+from app.models.study_time_log import StudyTimeLog
 from app.models.user import User
+from app.models.user_model_settings import UserModelSettings
 
 __all__ = [
     "AiDailyReport",
@@ -19,5 +21,7 @@ __all__ = [
     "MistakeLog",
     "RefreshToken",
     "ReviewLog",
+    "StudyTimeLog",
     "User",
+    "UserModelSettings",
 ]

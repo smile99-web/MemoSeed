@@ -1,0 +1,202 @@
+"use client";
+
+import Link from "next/link";
+import { useEffect, useState } from "react";
+
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { getAccessToken } from "@/lib/auth";
+import { getMemoryDashboard, MemoryDashboard, WordMasterySummary } from "@/lib/memory";
+
+const statusLabels: Record<WordMasterySummary["status"], string> = {
+  mastered: "已掌握",
+  learning: "学习中",
+  weak: "未掌握",
+};
+
+function formatPercent(value: number): string {
+  return `${Math.round(value * 100)}%`;
+}
+
+function formatDateTime(value: string | null): string {
+  if (!value) {
+    return "暂无";
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+function formatDuration(totalSeconds: number): string {
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours === 0 && minutes === 0) {
+    return `${seconds} 秒`;
+  }
+  if (hours === 0) {
+    return `${minutes} 分钟`;
+  }
+  return `${hours} 小时 ${minutes} 分钟`;
+}
+
+function StatCard({ label, value, hint }: { label: string; value: string | number; hint: string }) {
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardDescription>{label}</CardDescription>
+        <CardTitle className="text-3xl">{value}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="text-sm text-muted-foreground">{hint}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function WordTable({ title, words }: { title: string; words: WordMasterySummary[] }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+        <CardDescription>显示已进入复习记录的单词，按记忆强度、错误次数和遗忘风险排序。</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {words.length === 0 ? (
+          <p className="text-sm text-muted-foreground">暂无数据。</p>
+        ) : (
+          <div className="overflow-hidden rounded-lg border">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-muted">
+                <tr>
+                  <th className="px-3 py-2">单词</th>
+                  <th className="px-3 py-2">状态</th>
+                  <th className="px-3 py-2">强度</th>
+                  <th className="px-3 py-2">风险</th>
+                  <th className="px-3 py-2">复习</th>
+                  <th className="px-3 py-2">错次</th>
+                  <th className="px-3 py-2">下次复习</th>
+                </tr>
+              </thead>
+              <tbody>
+                {words.map((word) => (
+                  <tr className="border-t" key={`${title}-${word.word}`}>
+                    <td className="px-3 py-2 font-medium">{word.word}</td>
+                    <td className="px-3 py-2">{statusLabels[word.status]}</td>
+                    <td className="px-3 py-2">{formatPercent(word.memory_strength)}</td>
+                    <td className="px-3 py-2">{formatPercent(word.forget_risk)}</td>
+                    <td className="px-3 py-2">{word.review_count}</td>
+                    <td className="px-3 py-2">{word.mistake_count}</td>
+                    <td className="px-3 py-2">{formatDateTime(word.next_review_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+export default function DashboardPage() {
+  const [dashboard, setDashboard] = useState<MemoryDashboard | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    async function loadDashboard() {
+      const accessToken = getAccessToken();
+      if (!accessToken) {
+        setErrorMessage("请先登录后再查看数据看板");
+        setIsLoading(false);
+        return;
+      }
+
+      try {
+        setDashboard(await getMemoryDashboard(accessToken));
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "读取数据看板失败");
+      } finally {
+        setIsLoading(false);
+      }
+    }
+
+    void loadDashboard();
+  }, []);
+
+  return (
+    <main className="min-h-screen px-6 py-10">
+      <section className="mx-auto max-w-6xl space-y-6">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <Link className="text-sm font-medium text-primary hover:underline" href="/">
+              返回首页
+            </Link>
+            <h1 className="mt-4 text-3xl font-bold tracking-tight">学习数据看板</h1>
+            <p className="mt-2 text-muted-foreground">基于 SM-2 复习记录、错词日志和记忆强度生成。</p>
+          </div>
+          <Button asChild variant="secondary">
+            <Link href="/learning/import">继续学习</Link>
+          </Button>
+        </div>
+
+        {isLoading ? <p className="text-sm text-muted-foreground">正在加载数据...</p> : null}
+        {!isLoading && errorMessage ? <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{errorMessage}</p> : null}
+
+        {dashboard ? (
+          <>
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <StatCard label="已掌握单词" value={dashboard.mastered_words} hint={`共 ${dashboard.total_words} 个单词，已掌握 ${dashboard.mastered_words} 个`} />
+              <StatCard label="未掌握单词" value={dashboard.weak_words} hint={`${dashboard.learning_words} 个仍在学习中`} />
+              <StatCard label="复习准确率" value={formatPercent(dashboard.accuracy_rate)} hint={`${dashboard.correct_reviews} / ${dashboard.total_reviews} 次复习正确`} />
+              <StatCard label="下次复习" value={formatDateTime(dashboard.next_review_at)} hint={`${dashboard.due_now_count} 项已到期，${dashboard.overdue_count} 项超时`} />
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-3">
+              <StatCard label="平均记忆强度" value={formatPercent(dashboard.average_memory_strength)} hint="越高说明回忆越稳定" />
+              <StatCard label="平均遗忘风险" value={formatPercent(dashboard.average_forget_risk)} hint="越高越需要尽快复习" />
+              <StatCard label="平均复习间隔" value={`${dashboard.average_interval_days} 天`} hint="由 SM-2 和英语难度修正共同决定" />
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <StatCard label="今日学习时长" value={formatDuration(dashboard.study_time.today_seconds)} hint="20 秒无键盘输入会自动暂停计时" />
+              <StatCard label="本周学习时长" value={formatDuration(dashboard.study_time.week_seconds)} hint="按自然周统计活跃学习时间" />
+              <StatCard label="本月学习时长" value={formatDuration(dashboard.study_time.month_seconds)} hint="按自然月统计活跃学习时间" />
+              <StatCard label="今年学习时长" value={formatDuration(dashboard.study_time.year_seconds)} hint={`累计 ${formatDuration(dashboard.study_time.total_seconds)}`} />
+            </div>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>复习时间分布</CardTitle>
+                <CardDescription>按下一次复习时间聚合。</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {dashboard.review_buckets.map((bucket) => (
+                  <div className="grid grid-cols-[5rem_1fr_3rem] items-center gap-3" key={bucket.label}>
+                    <span className="text-sm text-muted-foreground">{bucket.label}</span>
+                    <div className="h-2 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-primary"
+                        style={{ width: `${dashboard.total_items > 0 ? Math.max((bucket.count / dashboard.total_items) * 100, bucket.count > 0 ? 4 : 0) : 0}%` }}
+                      />
+                    </div>
+                    <span className="text-right text-sm font-medium">{bucket.count}</span>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+
+            <div className="grid gap-4 xl:grid-cols-2">
+              <WordTable title="最需要复习的单词" words={dashboard.weakest_words} />
+              <WordTable title="掌握最稳定的单词" words={dashboard.strongest_words} />
+            </div>
+          </>
+        ) : null}
+      </section>
+    </main>
+  );
+}

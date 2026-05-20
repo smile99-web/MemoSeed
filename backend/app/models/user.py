@@ -15,6 +15,8 @@ if TYPE_CHECKING:
     from app.models.daily_plan import DailyPlan
     from app.models.learning_item import LearningItem
     from app.models.refresh_token import RefreshToken
+    from app.models.study_time_log import StudyTimeLog
+    from app.models.user_model_settings import UserModelSettings
 
 
 class User(Base):
@@ -33,4 +35,6 @@ class User(Base):
     learning_items: Mapped[list["LearningItem"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     daily_plans: Mapped[list["DailyPlan"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     ai_daily_reports: Mapped[list["AiDailyReport"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    study_time_logs: Mapped[list["StudyTimeLog"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    model_settings: Mapped["UserModelSettings | None"] = relationship(back_populates="user", cascade="all, delete-orphan", uselist=False)

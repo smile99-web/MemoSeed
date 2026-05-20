@@ -33,3 +33,55 @@ class MemoryScheduleResponse(BaseModel):
     memory_state: MemoryStateRead
     review_log: ReviewLogRead
     mistake_log: MistakeLogRead | None
+
+
+class WordMasterySummary(BaseModel):
+    word: str
+    status: str
+    memory_strength: float
+    forget_risk: float
+    review_count: int
+    mistake_count: int
+    interval_days: float
+    next_review_at: datetime | None
+
+
+class ReviewBucket(BaseModel):
+    label: str
+    count: int
+
+
+class StudyTimeLogRequest(BaseModel):
+    course_id: UUID | None = None
+    duration_seconds: int = Field(ge=1, le=3600)
+
+
+class StudyTimeSummary(BaseModel):
+    today_seconds: int
+    week_seconds: int
+    month_seconds: int
+    year_seconds: int
+    total_seconds: int
+
+
+class MemoryDashboardResponse(BaseModel):
+    total_items: int
+    total_words: int
+    mastered_words: int
+    learning_words: int
+    weak_words: int
+    due_now_count: int
+    overdue_count: int
+    average_memory_strength: float
+    average_forget_risk: float
+    average_interval_days: float
+    total_reviews: int
+    correct_reviews: int
+    accuracy_rate: float
+    total_mistakes: int
+    unresolved_mistakes: int
+    next_review_at: datetime | None
+    study_time: StudyTimeSummary
+    review_buckets: list[ReviewBucket]
+    weakest_words: list[WordMasterySummary]
+    strongest_words: list[WordMasterySummary]

@@ -6,6 +6,8 @@ from app.api.v1.learning.router import router as learning_router
 from app.api.v1.memory.router import router as memory_router
 from app.api.v1.reports.router import router as reports_router
 from app.api.v1.review.router import router as review_router
+from app.api.v1.settings.router import router as settings_router
+from app.api.v1.tts.router import router as tts_router
 from app.api.v1.users.router import router as users_router
 
 api_router = APIRouter()
@@ -16,3 +18,5 @@ api_router.include_router(learning_router, prefix="/learning", tags=["learning"]
 api_router.include_router(review_router, prefix="/review", tags=["review"])
 api_router.include_router(memory_router, prefix="/memory", tags=["memory"])
 api_router.include_router(reports_router, prefix="/reports", tags=["reports"])
+api_router.include_router(settings_router, prefix="/settings", tags=["settings"])
+api_router.include_router(tts_router, prefix="/tts", tags=["tts"])

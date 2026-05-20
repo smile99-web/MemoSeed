@@ -7,8 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { getAccessToken } from "@/lib/auth";
 import { Course, CoursePackage, createCourse, createCoursePackage, deleteCourse, deleteCoursePackage, listCoursePackages, listCourses } from "@/lib/courses";
-import { LearningImportResponse, LearningItem, listLearningItems, uploadLearningItems, validateImportFile } from "@/lib/learning";
-import { getModelSettings } from "@/lib/model-settings";
+import { LearningImportProgress, LearningImportResponse, LearningItem, listLearningItems, uploadLearningItems, validateImportFile } from "@/lib/learning";
+import { ModelSettings, getModelSettings, loadPersistedModelSettings } from "@/lib/model-settings";
 
 const itemTypeLabels: Record<LearningItem["item_type"], string> = {
   word: "单词",
@@ -50,7 +50,9 @@ export default function LearningImportPage() {
   const [deletingPackageId, setDeletingPackageId] = useState<string | null>(null);
   const [deletingCourseId, setDeletingCourseId] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [importProgress, setImportProgress] = useState<LearningImportProgress | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [modelSettings, setModelSettings] = useState<ModelSettings>(getModelSettings());
 
   const selectedPackage = packages.find((coursePackage) => coursePackage.id === selectedPackageId) ?? null;
   const selectedCourse = courses.find((course) => course.id === selectedCourseId) ?? null;
@@ -108,6 +110,7 @@ export default function LearningImportPage() {
 
   useEffect(() => {
     void loadPackages();
+    void loadPersistedModelSettings().then(setModelSettings);
   }, []);
 
   useEffect(() => {
@@ -299,13 +302,19 @@ export default function LearningImportPage() {
     setIsUploading(true);
     setErrorMessage(null);
     setResult(null);
+    setImportProgress({ percent: 5, message: "准备导入..." });
 
     try {
-      const response = await uploadLearningItems(file, selectedCourseId, accessToken, getModelSettings());
+      const response = await uploadLearningItems(file, selectedCourseId, accessToken, modelSettings, {
+        onProgress: setImportProgress,
+      });
       setResult(response);
+      setImportProgress({ percent: 95, message: "正在刷新当前课程内容..." });
       await refreshItems(selectedCourseId);
+      setImportProgress({ percent: 100, message: "导入完成" });
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "导入失败");
+      setImportProgress(null);
     } finally {
       setIsUploading(false);
     }
@@ -495,6 +504,23 @@ export default function LearningImportPage() {
                 <Button disabled={!selectedCourseId || isUploading} type="submit">
                   {isUploading ? "导入中..." : "开始导入"}
                 </Button>
+                {importProgress ? (
+                  <div className="space-y-2" role="status" aria-live="polite">
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span>{importProgress.message}</span>
+                      <span>{importProgress.percent}%</span>
+                    </div>
+                    <div className="h-2 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-primary transition-all duration-300"
+                        style={{ width: `${importProgress.percent}%` }}
+                      />
+                    </div>
+                    {isUploading ? (
+                      <p className="text-xs text-muted-foreground">如果文件里缺少中文释义，系统会尝试调用当前 LLM 配置补全；模型不可用时会自动跳过并返回原因。</p>
+                    ) : null}
+                  </div>
+                ) : null}
               </form>
             </CardContent>
           </Card>

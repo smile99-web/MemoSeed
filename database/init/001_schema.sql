@@ -20,6 +20,14 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     revoked_at TIMESTAMPTZ
 );
 
+CREATE TABLE IF NOT EXISTS user_model_settings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    settings JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS course_packages (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -126,9 +134,18 @@ CREATE TABLE IF NOT EXISTS ai_daily_reports (
     UNIQUE (user_id, report_date)
 );
 
+CREATE TABLE IF NOT EXISTS study_time_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    course_id UUID REFERENCES courses(id) ON DELETE SET NULL,
+    duration_seconds INTEGER NOT NULL DEFAULT 0 CHECK (duration_seconds >= 0),
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token_hash ON refresh_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires_at ON refresh_tokens(expires_at);
+CREATE INDEX IF NOT EXISTS idx_user_model_settings_user_id ON user_model_settings(user_id);
 CREATE INDEX IF NOT EXISTS idx_course_packages_user_id ON course_packages(user_id);
 CREATE INDEX IF NOT EXISTS idx_courses_user_id ON courses(user_id);
 CREATE INDEX IF NOT EXISTS idx_courses_package_id ON courses(package_id);
@@ -145,3 +162,6 @@ CREATE INDEX IF NOT EXISTS idx_mistake_logs_learning_item_id ON mistake_logs(lea
 CREATE INDEX IF NOT EXISTS idx_mistake_logs_occurred_at ON mistake_logs(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_daily_plans_user_date ON daily_plans(user_id, plan_date);
 CREATE INDEX IF NOT EXISTS idx_ai_daily_reports_user_date ON ai_daily_reports(user_id, report_date);
+CREATE INDEX IF NOT EXISTS idx_study_time_logs_user_id ON study_time_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_study_time_logs_course_id ON study_time_logs(course_id);
+CREATE INDEX IF NOT EXISTS idx_study_time_logs_recorded_at ON study_time_logs(recorded_at);

@@ -7,14 +7,25 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
+from app.models.course import Course
 from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
+from app.models.study_time_log import StudyTimeLog
 from app.models.user import User
-from app.schemas.memory import MemoryScheduleResponse, MemoryStateRead, ReviewScoreRequest
+from app.schemas.memory import MemoryDashboardResponse, MemoryScheduleResponse, MemoryStateRead, ReviewScoreRequest, StudyTimeLogRequest
+from app.services.memory_dashboard import build_memory_dashboard
 from app.schemas.review import MistakeLogRead, ReviewLogRead
 from app.services.memory_scheduler import schedule_memory_review
 
 router = APIRouter()
+
+
+@router.get("/dashboard", response_model=MemoryDashboardResponse)
+def get_memory_dashboard(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> MemoryDashboardResponse:
+    return build_memory_dashboard(db, current_user.id)
 
 
 @router.get("/states/{learning_item_id}", response_model=MemoryStateRead)
@@ -55,3 +66,18 @@ def schedule_next_review(
         review_log=ReviewLogRead.model_validate(result.review_log),
         mistake_log=MistakeLogRead.model_validate(result.mistake_log) if result.mistake_log is not None else None,
     )
+
+
+@router.post("/study-time", status_code=status.HTTP_204_NO_CONTENT)
+def record_study_time(
+    payload: StudyTimeLogRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> None:
+    if payload.course_id is not None:
+        course = db.scalar(select(Course).where(Course.id == payload.course_id, Course.user_id == current_user.id))
+        if course is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Course not found")
+
+    db.add(StudyTimeLog(user_id=current_user.id, course_id=payload.course_id, duration_seconds=payload.duration_seconds))
+    db.commit()

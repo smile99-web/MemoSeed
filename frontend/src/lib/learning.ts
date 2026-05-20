@@ -33,8 +33,26 @@ export interface LearningTranslationResponse {
   chinese_text: string;
 }
 
+export interface DynamicSentenceResponse {
+  english_text: string;
+  chinese_text: string;
+  focus_words: string[];
+  known_words: string[];
+  weak_words: string[];
+}
+
 export interface ApiErrorResponse {
   detail?: string;
+}
+
+export interface LearningImportProgress {
+  percent: number;
+  message: string;
+}
+
+export interface UploadLearningItemsOptions {
+  onProgress?: (progress: LearningImportProgress) => void;
+  timeoutMs?: number;
 }
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
@@ -101,27 +119,115 @@ export async function uploadLearningItems(
   courseId: string,
   accessToken: string,
   modelSettings: ModelSettings,
+  options: UploadLearningItemsOptions = {},
 ): Promise<LearningImportResponse> {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("course_id", courseId);
+  formData.append("llm_provider", modelSettings.llmProvider);
   formData.append("llm_base_url", modelSettings.llmBaseUrl);
   formData.append("llm_model", modelSettings.llmModel);
+  formData.append("llm_api_key", modelSettings.llmApiKey);
 
-  const response = await fetchWithAuth(
-    `${apiBaseUrl}/learning/imports`,
-    {
-      method: "POST",
-      body: formData,
-    },
-    accessToken,
-  );
+  options.onProgress?.({ percent: 8, message: "准备上传文件..." });
 
+  const response = await uploadFormDataWithAuth(`${apiBaseUrl}/learning/imports`, formData, accessToken, options);
+  return response;
+}
+
+async function uploadFormDataWithAuth(
+  url: string,
+  formData: FormData,
+  accessToken: string,
+  options: UploadLearningItemsOptions,
+): Promise<LearningImportResponse> {
+  let response = await uploadFormData(url, formData, accessToken, options);
+  if (response.status !== 401) {
+    return parseUploadResponse(response);
+  }
+
+  const refreshedAccessToken = await getFreshAccessToken();
+  if (!refreshedAccessToken) {
+    return parseUploadResponse(response);
+  }
+
+  options.onProgress?.({ percent: 8, message: "登录状态已刷新，重新上传文件..." });
+  response = await uploadFormData(url, formData, refreshedAccessToken, options);
+  return parseUploadResponse(response);
+}
+
+async function parseUploadResponse(response: Response): Promise<LearningImportResponse> {
   if (!response.ok) {
     throw new Error(await parseUploadError(response));
   }
 
   return (await response.json()) as LearningImportResponse;
+}
+
+function uploadFormData(
+  url: string,
+  formData: FormData,
+  accessToken: string,
+  options: UploadLearningItemsOptions,
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", url);
+    request.timeout = options.timeoutMs ?? 5 * 60 * 1000;
+    request.setRequestHeader("Authorization", `Bearer ${accessToken}`);
+    request.responseType = "text";
+
+    request.upload.onprogress = (event) => {
+      if (!event.lengthComputable) {
+        options.onProgress?.({ percent: 25, message: "正在上传文件..." });
+        return;
+      }
+
+      const uploadPercent = Math.round((event.loaded / event.total) * 60);
+      options.onProgress?.({ percent: Math.min(70, 10 + uploadPercent), message: "正在上传文件..." });
+    };
+
+    request.upload.onload = () => {
+      options.onProgress?.({ percent: 78, message: "文件已上传，正在解析并导入..." });
+    };
+
+    request.onload = () => {
+      options.onProgress?.({ percent: 90, message: "导入完成，正在整理结果..." });
+      resolve(
+        new Response(request.responseText, {
+          status: request.status,
+          statusText: request.statusText,
+          headers: parseXhrHeaders(request.getAllResponseHeaders()),
+        }),
+      );
+    };
+
+    request.onerror = () => {
+      reject(new Error("上传失败：网络连接异常"));
+    };
+
+    request.ontimeout = () => {
+      reject(new Error("上传超时：请检查本地模型或网络模型是否可用，或先给文件补充中文释义后再导入"));
+    };
+
+    request.send(formData);
+  });
+}
+
+function parseXhrHeaders(rawHeaders: string): Headers {
+  const headers = new Headers();
+  rawHeaders
+    .trim()
+    .split(/[\r\n]+/)
+    .filter(Boolean)
+    .forEach((line) => {
+      const separatorIndex = line.indexOf(":");
+      if (separatorIndex <= 0) {
+        return;
+      }
+      headers.append(line.slice(0, separatorIndex).trim(), line.slice(separatorIndex + 1).trim());
+    });
+  return headers;
 }
 
 export async function translateLearningText(
@@ -138,8 +244,10 @@ export async function translateLearningText(
       },
       body: JSON.stringify({
         english_text: englishText,
+        llm_provider: modelSettings.llmProvider,
         llm_base_url: modelSettings.llmBaseUrl,
         llm_model: modelSettings.llmModel,
+        llm_api_key: modelSettings.llmApiKey,
       }),
     },
     accessToken,
@@ -150,6 +258,67 @@ export async function translateLearningText(
   }
 
   return (await response.json()) as LearningTranslationResponse;
+}
+
+export async function logWordMistake(
+  learningItemId: string,
+  expectedWord: string,
+  actualWord: string,
+  accessToken: string,
+): Promise<void> {
+  const response = await fetchWithAuth(
+    `${apiBaseUrl}/learning/word-mistakes`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        learning_item_id: learningItemId,
+        expected_word: expectedWord,
+        actual_word: actualWord,
+      }),
+    },
+    accessToken,
+  );
+
+  if (!response.ok) {
+    throw new Error(await parseUploadError(response));
+  }
+}
+
+export async function generateDynamicSentence(
+  payload: {
+    course_id: string | null;
+    current_sentence: string;
+    mistaken_words: string[];
+  },
+  accessToken: string,
+  modelSettings: ModelSettings,
+): Promise<DynamicSentenceResponse> {
+  const response = await fetchWithAuth(
+    `${apiBaseUrl}/learning/dynamic-sentences`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ...payload,
+        llm_provider: modelSettings.llmProvider,
+        llm_base_url: modelSettings.llmBaseUrl,
+        llm_model: modelSettings.llmModel,
+        llm_api_key: modelSettings.llmApiKey,
+      }),
+    },
+    accessToken,
+  );
+
+  if (!response.ok) {
+    throw new Error(await parseUploadError(response));
+  }
+
+  return (await response.json()) as DynamicSentenceResponse;
 }
 
 export async function listLearningItems(accessToken: string, courseId?: string): Promise<LearningItem[]> {

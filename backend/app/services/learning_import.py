@@ -160,6 +160,7 @@ def import_learning_items(
     imported_items: list[LearningItem] = []
     skipped_items: list[ImportSkippedItem] = []
     seen_keys: set[tuple[str, str]] = set()
+    translation_failure_reason: str | None = None
 
     existing_rows = db.execute(
         select(func.lower(LearningItem.english_text), LearningItem.item_type).where(
@@ -184,10 +185,14 @@ def import_learning_items(
             if translation_settings is None:
                 skipped_items.append(ImportSkippedItem(english_text=parsed_item.english_text, reason="缺少中文释义，且未配置可用的 LLM 翻译服务"))
                 continue
+            if translation_failure_reason is not None:
+                skipped_items.append(ImportSkippedItem(english_text=parsed_item.english_text, reason=translation_failure_reason))
+                continue
             try:
                 chinese_text = translate_english_to_chinese(parsed_item.english_text, translation_settings)
             except ValueError as exc:
-                skipped_items.append(ImportSkippedItem(english_text=parsed_item.english_text, reason=str(exc)))
+                translation_failure_reason = str(exc)
+                skipped_items.append(ImportSkippedItem(english_text=parsed_item.english_text, reason=translation_failure_reason))
                 continue
 
         learning_item = LearningItem(

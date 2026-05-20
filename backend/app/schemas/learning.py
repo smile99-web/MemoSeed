@@ -42,10 +42,40 @@ class LearningImportResponse(BaseModel):
 
 class LearningTranslationRequest(BaseModel):
     english_text: str = Field(min_length=1)
+    llm_provider: str | None = None
     llm_base_url: str | None = None
     llm_model: str | None = None
+    llm_api_key: str | None = None
 
 
 class LearningTranslationResponse(BaseModel):
     english_text: str
     chinese_text: str
+
+
+class WordMistakeLogRequest(BaseModel):
+    learning_item_id: UUID
+    expected_word: str = Field(min_length=1)
+    actual_word: str = ""
+
+
+class WordMistakeLogResponse(BaseModel):
+    logged_count: int
+
+
+class DynamicSentenceRequest(BaseModel):
+    course_id: UUID | None = None
+    current_sentence: str = ""
+    mistaken_words: list[str] = Field(default_factory=list)
+    llm_provider: str | None = None
+    llm_base_url: str | None = None
+    llm_model: str | None = None
+    llm_api_key: str | None = None
+
+
+class DynamicSentenceResponse(BaseModel):
+    english_text: str
+    chinese_text: str
+    focus_words: list[str]
+    known_words: list[str]
+    weak_words: list[str]
