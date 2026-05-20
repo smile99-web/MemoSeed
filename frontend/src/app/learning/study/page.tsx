@@ -9,7 +9,7 @@ import { getAccessToken, getAuthUser } from "@/lib/auth";
 import { generateDynamicSentence, LearningItem, listLearningItems, logWordMistake, translateLearningText } from "@/lib/learning";
 import { recordStudyTime, scheduleMemoryReview } from "@/lib/memory";
 import { ModelSettings, defaultModelSettings, getModelSettings, loadPersistedModelSettings } from "@/lib/model-settings";
-import { synthesizeVolcengineSpeech } from "@/lib/tts";
+import { playAudioBlob, synthesizeKokoroSpeech, synthesizeVolcengineSpeech } from "@/lib/tts";
 
 const itemTypeLabels: Record<LearningItem["item_type"], string> = {
   word: "单词",
@@ -20,7 +20,6 @@ const itemTypeLabels: Record<LearningItem["item_type"], string> = {
 const annotationColors = ["border-primary", "border-emerald-500", "border-sky-500", "border-violet-500", "border-amber-500"] as const;
 const STUDY_IDLE_TIMEOUT_MS = 20_000;
 const STUDY_TIME_FLUSH_SECONDS = 10;
-
 const commonPartLabels: Record<string, string> = {
   i: "代词",
   you: "代词",
@@ -86,16 +85,24 @@ function getWordInputWidth(word: string): string {
   return `${Math.min(Math.max(normalizedLength * 2.1, 4.5), 18)}rem`;
 }
 
-function speakWithBrowser(text: string, language: string) {
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function speakWithBrowser(text: string, language: string): Promise<void> {
   if (!text.trim() || !("speechSynthesis" in window)) {
-    return;
+    return Promise.resolve();
   }
 
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = language;
   utterance.rate = 0.85;
-  window.speechSynthesis.speak(utterance);
+  return new Promise((resolve) => {
+    utterance.onend = () => resolve();
+    utterance.onerror = () => resolve();
+    window.speechSynthesis.speak(utterance);
+  });
 }
 
 async function speakWithKokoro(text: string, voice: string, language: string, settings: ModelSettings) {
@@ -105,12 +112,10 @@ async function speakWithKokoro(text: string, voice: string, language: string, se
 
   try {
     const audioBlob = settings.ttsProvider === "volcark" ? await speakWithVolcengine(text, voice, language, settings) : await speakWithKokoroApi(text, voice, settings);
-    const audioUrl = URL.createObjectURL(audioBlob);
-    const audio = new Audio(audioUrl);
-    audio.onended = () => URL.revokeObjectURL(audioUrl);
-    await audio.play();
-  } catch {
-    speakWithBrowser(text, language);
+    await playAudioBlob(audioBlob);
+  } catch (error) {
+    console.warn("课程学习 TTS 播放失败，已回退到浏览器语音。", error);
+    await speakWithBrowser(text, language);
   }
 }
 
@@ -140,23 +145,12 @@ function getDynamicReviewWords(item: LearningItem | null): string[] {
 }
 
 async function speakWithKokoroApi(text: string, voice: string, settings: ModelSettings): Promise<Blob> {
-  const response = await fetch(`${settings.ttsApiUrl.replace(/\/$/, "")}/v1/audio/speech`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: settings.ttsProvider,
-      input: text,
-      voice,
-      response_format: "mp3",
-    }),
-  });
-  if (!response.ok) {
-    throw new Error(`TTS failed: ${response.status}`);
+  const accessToken = getAccessToken();
+  if (!accessToken) {
+    throw new Error("Login required for Kokoro TTS");
   }
 
-  return response.blob();
+  return synthesizeKokoroSpeech(text, voice, settings, accessToken);
 }
 
 async function speakWithVolcengine(text: string, voice: string, language: string, settings: ModelSettings): Promise<Blob> {
@@ -201,6 +195,8 @@ function StudyContent() {
   const lastStudyTickAtRef = useRef(Date.now());
   const lastKeyboardAtRef = useRef(Date.now());
   const isFlushingStudyTimeRef = useRef(false);
+  const voiceSequenceRef = useRef(0);
+  const modelSettingsRef = useRef<ModelSettings>(defaultModelSettings);
 
   const currentItem = items[currentIndex] ?? null;
   const currentWords = useMemo(() => tokenizeEnglish(currentItem?.english_text ?? ""), [currentItem]);
@@ -218,6 +214,73 @@ function StudyContent() {
     setModelSettings(getModelSettings());
     void loadPersistedModelSettings().then(setModelSettings);
   }, []);
+
+  useEffect(() => {
+    modelSettingsRef.current = modelSettings;
+  }, [modelSettings]);
+
+  const startVoiceSequence = useCallback(function startVoiceSequence(): number {
+    voiceSequenceRef.current += 1;
+    window.speechSynthesis?.cancel();
+    return voiceSequenceRef.current;
+  }, []);
+
+  const isCurrentVoiceSequence = useCallback(function isCurrentVoiceSequence(sequenceId: number): boolean {
+    return voiceSequenceRef.current === sequenceId;
+  }, []);
+
+  const waitInVoiceSequence = useCallback(async function waitInVoiceSequence(sequenceId: number, ms: number): Promise<boolean> {
+    await wait(ms);
+    return isCurrentVoiceSequence(sequenceId);
+  }, [isCurrentVoiceSequence]);
+
+  const speakInVoiceSequence = useCallback(async function speakInVoiceSequence(sequenceId: number, text: string, voice: string, language: string, settings: ModelSettings): Promise<boolean> {
+    if (!isCurrentVoiceSequence(sequenceId)) {
+      return false;
+    }
+    await speakWithKokoro(text, voice, language, settings);
+    return isCurrentVoiceSequence(sequenceId);
+  }, [isCurrentVoiceSequence]);
+
+  const playCurrentItemIntro = useCallback(async function playCurrentItemIntro(item: LearningItem, sequenceId: number) {
+    const settings = modelSettingsRef.current;
+    if (!(await waitInVoiceSequence(sequenceId, 1000))) {
+      return;
+    }
+    if (!(await speakInVoiceSequence(sequenceId, item.chinese_text, settings.ttsChineseVoice, "zh-CN", settings))) {
+      return;
+    }
+    if (!(await waitInVoiceSequence(sequenceId, 1000))) {
+      return;
+    }
+    if (!(await speakInVoiceSequence(sequenceId, item.english_text, settings.ttsEnglishVoice, "en-US", settings))) {
+      return;
+    }
+    if (!(await waitInVoiceSequence(sequenceId, 2000))) {
+      return;
+    }
+    await speakInVoiceSequence(sequenceId, item.english_text, settings.ttsEnglishVoice, "en-US", settings);
+  }, [speakInVoiceSequence, waitInVoiceSequence]);
+
+  const playChineseThenEnglish = useCallback(async function playChineseThenEnglish(chineseText: string, englishText: string, sequenceId = startVoiceSequence()) {
+    const settings = modelSettingsRef.current;
+    if (!(await speakInVoiceSequence(sequenceId, chineseText, settings.ttsChineseVoice, "zh-CN", settings))) {
+      return;
+    }
+    if (!(await waitInVoiceSequence(sequenceId, 1000))) {
+      return;
+    }
+    await speakInVoiceSequence(sequenceId, englishText, settings.ttsEnglishVoice, "en-US", settings);
+  }, [speakInVoiceSequence, startVoiceSequence, waitInVoiceSequence]);
+
+  const handleSpeakEnglish = useCallback(function handleSpeakEnglish() {
+    if (!currentItem?.english_text) {
+      return;
+    }
+    const sequenceId = startVoiceSequence();
+    const settings = modelSettingsRef.current;
+    void speakInVoiceSequence(sequenceId, currentItem.english_text, settings.ttsEnglishVoice, "en-US", settings);
+  }, [currentItem, speakInVoiceSequence, startVoiceSequence]);
 
   const flushStudyTime = useCallback(async function flushStudyTime(force = false) {
     if (isFlushingStudyTimeRef.current) {
@@ -312,10 +375,11 @@ function StudyContent() {
     setIsTranslatingWords(false);
     setFeedbackMessage(null);
     window.setTimeout(() => inputRefs.current[dynamicReviewWordIndexes[0] ?? 0]?.focus(), 0);
-    if (currentItem?.chinese_text) {
-      void speakWithKokoro(currentItem.chinese_text, modelSettings.ttsChineseVoice, "zh-CN", modelSettings);
+    const sequenceId = startVoiceSequence();
+    if (currentItem?.chinese_text && currentItem.english_text) {
+      void playCurrentItemIntro(currentItem, sequenceId);
     }
-  }, [currentItem, currentWords, dynamicReviewWordIndexes, modelSettings]);
+  }, [currentItem, currentWords, dynamicReviewWordIndexes, playCurrentItemIntro, startVoiceSequence]);
 
   useEffect(() => {
     if (answerState === "mistake-word-practice") {
@@ -525,14 +589,14 @@ function StudyContent() {
       setFeedbackMessage(dynamicSentenceFeedback ? `${dynamicSentenceFeedback} 现在先单独拼写本句错词。` : "本句完成。先单独拼写错词，正确后再进入下一句。");
       const firstTranslation = practiceTranslations[uniqueMistakenWords[0]];
       if (firstTranslation) {
-        await speakWithKokoro(firstTranslation, modelSettings.ttsChineseVoice, "zh-CN", modelSettings);
+        await playChineseThenEnglish(firstTranslation, uniqueMistakenWords[0]);
       }
       return;
     }
 
     setAnswerState("sentence-complete");
     setFeedbackMessage(dynamicSentenceFeedback ? `${dynamicSentenceFeedback} 按空格查看每个单词的中文意思。` : "整句拼写正确。按空格查看每个单词的中文意思。");
-    await speakWithKokoro(currentItem.english_text, modelSettings.ttsEnglishVoice, "en-US", modelSettings);
+    await playChineseThenEnglish(currentItem.chinese_text, currentItem.english_text);
   }
 
   function updateWordAnswer(index: number, value: string) {
@@ -579,12 +643,7 @@ function StudyContent() {
     }
 
     setFeedbackMessage(translatedWord ? `正确单词：${expectedWord}，中文：${translatedWord}` : `正确单词：${expectedWord}`);
-    await speakWithKokoro(expectedWord, modelSettings.ttsEnglishVoice, "en-US", modelSettings);
-    if (translatedWord) {
-      window.setTimeout(() => {
-        void speakWithKokoro(translatedWord, modelSettings.ttsChineseVoice, "zh-CN", modelSettings);
-      }, 900);
-    }
+    await playChineseThenEnglish(translatedWord, expectedWord);
   }
 
   function checkWord(index: number) {
@@ -678,7 +737,7 @@ function StudyContent() {
       setMistakePracticeStatus("incorrect");
       setMistakePracticeAnswer("");
       setFeedbackMessage(`正确单词：${expectedWord}。请再拼一次，连续错误 ${nextErrorCount}/3。`);
-      await speakWithKokoro(expectedWord, modelSettings.ttsEnglishVoice, "en-US", modelSettings);
+      await playChineseThenEnglish(currentMistakePracticeTranslation, expectedWord);
       return;
     }
 
@@ -692,7 +751,7 @@ function StudyContent() {
       setFeedbackMessage("正确。继续拼写下一个错词。");
       const nextTranslation = mistakePracticeTranslations[nextWord];
       if (nextTranslation) {
-        await speakWithKokoro(nextTranslation, modelSettings.ttsChineseVoice, "zh-CN", modelSettings);
+        await playChineseThenEnglish(nextTranslation, nextWord);
       }
       return;
     }
@@ -885,12 +944,16 @@ function StudyContent() {
               {feedbackMessage ? <p className={answerState !== "typing" ? "text-lg font-bold text-emerald-600" : "text-lg font-bold text-red-600"}>{feedbackMessage}</p> : null}
               <div className="flex flex-wrap justify-center gap-3">
                 {answerState === "mistake-word-practice" ? (
-                  <Button onClick={() => void checkMistakePracticeWord()} type="button">判定错词</Button>
+                  <>
+                    <Button onClick={() => void checkMistakePracticeWord()} type="button">判定错词</Button>
+                    <Button onClick={handleSpeakEnglish} type="button" variant="secondary">朗读英文</Button>
+                  </>
                 ) : (
                   <>
                     <Button disabled={answerState !== "typing"} onClick={() => checkWord(activeWordIndex)} type="button">
                       {isDynamicFillBlankItem ? "判定填空" : "判定当前单词"}
                     </Button>
+                    <Button onClick={handleSpeakEnglish} type="button" variant="secondary">朗读英文</Button>
                   </>
                 )}
               </div>

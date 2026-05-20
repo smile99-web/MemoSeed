@@ -17,7 +17,7 @@ import {
   onlineModelModeSettings,
   savePersistedModelSettings,
 } from "@/lib/model-settings";
-import { synthesizeVolcengineSpeech } from "@/lib/tts";
+import { playAudioBlob, synthesizeKokoroSpeech, synthesizeVolcengineSpeech, unlockAudio } from "@/lib/tts";
 
 const kokoroEnglishVoices = [
   "af_heart",
@@ -46,6 +46,9 @@ const volcengineEnglishVoices = [
   { label: "Dacey（美式女声）", value: "en_female_dacey_uranus_bigtts" },
   { label: "Tim（美式男声）", value: "en_male_tim_uranus_bigtts" },
   { label: "Stokie（美式女声）", value: "en_female_stokie_uranus_bigtts" },
+  { label: "Vivi 2.0（中英双语女声）", value: "zh_female_vv_uranus_bigtts" },
+  { label: "云舟 2.0（中英混合男声）", value: "zh_male_m191_uranus_bigtts" },
+  { label: "魅力苏菲 2.0（中英混合男声）", value: "zh_male_sophie_uranus_bigtts" },
 ] as const;
 
 const volcengineChineseVoices = [
@@ -57,6 +60,13 @@ const volcengineChineseVoices = [
   { label: "魅力苏菲 2.0（通用男声）", value: "zh_male_sophie_uranus_bigtts" },
   { label: "知性灿灿 2.0（角色扮演女声）", value: "zh_female_cancan_uranus_bigtts" },
   { label: "清新女声 2.0", value: "zh_female_qingxinnvsheng_uranus_bigtts" },
+  { label: "爽快思思 2.0（爽朗女声）", value: "zh_female_shuangkuaisisi_uranus_bigtts" },
+  { label: "邻家女孩 2.0（亲切女声）", value: "zh_female_linjianvhai_uranus_bigtts" },
+  { label: "魅力女友 2.0（温柔女声）", value: "zh_female_meilinvyou_uranus_bigtts" },
+  { label: "撒娇学妹 2.0（可爱女声）", value: "zh_female_sajiaoxuemei_uranus_bigtts" },
+  { label: "大壹 2.0（视频配音男声）", value: "zh_male_dayi_uranus_bigtts" },
+  { label: "猴哥 2.0（角色男声）", value: "zh_male_sunwukong_uranus_bigtts" },
+  { label: "儒雅逸辰 2.0（书卷男声）", value: "zh_male_ruyayichen_uranus_bigtts" },
 ] as const;
 
 const workflowCards = [
@@ -92,6 +102,7 @@ export default function HomePage() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [isTestingLocalModels, setIsTestingLocalModels] = useState(false);
   const [isTestingNetworkModels, setIsTestingNetworkModels] = useState(false);
   const [modelSettings, setModelSettings] = useState<ModelSettings>(defaultModelSettings);
 
@@ -125,9 +136,13 @@ export default function HomePage() {
     setIsSavingSettings(true);
     setSettingsMessage(null);
     try {
-      await savePersistedModelSettings(modelSettings);
-      setSettingsMessage("模型设置已保存。");
-      setIsSettingsOpen(false);
+      const result = await savePersistedModelSettings(modelSettings);
+      if (result.synced) {
+        setSettingsMessage("模型设置已保存。");
+        setIsSettingsOpen(false);
+        return;
+      }
+      setSettingsMessage(result.error ? `模型设置已保存到本地；服务器同步失败：${result.error}` : "模型设置已保存到本地。");
     } catch (error) {
       setSettingsMessage(error instanceof Error ? error.message : "模型设置保存失败");
     } finally {
@@ -135,7 +150,44 @@ export default function HomePage() {
     }
   }
 
+  async function handleTestLocalModels() {
+    unlockAudio();
+    const accessToken = getAccessToken();
+    if (!accessToken) {
+      setSettingsMessage("请先登录后再测试本地模型。");
+      return;
+    }
+
+    setIsTestingLocalModels(true);
+    setSettingsMessage("正在测试本地模型...");
+    const results: string[] = [];
+
+    try {
+      await translateLearningText("hello", accessToken, { ...modelSettings, modelMode: "local", llmProvider: "ollama", ttsProvider: "kokoro" });
+      results.push("Ollama：连通正常");
+    } catch (error) {
+      results.push(`Ollama：${error instanceof Error ? error.message : "测试失败"}`);
+    }
+
+    try {
+      const audio = await synthesizeKokoroSpeech("你好，这是本地 Kokoro TTS 中文音色测试。", modelSettings.ttsChineseVoice, { ...modelSettings, modelMode: "local", ttsProvider: "kokoro" }, accessToken);
+      if (audio.size > 0) {
+        await playAudioBlob(audio);
+        results.push("Kokoro TTS：连通正常");
+      } else {
+        results.push("Kokoro TTS：返回音频为空");
+      }
+    } catch (error) {
+      results.push(`Kokoro TTS：${error instanceof Error ? error.message : "测试失败"}`);
+    } finally {
+      setIsTestingLocalModels(false);
+    }
+
+    setSettingsMessage(results.join("；"));
+  }
+
   async function handleTestNetworkModels() {
+    unlockAudio();
     const accessToken = getAccessToken();
     if (!accessToken) {
       setSettingsMessage("请先登录后再测试网络模型。");
@@ -154,14 +206,30 @@ export default function HomePage() {
     }
 
     try {
-      const audio = await synthesizeVolcengineSpeech("你好", modelSettings.ttsChineseVoice, "zh-CN", { ...modelSettings, modelMode: "online", ttsProvider: "volcark" }, accessToken);
-      results.push(audio.size > 0 ? "火山方舟 TTS：连通正常" : "火山方舟 TTS：返回音频为空");
+      const audio = await synthesizeVolcengineSpeech("你好，正在测试中文音色。", modelSettings.ttsChineseVoice, "zh-CN", { ...modelSettings, modelMode: "online", ttsProvider: "volcark" }, accessToken);
+      if (audio.size > 0) {
+        await playAudioBlob(audio);
+        results.push(`火山方舟中文音色：连通正常（${modelSettings.ttsChineseVoice}）`);
+      } else {
+        results.push(`火山方舟中文音色：返回音频为空（${modelSettings.ttsChineseVoice}）`);
+      }
     } catch (error) {
-      results.push(`火山方舟 TTS：${error instanceof Error ? error.message : "测试失败"}`);
-    } finally {
-      setIsTestingNetworkModels(false);
+      results.push(`火山方舟中文音色（${modelSettings.ttsChineseVoice}）：${error instanceof Error ? error.message : "测试失败"}`);
     }
 
+    try {
+      const audio = await synthesizeVolcengineSpeech("Hello, this is an English voice test.", modelSettings.ttsEnglishVoice, "en-US", { ...modelSettings, modelMode: "online", ttsProvider: "volcark" }, accessToken);
+      if (audio.size > 0) {
+        await playAudioBlob(audio);
+        results.push(`火山方舟英文音色：连通正常（${modelSettings.ttsEnglishVoice}）`);
+      } else {
+        results.push(`火山方舟英文音色：返回音频为空（${modelSettings.ttsEnglishVoice}）`);
+      }
+    } catch (error) {
+      results.push(`火山方舟英文音色（${modelSettings.ttsEnglishVoice}）：${error instanceof Error ? error.message : "测试失败"}`);
+    }
+
+    setIsTestingNetworkModels(false);
     setSettingsMessage(results.join("；"));
   }
 
@@ -262,39 +330,16 @@ export default function HomePage() {
                 </div>
               ) : (
                 <>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium" htmlFor="volcengine-tts-app-id">APP ID</label>
-                    <input
-                      autoComplete="off"
-                      className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-                      id="volcengine-tts-app-id"
-                      placeholder="稍后填写"
-                      value={modelSettings.volcengineTtsAppId}
-                      onChange={(event) => handleModelSettingsChange("volcengineTtsAppId", event.target.value)}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium" htmlFor="volcengine-tts-access-token">Access Token</label>
-                    <input
-                      autoComplete="off"
-                      className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-                      id="volcengine-tts-access-token"
-                      placeholder="稍后填写"
-                      type="password"
-                      value={modelSettings.volcengineTtsAccessToken}
-                      onChange={(event) => handleModelSettingsChange("volcengineTtsAccessToken", event.target.value)}
-                    />
-                  </div>
                   <div className="space-y-2 md:col-span-2">
-                    <label className="text-sm font-medium" htmlFor="volcengine-tts-secret-key">Secret Key / API Key</label>
+                    <label className="text-sm font-medium" htmlFor="volcengine-tts-api-key">X-Api-Key</label>
                     <input
                       autoComplete="off"
                       className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-                      id="volcengine-tts-secret-key"
+                      id="volcengine-tts-api-key"
                       placeholder="稍后填写"
                       type="password"
-                      value={modelSettings.volcengineTtsSecretKey}
-                      onChange={(event) => handleModelSettingsChange("volcengineTtsSecretKey", event.target.value)}
+                      value={modelSettings.volcengineTtsApiKey}
+                      onChange={(event) => handleModelSettingsChange("volcengineTtsApiKey", event.target.value)}
                     />
                   </div>
                   <div className="space-y-2 md:col-span-2">
@@ -406,6 +451,11 @@ export default function HomePage() {
               <Button onClick={() => setModelSettings(defaultModelSettings)} type="button" variant="outline">
                 恢复默认
               </Button>
+              {modelSettings.modelMode === "local" ? (
+                <Button disabled={isTestingLocalModels} onClick={handleTestLocalModels} type="button" variant="secondary">
+                  {isTestingLocalModels ? "测试中..." : "测试本地模型"}
+                </Button>
+              ) : null}
               {modelSettings.modelMode === "online" ? (
                 <Button disabled={isTestingNetworkModels} onClick={handleTestNetworkModels} type="button" variant="secondary">
                   {isTestingNetworkModels ? "测试中..." : "测试网络模型"}

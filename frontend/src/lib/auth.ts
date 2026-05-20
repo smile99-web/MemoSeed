@@ -33,6 +33,7 @@ export interface LoginPayload {
 const accessTokenKey = "memoseed_access_token";
 const refreshTokenKey = "memoseed_refresh_token";
 const userKey = "memoseed_user";
+let refreshTokenPromise: Promise<string | null> | null = null;
 
 export function validateEmail(email: string): string | null {
   if (!email.trim()) {
@@ -118,6 +119,13 @@ export async function login(payload: LoginPayload): Promise<AuthResponse> {
 }
 
 export async function refreshAccessToken(): Promise<string | null> {
+  refreshTokenPromise ??= refreshAccessTokenOnce().finally(() => {
+    refreshTokenPromise = null;
+  });
+  return refreshTokenPromise;
+}
+
+async function refreshAccessTokenOnce(): Promise<string | null> {
   const refreshToken = getRefreshToken();
   if (!refreshToken) {
     clearAuthSession();
@@ -133,6 +141,9 @@ export async function refreshAccessToken(): Promise<string | null> {
     window.localStorage.setItem(refreshTokenKey, tokens.refresh_token);
     return tokens.access_token;
   } catch {
+    if (getRefreshToken() !== refreshToken) {
+      return getAccessToken();
+    }
     clearAuthSession();
     return null;
   }

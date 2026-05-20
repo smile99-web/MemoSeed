@@ -1,4 +1,5 @@
 import { refreshAccessToken } from "@/lib/auth";
+import { getApiBaseUrl } from "@/lib/api-base-url";
 
 export interface CoursePackage {
   id: string;
@@ -34,7 +35,6 @@ interface ApiErrorResponse {
   detail?: string;
 }
 
-const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
 let refreshTokenPromise: Promise<string | null> | null = null;
 
 async function getFreshAccessToken(): Promise<string | null> {
@@ -73,7 +73,7 @@ async function fetchWithAuth(input: RequestInfo | URL, init: RequestInit, access
 }
 
 export async function listCoursePackages(accessToken: string): Promise<CoursePackage[]> {
-  const response = await fetchWithAuth(`${apiBaseUrl}/courses/packages`, { cache: "no-store" }, accessToken);
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/courses/packages`, { cache: "no-store" }, accessToken);
   if (!response.ok) {
     throw new Error(await parseApiError(response));
   }
@@ -82,7 +82,7 @@ export async function listCoursePackages(accessToken: string): Promise<CoursePac
 
 export async function createCoursePackage(accessToken: string, payload: CoursePackagePayload): Promise<CoursePackage> {
   const response = await fetchWithAuth(
-    `${apiBaseUrl}/courses/packages`,
+    `${getApiBaseUrl()}/courses/packages`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -98,7 +98,7 @@ export async function createCoursePackage(accessToken: string, payload: CoursePa
 
 export async function deleteCoursePackage(accessToken: string, packageId: string): Promise<void> {
   const response = await fetchWithAuth(
-    `${apiBaseUrl}/courses/packages/${packageId}`,
+    `${getApiBaseUrl()}/courses/packages/${packageId}`,
     {
       method: "DELETE",
     },
@@ -110,7 +110,7 @@ export async function deleteCoursePackage(accessToken: string, packageId: string
 }
 
 export async function listCourses(accessToken: string, packageId: string): Promise<Course[]> {
-  const response = await fetchWithAuth(`${apiBaseUrl}/courses/courses?package_id=${packageId}`, { cache: "no-store" }, accessToken);
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/courses/courses?package_id=${packageId}`, { cache: "no-store" }, accessToken);
   if (!response.ok) {
     throw new Error(await parseApiError(response));
   }
@@ -119,7 +119,7 @@ export async function listCourses(accessToken: string, packageId: string): Promi
 
 export async function deleteCourse(accessToken: string, courseId: string): Promise<void> {
   const response = await fetchWithAuth(
-    `${apiBaseUrl}/courses/courses/${courseId}`,
+    `${getApiBaseUrl()}/courses/courses/${courseId}`,
     {
       method: "DELETE",
     },
@@ -132,7 +132,7 @@ export async function deleteCourse(accessToken: string, courseId: string): Promi
 
 export async function createCourse(accessToken: string, payload: CoursePayload): Promise<Course> {
   const response = await fetchWithAuth(
-    `${apiBaseUrl}/courses/courses`,
+    `${getApiBaseUrl()}/courses/courses`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

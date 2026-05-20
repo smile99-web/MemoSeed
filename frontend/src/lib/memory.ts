@@ -1,6 +1,6 @@
 import { refreshAccessToken } from "@/lib/auth";
+import { getApiBaseUrl } from "@/lib/api-base-url";
 
-const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
 let refreshTokenPromise: Promise<string | null> | null = null;
 
 interface ApiErrorResponse {
@@ -99,7 +99,7 @@ async function fetchWithAuth(input: RequestInfo | URL, init: RequestInit, access
 
 export async function scheduleMemoryReview(accessToken: string, payload: ReviewScorePayload): Promise<void> {
   const response = await fetchWithAuth(
-    `${apiBaseUrl}/memory/schedule`,
+    `${getApiBaseUrl()}/memory/schedule`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -116,7 +116,7 @@ export async function scheduleMemoryReview(accessToken: string, payload: ReviewS
 }
 
 export async function getMemoryDashboard(accessToken: string): Promise<MemoryDashboard> {
-  const response = await fetchWithAuth(`${apiBaseUrl}/memory/dashboard`, { cache: "no-store" }, accessToken);
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/memory/dashboard`, { cache: "no-store" }, accessToken);
   if (!response.ok) {
     throw new Error(await parseApiError(response));
   }
@@ -125,7 +125,7 @@ export async function getMemoryDashboard(accessToken: string): Promise<MemoryDas
 
 export async function recordStudyTime(accessToken: string, durationSeconds: number, courseId?: string): Promise<void> {
   const response = await fetchWithAuth(
-    `${apiBaseUrl}/memory/study-time`,
+    `${getApiBaseUrl()}/memory/study-time`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

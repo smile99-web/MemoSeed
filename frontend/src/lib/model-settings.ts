@@ -1,4 +1,4 @@
-import { apiRequest } from "@/lib/api";
+import { ApiRequestError, apiRequest } from "@/lib/api";
 import { getAccessToken, refreshAccessToken } from "@/lib/auth";
 
 export type ModelMode = "local" | "online";
@@ -18,11 +18,14 @@ export interface ModelSettings {
   ttsEnglishVoice: string;
   ttsChineseVoice: string;
   volcengineTtsEndpoint: string;
-  volcengineTtsAppId: string;
-  volcengineTtsAccessToken: string;
-  volcengineTtsSecretKey: string;
+  volcengineTtsApiKey: string;
   volcengineTtsResourceId: string;
   volcengineTtsModel: string;
+}
+
+export interface SaveModelSettingsResult {
+  synced: boolean;
+  error?: string;
 }
 
 const modelSettingsKey = "memoseed_model_settings";
@@ -40,9 +43,7 @@ export const defaultModelSettings: ModelSettings = {
   ttsEnglishVoice: "af_heart",
   ttsChineseVoice: "zf_xiaobei",
   volcengineTtsEndpoint: "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
-  volcengineTtsAppId: "",
-  volcengineTtsAccessToken: "",
-  volcengineTtsSecretKey: "",
+  volcengineTtsApiKey: "",
   volcengineTtsResourceId: "seed-tts-2.0",
   volcengineTtsModel: "seed-tts-2.0-standard",
 };
@@ -135,7 +136,10 @@ export async function loadPersistedModelSettings(accessToken = getAccessToken())
     const settings = normalizeModelSettings(response.settings);
     saveLocalModelSettings(settings);
     return settings;
-  } catch {
+  } catch (error) {
+    if (!isUnauthorizedError(error)) {
+      return localSettings;
+    }
     const refreshedAccessToken = await refreshAccessToken();
     if (!refreshedAccessToken) {
       return localSettings;
@@ -152,10 +156,10 @@ export async function loadPersistedModelSettings(accessToken = getAccessToken())
   }
 }
 
-export async function savePersistedModelSettings(settings: ModelSettings, accessToken = getAccessToken()): Promise<void> {
+export async function savePersistedModelSettings(settings: ModelSettings, accessToken = getAccessToken()): Promise<SaveModelSettingsResult> {
   saveLocalModelSettings(settings);
   if (!accessToken) {
-    return;
+    return { synced: false };
   }
 
   try {
@@ -164,17 +168,30 @@ export async function savePersistedModelSettings(settings: ModelSettings, access
       accessToken,
       body: { settings },
     });
-  } catch {
+    return { synced: true };
+  } catch (error) {
+    if (!isUnauthorizedError(error)) {
+      return { synced: false, error: error instanceof Error ? error.message : "服务器同步失败" };
+    }
     const refreshedAccessToken = await refreshAccessToken();
     if (!refreshedAccessToken) {
-      return;
+      return { synced: false, error: error instanceof Error ? error.message : "服务器同步失败" };
     }
-    await apiRequest<{ settings: Partial<ModelSettings> }, { settings: ModelSettings }>("/settings/model", {
-      method: "PUT",
-      accessToken: refreshedAccessToken,
-      body: { settings },
-    });
+    try {
+      await apiRequest<{ settings: Partial<ModelSettings> }, { settings: ModelSettings }>("/settings/model", {
+        method: "PUT",
+        accessToken: refreshedAccessToken,
+        body: { settings },
+      });
+      return { synced: true };
+    } catch (retryError) {
+      return { synced: false, error: retryError instanceof Error ? retryError.message : "服务器同步失败" };
+    }
   }
+}
+
+function isUnauthorizedError(error: unknown): boolean {
+  return error instanceof ApiRequestError && error.status === 401;
 }
 
 export function normalizeModelSettings(settings: Partial<ModelSettings>): ModelSettings {

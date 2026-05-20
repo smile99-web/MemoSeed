@@ -1,4 +1,5 @@
 import { refreshAccessToken } from "@/lib/auth";
+import { getApiBaseUrl } from "@/lib/api-base-url";
 import { ModelSettings } from "@/lib/model-settings";
 
 export interface LearningItem {
@@ -55,7 +56,6 @@ export interface UploadLearningItemsOptions {
   timeoutMs?: number;
 }
 
-const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
 let refreshTokenPromise: Promise<string | null> | null = null;
 
 async function getFreshAccessToken(): Promise<string | null> {
@@ -131,7 +131,7 @@ export async function uploadLearningItems(
 
   options.onProgress?.({ percent: 8, message: "准备上传文件..." });
 
-  const response = await uploadFormDataWithAuth(`${apiBaseUrl}/learning/imports`, formData, accessToken, options);
+  const response = await uploadFormDataWithAuth(`${getApiBaseUrl()}/learning/imports`, formData, accessToken, options);
   return response;
 }
 
@@ -236,7 +236,7 @@ export async function translateLearningText(
   modelSettings: ModelSettings,
 ): Promise<LearningTranslationResponse> {
   const response = await fetchWithAuth(
-    `${apiBaseUrl}/learning/translations`,
+    `${getApiBaseUrl()}/learning/translations`,
     {
       method: "POST",
       headers: {
@@ -267,7 +267,7 @@ export async function logWordMistake(
   accessToken: string,
 ): Promise<void> {
   const response = await fetchWithAuth(
-    `${apiBaseUrl}/learning/word-mistakes`,
+    `${getApiBaseUrl()}/learning/word-mistakes`,
     {
       method: "POST",
       headers: {
@@ -297,7 +297,7 @@ export async function generateDynamicSentence(
   modelSettings: ModelSettings,
 ): Promise<DynamicSentenceResponse> {
   const response = await fetchWithAuth(
-    `${apiBaseUrl}/learning/dynamic-sentences`,
+    `${getApiBaseUrl()}/learning/dynamic-sentences`,
     {
       method: "POST",
       headers: {
@@ -324,7 +324,7 @@ export async function generateDynamicSentence(
 export async function listLearningItems(accessToken: string, courseId?: string): Promise<LearningItem[]> {
   const queryString = courseId ? `?course_id=${courseId}` : "";
   const response = await fetchWithAuth(
-    `${apiBaseUrl}/learning/items${queryString}`,
+    `${getApiBaseUrl()}/learning/items${queryString}`,
     {
       cache: "no-store",
     },

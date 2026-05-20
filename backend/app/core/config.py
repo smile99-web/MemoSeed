@@ -29,9 +29,7 @@ class Settings(BaseSettings):
 
     tts_provider: str | None = Field(default=None, alias="TTS_PROVIDER")
     volcengine_tts_endpoint: str | None = Field(default=None, alias="VOLCENGINE_TTS_ENDPOINT")
-    volcengine_tts_app_id: str | None = Field(default=None, alias="VOLCENGINE_TTS_APP_ID")
-    volcengine_tts_access_token: str | None = Field(default=None, alias="VOLCENGINE_TTS_ACCESS_TOKEN")
-    volcengine_tts_secret_key: str | None = Field(default=None, alias="VOLCENGINE_TTS_SECRET_KEY")
+    volcengine_tts_api_key: str | None = Field(default=None, alias="VOLCENGINE_TTS_API_KEY")
     volcengine_tts_resource_id: str | None = Field(default=None, alias="VOLCENGINE_TTS_RESOURCE_ID")
     volcengine_tts_model: str | None = Field(default=None, alias="VOLCENGINE_TTS_MODEL")
     volcengine_tts_english_voice: str | None = Field(default=None, alias="VOLCENGINE_TTS_ENGLISH_VOICE")

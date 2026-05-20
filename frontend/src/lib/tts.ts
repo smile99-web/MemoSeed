@@ -1,7 +1,7 @@
 import { refreshAccessToken } from "@/lib/auth";
+import { getApiBaseUrl } from "@/lib/api-base-url";
 import { ModelSettings } from "@/lib/model-settings";
 
-const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
 let refreshTokenPromise: Promise<string | null> | null = null;
 
 async function getFreshAccessToken(): Promise<string | null> {
@@ -33,6 +33,27 @@ export async function synthesizeVolcengineSpeech(
   return response.blob();
 }
 
+export async function synthesizeKokoroSpeech(
+  text: string,
+  voice: string,
+  settings: ModelSettings,
+  accessToken: string,
+): Promise<Blob> {
+  let response = await requestKokoroSpeech(text, voice, settings, accessToken);
+  if (response.status === 401) {
+    const refreshedAccessToken = await getFreshAccessToken();
+    if (refreshedAccessToken) {
+      response = await requestKokoroSpeech(text, voice, settings, refreshedAccessToken);
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(await parseSpeechError(response));
+  }
+
+  return response.blob();
+}
+
 async function requestVolcengineSpeech(
   text: string,
   voice: string,
@@ -40,7 +61,7 @@ async function requestVolcengineSpeech(
   settings: ModelSettings,
   accessToken: string,
 ): Promise<Response> {
-  return fetch(`${apiBaseUrl}/tts/speech`, {
+  return fetch(`${getApiBaseUrl()}/tts/speech`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -51,12 +72,72 @@ async function requestVolcengineSpeech(
       voice,
       language,
       endpoint: settings.volcengineTtsEndpoint,
-      app_id: settings.volcengineTtsAppId,
-      access_token: settings.volcengineTtsAccessToken,
-      secret_key: settings.volcengineTtsSecretKey,
+      x_api_key: settings.volcengineTtsApiKey,
       resource_id: settings.volcengineTtsResourceId,
       model: settings.volcengineTtsModel,
     }),
+  });
+}
+
+async function requestKokoroSpeech(text: string, voice: string, settings: ModelSettings, accessToken: string): Promise<Response> {
+  return fetch(`${getApiBaseUrl()}/tts/kokoro/speech`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      text,
+      voice,
+      api_url: settings.ttsApiUrl,
+      model: settings.ttsProvider,
+    }),
+  });
+}
+
+const AUDIO_PLAYBACK_TIMEOUT_MS = 30_000;
+
+let sharedAudioContext: AudioContext | null = null;
+
+export function unlockAudio(): void {
+  if (!sharedAudioContext) {
+    sharedAudioContext = new AudioContext();
+  }
+  if (sharedAudioContext.state === "suspended") {
+    sharedAudioContext.resume();
+  }
+}
+
+function getOrCreateAudioContext(): AudioContext {
+  if (!sharedAudioContext || sharedAudioContext.state === "closed") {
+    sharedAudioContext = new AudioContext();
+  }
+  return sharedAudioContext;
+}
+
+export async function playAudioBlob(audioBlob: Blob): Promise<void> {
+  if (audioBlob.size <= 0) {
+    throw new Error("TTS returned empty audio");
+  }
+
+  const audioContext = getOrCreateAudioContext();
+  if (audioContext.state === "suspended") {
+    await audioContext.resume();
+  }
+
+  const arrayBuffer = await audioBlob.arrayBuffer();
+  const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+  const source = audioContext.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(audioContext.destination);
+
+  await new Promise<void>((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => reject(new Error("Audio playback timed out")), AUDIO_PLAYBACK_TIMEOUT_MS);
+    source.onended = () => {
+      window.clearTimeout(timeoutId);
+      resolve();
+    };
+    source.start();
   });
 }
 

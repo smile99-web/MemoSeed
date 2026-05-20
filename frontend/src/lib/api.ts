@@ -1,3 +1,5 @@
+import { getApiBaseUrl } from "@/lib/api-base-url";
+
 export interface HealthResponse {
   status: string;
   service: string;
@@ -7,7 +9,15 @@ export interface ApiErrorResponse {
   detail?: string;
 }
 
-const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
+export class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+  ) {
+    super(message);
+    this.name = "ApiRequestError";
+  }
+}
 
 async function parseApiError(response: Response): Promise<string> {
   try {
@@ -34,15 +44,23 @@ export async function apiRequest<TResponse, TBody extends object | undefined = u
     headers.Authorization = `Bearer ${options.accessToken}`;
   }
 
-  const response = await fetch(`${apiBaseUrl}${path}`, {
-    method: options.method ?? "GET",
-    headers,
-    body: options.body ? JSON.stringify(options.body) : undefined,
-    cache: "no-store",
-  });
-
+  const apiBaseUrl = getApiBaseUrl();
+  let response: Response;
+  try {
+    response = await fetch(`${apiBaseUrl}${path}`, {
+      method: options.method ?? "GET",
+      headers,
+      body: options.body ? JSON.stringify(options.body) : undefined,
+      cache: "no-store",
+    });
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error(`无法连接后端服务（${apiBaseUrl}）。请确认后端已启动，并检查 NEXT_PUBLIC_API_BASE_URL 与 CORS 配置。`);
+    }
+    throw error;
+  }
   if (!response.ok) {
-    throw new Error(await parseApiError(response));
+    throw new ApiRequestError(await parseApiError(response), response.status);
   }
 
   return (await response.json()) as TResponse;

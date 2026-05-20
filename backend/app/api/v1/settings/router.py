@@ -1,7 +1,8 @@
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -18,7 +19,10 @@ def get_model_settings(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ModelSettingsPayload:
-    stored_settings = db.scalar(select(UserModelSettings).where(UserModelSettings.user_id == current_user.id))
+    try:
+        stored_settings = db.scalar(select(UserModelSettings).where(UserModelSettings.user_id == current_user.id))
+    except ProgrammingError as exc:
+        raise_settings_table_missing_error(exc)
     if stored_settings is None:
         return ModelSettingsPayload(settings={})
     return ModelSettingsPayload(settings=stored_settings.settings)
@@ -31,7 +35,10 @@ def save_model_settings(
     db: Annotated[Session, Depends(get_db)],
 ) -> ModelSettingsPayload:
     settings = sanitize_model_settings(payload.settings)
-    stored_settings = db.scalar(select(UserModelSettings).where(UserModelSettings.user_id == current_user.id))
+    try:
+        stored_settings = db.scalar(select(UserModelSettings).where(UserModelSettings.user_id == current_user.id))
+    except ProgrammingError as exc:
+        raise_settings_table_missing_error(exc)
     if stored_settings is None:
         stored_settings = UserModelSettings(user_id=current_user.id, settings=settings)
         db.add(stored_settings)
@@ -41,6 +48,13 @@ def save_model_settings(
     db.commit()
     db.refresh(stored_settings)
     return ModelSettingsPayload(settings=stored_settings.settings)
+
+
+def raise_settings_table_missing_error(exc: ProgrammingError) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="Model settings table is missing. Apply database/init/003_user_model_settings.sql to enable server-side settings sync.",
+    ) from exc
 
 
 def sanitize_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
@@ -57,9 +71,7 @@ def sanitize_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "ttsEnglishVoice",
         "ttsChineseVoice",
         "volcengineTtsEndpoint",
-        "volcengineTtsAppId",
-        "volcengineTtsAccessToken",
-        "volcengineTtsSecretKey",
+        "volcengineTtsApiKey",
         "volcengineTtsResourceId",
         "volcengineTtsModel",
     }

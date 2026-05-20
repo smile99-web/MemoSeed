@@ -87,7 +87,7 @@ Copy-Item .env.example .env
 - `JWT_SECRET_KEY`
 - `POSTGRES_PASSWORD`
 - 如使用在线大模型，填写 `AI_API_KEY`
-- 如使用火山引擎 TTS，填写 `VOLCENGINE_TTS_APP_ID`、`VOLCENGINE_TTS_ACCESS_TOKEN` 或 `VOLCENGINE_TTS_SECRET_KEY`
+- 如使用火山引擎 TTS，填写 `VOLCENGINE_TTS_API_KEY`
 
 真实密钥应只写入本地 `.env` 或用户界面保存的个人配置，不要提交到 Git。仓库只提交 `.env.example` 空模板。
 

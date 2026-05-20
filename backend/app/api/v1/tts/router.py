@@ -1,11 +1,15 @@
+import json
 from typing import Annotated
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from app.api.deps import get_current_user
 from app.core.config import settings as app_settings
 from app.models.user import User
-from app.schemas.tts import SpeechSynthesisRequest
+from app.schemas.tts import KokoroSpeechSynthesisRequest, SpeechSynthesisRequest
 from app.services.volcengine_tts import (
     DEFAULT_VOLCENGINE_TTS_CHINESE_VOICE,
     DEFAULT_VOLCENGINE_TTS_ENDPOINT,
@@ -17,6 +21,48 @@ from app.services.volcengine_tts import (
 )
 
 router = APIRouter()
+LOCAL_KOKORO_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+@router.post("/kokoro/speech")
+def synthesize_kokoro_speech(
+    payload: KokoroSpeechSynthesisRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Response:
+    parsed_url = urlparse(payload.api_url.strip())
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Kokoro API URL is invalid")
+    if parsed_url.hostname not in LOCAL_KOKORO_HOSTS:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Kokoro API URL must point to localhost")
+
+    api_url = payload.api_url.strip().rstrip("/")
+    request = Request(
+        f"{api_url}/v1/audio/speech",
+        data=json.dumps(
+            {
+                "model": payload.model,
+                "input": payload.text,
+                "voice": payload.voice,
+                "response_format": "mp3",
+            }
+        ).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=60) as response:
+            audio = response.read()
+    except HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Kokoro TTS failed: HTTP {exc.code} {error_body}") from exc
+    except (URLError, TimeoutError) as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Kokoro TTS failed: {exc}") from exc
+
+    if not audio:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Kokoro TTS returned empty audio")
+
+    return Response(content=audio, media_type="audio/mpeg")
 
 
 @router.post("/speech")
@@ -27,12 +73,11 @@ def synthesize_speech(
     voice = payload.voice or select_default_voice(payload.language)
     tts_settings = VolcengineTtsSettings(
         endpoint=payload.endpoint or app_settings.volcengine_tts_endpoint or DEFAULT_VOLCENGINE_TTS_ENDPOINT,
-        app_id=payload.app_id or app_settings.volcengine_tts_app_id,
-        access_token=payload.access_token or app_settings.volcengine_tts_access_token,
-        secret_key=payload.secret_key or app_settings.volcengine_tts_secret_key,
+        api_key=payload.x_api_key or app_settings.volcengine_tts_api_key,
         resource_id=payload.resource_id or app_settings.volcengine_tts_resource_id or DEFAULT_VOLCENGINE_TTS_RESOURCE_ID,
         model=payload.model or app_settings.volcengine_tts_model or DEFAULT_VOLCENGINE_TTS_MODEL,
         voice=voice,
+        language=payload.language,
     )
 
     try:
