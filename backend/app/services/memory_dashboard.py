@@ -139,7 +139,7 @@ def summarize_word(stats: WordStats) -> WordMasterySummary:
     risk = max(stats.risks) if stats.risks else 1.0
     interval = average(stats.intervals)
     next_review_at = min(stats.next_reviews) if stats.next_reviews else None
-    if strength >= 0.75 and stats.mistake_count == 0:
+    if strength >= 0.75 and stats.review_count >= 3 and stats.mistake_count == 0:
         status = "mastered"
     elif stats.mistake_count > 0:
         status = "weak"
@@ -161,10 +161,16 @@ def summarize_word(stats: WordStats) -> WordMasterySummary:
 def build_review_buckets(memory_states: list[MemoryState], now: datetime) -> list[ReviewBucket]:
     buckets = [
         ("已到期", lambda state: state.next_review_at <= now),
-        ("24小时内", lambda state: now < state.next_review_at <= now + timedelta(days=1)),
-        ("3天内", lambda state: now + timedelta(days=1) < state.next_review_at <= now + timedelta(days=3)),
+        ("10分钟内", lambda state: now < state.next_review_at <= now + timedelta(minutes=10)),
+        ("30分钟内", lambda state: now + timedelta(minutes=10) < state.next_review_at <= now + timedelta(minutes=30)),
+        ("2小时内", lambda state: now + timedelta(minutes=30) < state.next_review_at <= now + timedelta(hours=2)),
+        ("今日巩固", lambda state: now + timedelta(hours=2) < state.next_review_at <= now + timedelta(days=1)),
+        ("明日复习", lambda state: now + timedelta(days=1) < state.next_review_at <= now + timedelta(days=2)),
+        ("3天内", lambda state: now + timedelta(days=2) < state.next_review_at <= now + timedelta(days=3)),
         ("7天内", lambda state: now + timedelta(days=3) < state.next_review_at <= now + timedelta(days=7)),
-        ("更久以后", lambda state: state.next_review_at > now + timedelta(days=7)),
+        ("14天内", lambda state: now + timedelta(days=7) < state.next_review_at <= now + timedelta(days=14)),
+        ("30天内", lambda state: now + timedelta(days=14) < state.next_review_at <= now + timedelta(days=30)),
+        ("长期保持", lambda state: state.next_review_at > now + timedelta(days=30)),
     ]
     return [ReviewBucket(label=label, count=len([state for state in memory_states if predicate(state)])) for label, predicate in buckets]
 

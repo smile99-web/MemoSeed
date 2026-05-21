@@ -1,19 +1,23 @@
-const defaultApiBaseUrl = "http://127.0.0.1:8000/api/v1";
+const defaultApiBaseUrl = "/api/v1";
 
 export function getApiBaseUrl(): string {
-  const configuredApiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? defaultApiBaseUrl;
+  const configuredApiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL ?? defaultApiBaseUrl).replace(/\/$/, "");
+  if (configuredApiBaseUrl.startsWith("/")) {
+    return configuredApiBaseUrl;
+  }
+
   if (typeof window === "undefined") {
-    return configuredApiBaseUrl.replace(/\/$/, "");
+    return configuredApiBaseUrl;
   }
 
   try {
     const apiUrl = new URL(configuredApiBaseUrl);
-    if (isLoopbackHost(apiUrl.hostname) && isLoopbackHost(window.location.hostname)) {
+    if (isLoopbackHost(apiUrl.hostname)) {
       return "/api/v1";
     }
     return apiUrl.toString().replace(/\/$/, "");
   } catch {
-    return configuredApiBaseUrl.replace(/\/$/, "");
+    return configuredApiBaseUrl;
   }
 }
 

@@ -234,14 +234,14 @@ export default function HomePage() {
   }
 
   return (
-    <main className="min-h-screen px-6 py-10">
+    <main className="min-h-screen px-6 py-10 ipad:px-8 ipad:py-14">
       {isSettingsOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-6 py-8">
           <div className="max-h-full w-full max-w-2xl overflow-y-auto rounded-2xl bg-white p-6 shadow-xl">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <h2 className="text-2xl font-bold tracking-tight">模型设置</h2>
-                <p className="mt-2 text-sm text-muted-foreground">配置用于例句生成、英中翻译和英语发音的模型服务。</p>
+                <h2 className="text-2xl font-bold tracking-tight ipad:text-3xl">模型设置</h2>
+                <p className="mt-2 text-sm text-muted-foreground ipad:text-base">配置用于例句生成、英中翻译和英语发音的模型服务。</p>
               </div>
               <Button onClick={() => setIsSettingsOpen(false)} type="button" variant="outline">
                 关闭
@@ -509,17 +509,17 @@ export default function HomePage() {
       </div>
 
       <section className="mx-auto flex max-w-6xl flex-col gap-10">
-        <div className="rounded-3xl bg-white p-8 shadow-sm md:p-12">
-          <p className="text-sm font-semibold uppercase tracking-[0.3em] text-primary">MemoSeed</p>
-          <h1 className="mt-4 max-w-3xl text-4xl font-bold tracking-tight md:text-6xl">
+        <div className="rounded-3xl bg-white p-8 shadow-sm md:p-12 ipad:p-10">
+          <p className="text-sm font-semibold uppercase tracking-[0.3em] text-primary ipad:text-base">MemoSeed</p>
+          <h1 className="mt-4 max-w-3xl text-4xl font-bold tracking-tight md:text-6xl ipad:text-5xl">
             英语记忆种子
           </h1>
-          <p className="mt-6 max-w-2xl text-lg leading-8 text-muted-foreground">
+          <p className="mt-6 max-w-2xl text-lg leading-8 text-muted-foreground ipad:text-xl ipad:leading-9">
             基于艾宾浩斯记忆曲线、SM-2 和 AI 动态调度，专注中小学阶段英语基础薄弱学生的单词、短语与简单句长期记忆。
           </p>
           <div className="mt-8 flex flex-wrap gap-3">
             <Button asChild>
-              <Link href={isLoggedIn ? "/learning/import" : "/login"}>开始学习</Link>
+              <Link href={isLoggedIn ? "/learning" : "/login"}>开始学习</Link>
             </Button>
             {!isLoggedIn ? (
               <Button asChild variant="outline">
@@ -537,20 +537,20 @@ export default function HomePage() {
           </div>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4 ipad:grid-cols-2">
           {workflowCards.map((card) => {
             const Icon = card.icon;
             return (
               <Card key={card.title}>
                 <CardHeader>
-                  <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-primary/10 text-primary">
-                    <Icon className="h-5 w-5" />
+                  <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-primary/10 text-primary ipad:h-12 ipad:w-12">
+                    <Icon className="h-5 w-5 ipad:h-6 ipad:w-6" />
                   </div>
-                  <CardTitle>{card.title}</CardTitle>
-                  <CardDescription>{card.minutes}</CardDescription>
+                  <CardTitle className="ipad:text-xl">{card.title}</CardTitle>
+                  <CardDescription className="ipad:text-base">{card.minutes}</CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <p className="text-sm leading-6 text-muted-foreground">{card.description}</p>
+                  <p className="text-sm leading-6 text-muted-foreground ipad:text-base">{card.description}</p>
                 </CardContent>
               </Card>
             );

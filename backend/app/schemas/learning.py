@@ -79,3 +79,17 @@ class DynamicSentenceResponse(BaseModel):
     focus_words: list[str]
     known_words: list[str]
     weak_words: list[str]
+
+
+class LearningEncouragementRequest(BaseModel):
+    course_name: str = Field(default="本课", max_length=120)
+    duration_seconds: int = Field(default=0, ge=0)
+    llm_provider: str | None = None
+    llm_base_url: str | None = None
+    llm_model: str | None = None
+    llm_api_key: str | None = None
+
+
+class LearningEncouragementResponse(BaseModel):
+    chinese_text: str
+    english_text: str

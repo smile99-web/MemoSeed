@@ -68,82 +68,82 @@ export default function RegisterPage() {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center px-6 py-10">
-      <Card className="w-full max-w-md">
+    <main className="flex min-h-screen items-center justify-center px-6 py-10 ipad:px-8">
+      <Card className="w-full max-w-md ipad:max-w-lg">
         <CardHeader>
-          <CardTitle>注册 MemoSeed</CardTitle>
-          <CardDescription>创建账号，开始建立英语长期记忆。</CardDescription>
+          <CardTitle className="ipad:text-2xl">注册 MemoSeed</CardTitle>
+          <CardDescription className="ipad:text-lg">创建账号，开始建立英语长期记忆。</CardDescription>
         </CardHeader>
         <CardContent>
           <form className="space-y-5" onSubmit={handleSubmit} noValidate>
             <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="email">
+              <label className="text-sm font-medium ipad:text-base" htmlFor="email">
                 邮箱
               </label>
               <input
                 id="email"
                 type="email"
                 autoComplete="email"
-                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring ipad:h-12 ipad:px-4 ipad:text-base"
                 value={form.email}
                 onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))}
               />
-              {errors.email ? <p className="text-sm text-red-600">{errors.email}</p> : null}
+              {errors.email ? <p className="text-sm text-red-600 ipad:text-base">{errors.email}</p> : null}
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="username">
+              <label className="text-sm font-medium ipad:text-base" htmlFor="username">
                 用户名
               </label>
               <input
                 id="username"
                 type="text"
                 autoComplete="username"
-                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring ipad:h-12 ipad:px-4 ipad:text-base"
                 value={form.username}
                 onChange={(event) => setForm((current) => ({ ...current, username: event.target.value }))}
               />
-              {errors.username ? <p className="text-sm text-red-600">{errors.username}</p> : null}
+              {errors.username ? <p className="text-sm text-red-600 ipad:text-base">{errors.username}</p> : null}
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="password">
+              <label className="text-sm font-medium ipad:text-base" htmlFor="password">
                 密码
               </label>
               <input
                 id="password"
                 type="password"
                 autoComplete="new-password"
-                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring ipad:h-12 ipad:px-4 ipad:text-base"
                 value={form.password}
                 onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
               />
-              {errors.password ? <p className="text-sm text-red-600">{errors.password}</p> : null}
+              {errors.password ? <p className="text-sm text-red-600 ipad:text-base">{errors.password}</p> : null}
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="confirm-password">
+              <label className="text-sm font-medium ipad:text-base" htmlFor="confirm-password">
                 确认密码
               </label>
               <input
                 id="confirm-password"
                 type="password"
                 autoComplete="new-password"
-                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring ipad:h-12 ipad:px-4 ipad:text-base"
                 value={form.confirmPassword}
                 onChange={(event) => setForm((current) => ({ ...current, confirmPassword: event.target.value }))}
               />
-              {errors.confirmPassword ? <p className="text-sm text-red-600">{errors.confirmPassword}</p> : null}
+              {errors.confirmPassword ? <p className="text-sm text-red-600 ipad:text-base">{errors.confirmPassword}</p> : null}
             </div>
 
-            {errors.form ? <p className="text-sm text-red-600">{errors.form}</p> : null}
+            {errors.form ? <p className="text-sm text-red-600 ipad:text-base">{errors.form}</p> : null}
 
-            <Button className="w-full" disabled={isSubmitting} type="submit">
+            <Button className="w-full ipad:h-12 ipad:text-lg" disabled={isSubmitting} type="submit">
               {isSubmitting ? "注册中..." : "注册"}
             </Button>
           </form>
 
-          <p className="mt-6 text-center text-sm text-muted-foreground">
+          <p className="mt-6 text-center text-sm text-muted-foreground ipad:text-base">
             已有账号？{" "}
             <Link className="font-medium text-primary hover:underline" href="/login">
               去登录

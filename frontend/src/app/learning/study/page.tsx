@@ -5,11 +5,14 @@ import { useSearchParams } from "next/navigation";
 import { KeyboardEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { useDevice } from "@/hooks/use-device";
 import { getAccessToken, getAuthUser } from "@/lib/auth";
-import { generateDynamicSentence, LearningItem, listLearningItems, logWordMistake, translateLearningText } from "@/lib/learning";
+import { addCourseCompletion, formatCourseDuration } from "@/lib/course-progress";
+import { Course, listCoursePackages, listCourses } from "@/lib/courses";
+import { generateDynamicSentence, generateLearningEncouragement, LearningItem, listDueReviewItems, listLearningItems, logWordMistake, translateLearningText } from "@/lib/learning";
 import { recordStudyTime, scheduleMemoryReview } from "@/lib/memory";
 import { ModelSettings, defaultModelSettings, getModelSettings, loadPersistedModelSettings } from "@/lib/model-settings";
-import { playAudioBlob, synthesizeKokoroSpeech, synthesizeVolcengineSpeech } from "@/lib/tts";
+import { playAudioBlob, synthesizeKokoroSpeech, synthesizeVolcengineSpeech, TtsSynthesisOptions } from "@/lib/tts";
 
 const itemTypeLabels: Record<LearningItem["item_type"], string> = {
   word: "单词",
@@ -20,6 +23,11 @@ const itemTypeLabels: Record<LearningItem["item_type"], string> = {
 const annotationColors = ["border-primary", "border-emerald-500", "border-sky-500", "border-violet-500", "border-amber-500"] as const;
 const STUDY_IDLE_TIMEOUT_MS = 20_000;
 const STUDY_TIME_FLUSH_SECONDS = 10;
+const DUE_REVIEW_POLL_MS = 60_000;
+const MANUAL_ENGLISH_TTS_OPTIONS: TtsSynthesisOptions = {
+  speechRate: -20,
+  speed: 0.8,
+};
 const commonPartLabels: Record<string, string> = {
   i: "代词",
   you: "代词",
@@ -59,6 +67,22 @@ type AnswerState = "typing" | "mistake-word-practice" | "sentence-complete" | "w
 type WordStatus = "idle" | "correct" | "incorrect";
 type MistakePracticeStatus = "idle" | "incorrect";
 
+interface CelebrationSummary {
+  courseName: string;
+  durationSeconds: number;
+  correctWordCount: number;
+  encouragementChineseText: string;
+  encouragementEnglishText: string;
+  canContinue: boolean;
+  statusMessage: string;
+}
+
+interface NextCourseTarget {
+  id: string;
+  name: string;
+  packageId: string;
+}
+
 function tokenizeEnglish(value: string): string[] {
   return value.trim().split(/\s+/).filter(Boolean);
 }
@@ -89,7 +113,7 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-function speakWithBrowser(text: string, language: string): Promise<void> {
+function speakWithBrowser(text: string, language: string, playbackRate = 0.85): Promise<void> {
   if (!text.trim() || !("speechSynthesis" in window)) {
     return Promise.resolve();
   }
@@ -97,7 +121,7 @@ function speakWithBrowser(text: string, language: string): Promise<void> {
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = language;
-  utterance.rate = 0.85;
+  utterance.rate = Math.max(0.1, Math.min(playbackRate, 10));
   return new Promise((resolve) => {
     utterance.onend = () => resolve();
     utterance.onerror = () => resolve();
@@ -105,17 +129,17 @@ function speakWithBrowser(text: string, language: string): Promise<void> {
   });
 }
 
-async function speakWithKokoro(text: string, voice: string, language: string, settings: ModelSettings) {
+async function speakWithKokoro(text: string, voice: string, language: string, settings: ModelSettings, options: TtsSynthesisOptions = {}) {
   if (!text.trim()) {
     return;
   }
 
   try {
-    const audioBlob = settings.ttsProvider === "volcark" ? await speakWithVolcengine(text, voice, language, settings) : await speakWithKokoroApi(text, voice, settings);
+    const audioBlob = settings.ttsProvider === "volcark" ? await speakWithVolcengine(text, voice, language, settings, options) : await speakWithKokoroApi(text, voice, settings, options);
     await playAudioBlob(audioBlob);
   } catch (error) {
     console.warn("课程学习 TTS 播放失败，已回退到浏览器语音。", error);
-    await speakWithBrowser(text, language);
+    await speakWithBrowser(text, language, options.speed ?? 0.85);
   }
 }
 
@@ -133,8 +157,26 @@ function getStudyProgressKey(courseId: string): string {
   return `memoseed_study_progress_${userId}_${courseId}`;
 }
 
+function getFallbackEncouragement(courseName: string): { chineseText: string; englishText: string } {
+  const fallbackEncouragements = [
+    {
+      chineseText: `${courseName}完成得很棒，继续保持这份认真！`,
+      englishText: "Great work finishing this lesson. Keep going with confidence!",
+    },
+    {
+      chineseText: `你又向前走了一步，下一课也一定可以！`,
+      englishText: "You took another step forward. You can do the next lesson too!",
+    },
+    {
+      chineseText: `今天的努力会变成明天的进步，做得好！`,
+      englishText: "Today's effort will become tomorrow's progress. Well done!",
+    },
+  ];
+  return fallbackEncouragements[Math.floor(Math.random() * fallbackEncouragements.length)];
+}
+
 function getDynamicReviewWords(item: LearningItem | null): string[] {
-  if (!item?.id.startsWith("generated-") || !item.source?.startsWith("AI 动态复习：")) {
+  if (!item?.source?.startsWith("AI 动态复习：")) {
     return [];
   }
   return item.source
@@ -144,28 +186,178 @@ function getDynamicReviewWords(item: LearningItem | null): string[] {
     .filter(Boolean);
 }
 
-async function speakWithKokoroApi(text: string, voice: string, settings: ModelSettings): Promise<Blob> {
+function mergeLearningQueues(reviewItems: LearningItem[], courseItems: LearningItem[]): LearningItem[] {
+  const seenItemIds = new Set<string>();
+  return [...reviewItems, ...courseItems].filter((item) => {
+    if (seenItemIds.has(item.id)) {
+      return false;
+    }
+    seenItemIds.add(item.id);
+    return true;
+  });
+}
+
+async function speakWithKokoroApi(text: string, voice: string, settings: ModelSettings, options: TtsSynthesisOptions = {}): Promise<Blob> {
   const accessToken = getAccessToken();
   if (!accessToken) {
     throw new Error("Login required for Kokoro TTS");
   }
 
-  return synthesizeKokoroSpeech(text, voice, settings, accessToken);
+  return synthesizeKokoroSpeech(text, voice, settings, accessToken, options);
 }
 
-async function speakWithVolcengine(text: string, voice: string, language: string, settings: ModelSettings): Promise<Blob> {
+async function speakWithVolcengine(text: string, voice: string, language: string, settings: ModelSettings, options: TtsSynthesisOptions = {}): Promise<Blob> {
   const accessToken = getAccessToken();
   if (!accessToken) {
     throw new Error("Login required for Volcengine TTS");
   }
 
-  return synthesizeVolcengineSpeech(text, voice, language, settings, accessToken);
+  return synthesizeVolcengineSpeech(text, voice, language, settings, accessToken, options);
+}
+
+function playCelebrationSound() {
+  const AudioContextCtor = window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioContextCtor) {
+    return;
+  }
+
+  const audioContext = new AudioContextCtor();
+  const now = audioContext.currentTime;
+  [523.25, 659.25, 783.99, 1046.5].forEach((frequency, index) => {
+    const oscillator = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    oscillator.type = "triangle";
+    oscillator.frequency.value = frequency;
+    oscillator.connect(gain);
+    gain.connect(audioContext.destination);
+
+    const startAt = now + index * 0.12;
+    gain.gain.setValueAtTime(0.0001, startAt);
+    gain.gain.exponentialRampToValueAtTime(0.16, startAt + 0.03);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.28);
+    oscillator.start(startAt);
+    oscillator.stop(startAt + 0.3);
+  });
+
+  window.setTimeout(() => void audioContext.close().catch(() => undefined), 900);
+}
+
+function CelebrationConfetti({ runKey }: { runKey: number }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (!canvas || !context) {
+      return;
+    }
+
+    const dpr = window.devicePixelRatio || 1;
+    const resizeCanvas = () => {
+      canvas.width = Math.floor(canvas.clientWidth * dpr);
+      canvas.height = Math.floor(canvas.clientHeight * dpr);
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+    resizeCanvas();
+
+    const colors = ["#10b981", "#0ea5e9", "#f59e0b", "#ef4444", "#8b5cf6"];
+    const pieces = Array.from({ length: 150 }, () => ({
+      x: Math.random() * canvas.clientWidth,
+      y: -20 - Math.random() * canvas.clientHeight * 0.6,
+      size: 6 + Math.random() * 7,
+      color: colors[Math.floor(Math.random() * colors.length)],
+      rotation: Math.random() * Math.PI,
+      rotationSpeed: -0.18 + Math.random() * 0.36,
+      speedX: -2.5 + Math.random() * 5,
+      speedY: 2 + Math.random() * 4,
+    }));
+
+    let animationFrame = 0;
+    const startedAt = performance.now();
+    const drawFrame = (time: number) => {
+      context.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+      pieces.forEach((piece) => {
+        piece.x += piece.speedX;
+        piece.y += piece.speedY;
+        piece.rotation += piece.rotationSpeed;
+        if (piece.y > canvas.clientHeight + 30) {
+          piece.y = -20;
+          piece.x = Math.random() * canvas.clientWidth;
+        }
+
+        context.save();
+        context.translate(piece.x, piece.y);
+        context.rotate(piece.rotation);
+        context.fillStyle = piece.color;
+        context.fillRect(-piece.size / 2, -piece.size / 2, piece.size, piece.size * 0.55);
+        context.restore();
+      });
+
+      if (time - startedAt < 5200) {
+        animationFrame = window.requestAnimationFrame(drawFrame);
+      }
+    };
+
+    animationFrame = window.requestAnimationFrame(drawFrame);
+    window.addEventListener("resize", resizeCanvas);
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      window.removeEventListener("resize", resizeCanvas);
+    };
+  }, [runKey]);
+
+  return <canvas ref={canvasRef} className="pointer-events-none absolute inset-0 h-full w-full" />;
+}
+
+function CelebrationModal({ nextCourse, summary }: { nextCourse: NextCourseTarget | null; summary: CelebrationSummary }) {
+  const nextCourseHref = nextCourse
+    ? `/learning/study?course_id=${nextCourse.id}&package_id=${nextCourse.packageId}&course_name=${encodeURIComponent(nextCourse.name)}`
+    : "/learning";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-slate-950/60 px-6">
+      <CelebrationConfetti runKey={summary.durationSeconds + summary.correctWordCount} />
+      <div className="relative z-10 w-full max-w-md rounded-lg bg-white p-7 text-center shadow-2xl ipad:max-w-lg ipad:p-10">
+        <p className="text-sm font-semibold text-primary ipad:text-base">学习完成</p>
+        <h2 className="mt-2 text-3xl font-bold tracking-tight ipad:text-4xl">{summary.courseName}学习完成</h2>
+        <div className="mt-6">
+          <div className="rounded-lg border bg-slate-50 px-4 py-4 ipad:px-6 ipad:py-5">
+            <p className="text-xs text-muted-foreground ipad:text-sm">本次用时</p>
+            <p className="mt-1 text-xl font-bold text-slate-900 ipad:text-3xl">{formatCourseDuration(summary.durationSeconds)}</p>
+          </div>
+        </div>
+        <div className="mt-5 rounded-lg border bg-emerald-50 px-4 py-4 text-left ipad:mt-6 ipad:px-6 ipad:py-5">
+          <p className="text-sm font-semibold text-emerald-700 ipad:text-base">鼓励语</p>
+          <p className="mt-2 text-base font-bold text-slate-900 ipad:text-lg">{summary.encouragementChineseText}</p>
+          <p className="mt-1 text-sm font-medium text-slate-700 ipad:text-base">{summary.encouragementEnglishText}</p>
+          <p className="mt-3 text-xs text-muted-foreground ipad:text-sm">{summary.statusMessage}</p>
+        </div>
+        <div className="mt-6 flex flex-wrap justify-center gap-3 ipad:gap-4">
+          {summary.canContinue ? (
+            <Button asChild className="ipad:text-lg ipad:px-6 ipad:py-3">
+              <Link href={nextCourseHref}>{nextCourse ? "学习下一课" : "返回开始学习"}</Link>
+            </Button>
+          ) : (
+            <Button disabled type="button" className="ipad:text-lg ipad:px-6 ipad:py-3">{nextCourse ? "朗读后进入下一课" : "朗读后返回"}</Button>
+          )}
+          <Button asChild variant="secondary" className="ipad:text-lg ipad:px-6 ipad:py-3">
+            <Link href="/learning">返回开始学习</Link>
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function StudyContent() {
   const searchParams = useSearchParams();
   const courseId = searchParams.get("course_id") ?? "";
+  const packageIdFromUrl = searchParams.get("package_id") ?? "";
+  const courseName = searchParams.get("course_name") ?? "本课";
+  const device = useDevice();
   const [items, setItems] = useState<LearningItem[]>([]);
+  const [packageCourses, setPackageCourses] = useState<Course[]>([]);
+  const [resolvedPackageId, setResolvedPackageId] = useState("");
   const [currentIndex, setCurrentIndex] = useState(0);
   const [wordAnswers, setWordAnswers] = useState<string[]>([]);
   const [activeWordIndex, setActiveWordIndex] = useState(0);
@@ -188,15 +380,25 @@ function StudyContent() {
   const [isLoading, setIsLoading] = useState(true);
   const [modelSettings, setModelSettings] = useState<ModelSettings>(defaultModelSettings);
   const [activeStudySeconds, setActiveStudySeconds] = useState(0);
+  const [celebrationSummary, setCelebrationSummary] = useState<CelebrationSummary | null>(null);
   const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
   const mistakePracticeInputRef = useRef<HTMLInputElement | null>(null);
   const activeStudyMsRef = useRef(0);
   const pendingStudyMsRef = useRef(0);
+  const courseRunStartedActiveMsRef = useRef(0);
+  const courseRunCorrectWordKeysRef = useRef<Set<string>>(new Set());
   const lastStudyTickAtRef = useRef(Date.now());
   const lastKeyboardAtRef = useRef(Date.now());
   const isFlushingStudyTimeRef = useRef(false);
   const voiceSequenceRef = useRef(0);
   const modelSettingsRef = useRef<ModelSettings>(defaultModelSettings);
+  const answerStateRef = useRef<AnswerState>("typing");
+  const isTranslatingWordsRef = useRef(false);
+  const spaceCooldownRef = useRef(0);
+  const queuedReviewItemIdsRef = useRef<Set<string>>(new Set());
+  const currentIndexRef = useRef(0);
+  const currentItemRef = useRef<LearningItem | null>(null);
+  const celebrationSummaryRef = useRef<CelebrationSummary | null>(null);
 
   const currentItem = items[currentIndex] ?? null;
   const currentWords = useMemo(() => tokenizeEnglish(currentItem?.english_text ?? ""), [currentItem]);
@@ -209,6 +411,25 @@ function StudyContent() {
   const currentMistakePracticeWord = mistakePracticeWords[mistakePracticeIndex] ?? "";
   const currentMistakePracticeTranslation = mistakePracticeTranslations[currentMistakePracticeWord] ?? "";
   const progressPercent = items.length > 0 ? ((currentIndex + 1) / items.length) * 100 : 0;
+  const packageId = packageIdFromUrl || resolvedPackageId;
+  const nextCourse = useMemo<NextCourseTarget | null>(() => {
+    if (!packageId || packageCourses.length === 0) {
+      return null;
+    }
+
+    const currentCourseIndex = packageCourses.findIndex((course) => course.id === courseId);
+    if (currentCourseIndex < 0) {
+      return null;
+    }
+
+    const nextCourseIndex = (currentCourseIndex + 1) % packageCourses.length;
+    const targetCourse = packageCourses[nextCourseIndex];
+    return {
+      id: targetCourse.id,
+      name: targetCourse.name,
+      packageId,
+    };
+  }, [courseId, packageCourses, packageId]);
 
   useEffect(() => {
     setModelSettings(getModelSettings());
@@ -218,6 +439,20 @@ function StudyContent() {
   useEffect(() => {
     modelSettingsRef.current = modelSettings;
   }, [modelSettings]);
+
+  useEffect(() => {
+    currentIndexRef.current = currentIndex;
+    currentItemRef.current = currentItem;
+    celebrationSummaryRef.current = celebrationSummary;
+  }, [celebrationSummary, currentIndex, currentItem]);
+
+  useEffect(() => {
+    answerStateRef.current = answerState;
+  }, [answerState]);
+
+  useEffect(() => {
+    isTranslatingWordsRef.current = isTranslatingWords;
+  }, [isTranslatingWords]);
 
   const startVoiceSequence = useCallback(function startVoiceSequence(): number {
     voiceSequenceRef.current += 1;
@@ -234,11 +469,18 @@ function StudyContent() {
     return isCurrentVoiceSequence(sequenceId);
   }, [isCurrentVoiceSequence]);
 
-  const speakInVoiceSequence = useCallback(async function speakInVoiceSequence(sequenceId: number, text: string, voice: string, language: string, settings: ModelSettings): Promise<boolean> {
+  const speakInVoiceSequence = useCallback(async function speakInVoiceSequence(
+    sequenceId: number,
+    text: string,
+    voice: string,
+    language: string,
+    settings: ModelSettings,
+    options: TtsSynthesisOptions = {},
+  ): Promise<boolean> {
     if (!isCurrentVoiceSequence(sequenceId)) {
       return false;
     }
-    await speakWithKokoro(text, voice, language, settings);
+    await speakWithKokoro(text, voice, language, settings, options);
     return isCurrentVoiceSequence(sequenceId);
   }, [isCurrentVoiceSequence]);
 
@@ -279,7 +521,7 @@ function StudyContent() {
     }
     const sequenceId = startVoiceSequence();
     const settings = modelSettingsRef.current;
-    void speakInVoiceSequence(sequenceId, currentItem.english_text, settings.ttsEnglishVoice, "en-US", settings);
+    void speakInVoiceSequence(sequenceId, currentItem.english_text, settings.ttsEnglishVoice, "en-US", settings, MANUAL_ENGLISH_TTS_OPTIONS);
   }, [currentItem, speakInVoiceSequence, startVoiceSequence]);
 
   const flushStudyTime = useCallback(async function flushStudyTime(force = false) {
@@ -312,9 +554,12 @@ function StudyContent() {
   useEffect(() => {
     activeStudyMsRef.current = 0;
     pendingStudyMsRef.current = 0;
+    courseRunStartedActiveMsRef.current = 0;
+    courseRunCorrectWordKeysRef.current = new Set();
     lastStudyTickAtRef.current = Date.now();
     lastKeyboardAtRef.current = Date.now();
     setActiveStudySeconds(0);
+    setCelebrationSummary(null);
   }, [courseId]);
 
   useEffect(() => {
@@ -402,11 +647,17 @@ function StudyContent() {
       }
 
       try {
-        const nextItems = await listLearningItems(accessToken, courseId);
+        const [dueReviewItems, nextItems] = await Promise.all([
+          listDueReviewItems(accessToken, courseId).catch(() => [] as LearningItem[]),
+          listLearningItems(accessToken, courseId),
+        ]);
+        queuedReviewItemIdsRef.current = new Set(dueReviewItems.map((item) => item.id));
+        const mergedItems = mergeLearningQueues(dueReviewItems, nextItems);
         const savedIndex = Number(window.localStorage.getItem(getStudyProgressKey(courseId)) ?? "0");
-        const safeIndex = Number.isInteger(savedIndex) && savedIndex >= 0 && savedIndex < nextItems.length ? savedIndex : 0;
-        setItems(nextItems);
+        const safeIndex = dueReviewItems.length === 0 && Number.isInteger(savedIndex) && savedIndex >= 0 && savedIndex < mergedItems.length ? savedIndex : 0;
+        setItems(mergedItems);
         setCurrentIndex(safeIndex);
+        setFeedbackMessage(dueReviewItems.length > 0 ? `先复习 ${dueReviewItems.length} 条历史错词/到期内容，再进入当前课程。` : null);
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "读取学习内容失败");
       } finally {
@@ -416,6 +667,86 @@ function StudyContent() {
 
     void loadStudyItems();
   }, [courseId]);
+
+  const insertDueReviewItemsAfterCurrent = useCallback(async function insertDueReviewItemsAfterCurrent() {
+    const accessToken = getAccessToken();
+    const activeItem = currentItemRef.current;
+    if (!accessToken || !courseId || !activeItem || celebrationSummaryRef.current) {
+      return;
+    }
+
+    const dueReviewItems = await listDueReviewItems(accessToken, courseId, 6).catch(() => [] as LearningItem[]);
+    const freshReviewItems = dueReviewItems.filter((item) => !queuedReviewItemIdsRef.current.has(item.id) && item.id !== activeItem.id);
+    if (freshReviewItems.length === 0) {
+      return;
+    }
+
+    freshReviewItems.forEach((item) => queuedReviewItemIdsRef.current.add(item.id));
+    setItems((currentItems) => {
+      const existingItemIds = new Set(currentItems.map((item) => item.id));
+      const insertItems = freshReviewItems.filter((item) => !existingItemIds.has(item.id));
+      if (insertItems.length === 0) {
+        return currentItems;
+      }
+
+      const nextItems = [...currentItems];
+      nextItems.splice(Math.min(currentIndexRef.current + 1, nextItems.length), 0, ...insertItems);
+      return nextItems;
+    });
+    setFeedbackMessage(`已插入 ${freshReviewItems.length} 条新的到期复习内容，完成当前题后会优先复习。`);
+  }, [courseId]);
+
+  useEffect(() => {
+    if (!courseId || isLoading) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void insertDueReviewItemsAfterCurrent();
+    }, 15_000);
+    const intervalId = window.setInterval(() => {
+      void insertDueReviewItemsAfterCurrent();
+    }, DUE_REVIEW_POLL_MS);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+      window.clearInterval(intervalId);
+    };
+  }, [courseId, insertDueReviewItemsAfterCurrent, isLoading]);
+
+  useEffect(() => {
+    async function loadPackageCourses() {
+      const accessToken = getAccessToken();
+      if (!accessToken || !courseId) {
+        setPackageCourses([]);
+        return;
+      }
+
+      try {
+        if (packageIdFromUrl) {
+          setResolvedPackageId(packageIdFromUrl);
+          setPackageCourses(await listCourses(accessToken, packageIdFromUrl));
+          return;
+        }
+
+        const coursePackages = await listCoursePackages(accessToken);
+        for (const coursePackage of coursePackages) {
+          const courses = await listCourses(accessToken, coursePackage.id);
+          if (courses.some((course) => course.id === courseId)) {
+            setResolvedPackageId(coursePackage.id);
+            setPackageCourses(courses);
+            return;
+          }
+        }
+        setResolvedPackageId("");
+        setPackageCourses([]);
+      } catch {
+        setPackageCourses([]);
+      }
+    }
+
+    void loadPackageCourses();
+  }, [courseId, packageIdFromUrl]);
 
   function resetAnswer() {
     setWordAnswers(currentWords.map(() => ""));
@@ -437,7 +768,80 @@ function StudyContent() {
     window.setTimeout(() => inputRefs.current[dynamicReviewWordIndexes[0] ?? 0]?.focus(), 0);
   }
 
-  const handleNextItem = useCallback(function handleNextItem() {
+  function markCorrectWord(item: LearningItem, word: string, index: number | string) {
+    const normalizedWord = normalizeEnglishKey(word);
+    if (!normalizedWord) {
+      return;
+    }
+
+    courseRunCorrectWordKeysRef.current.add(`${item.id}:${index}:${normalizedWord}`);
+  }
+
+  const generateAndSpeakCompletionEncouragement = useCallback(async function generateAndSpeakCompletionEncouragement(durationSeconds: number) {
+    const accessToken = getAccessToken();
+    const fallbackEncouragement = getFallbackEncouragement(courseName);
+    let encouragement = fallbackEncouragement;
+
+    if (accessToken) {
+      try {
+        encouragement = await generateLearningEncouragement(
+          {
+            course_name: courseName,
+            duration_seconds: durationSeconds,
+          },
+          accessToken,
+          modelSettingsRef.current,
+        ).then((response) => ({
+          chineseText: response.chinese_text,
+          englishText: response.english_text,
+        }));
+      } catch {
+        encouragement = fallbackEncouragement;
+      }
+    }
+
+    setCelebrationSummary((current) => current ? {
+      ...current,
+      encouragementChineseText: encouragement.chineseText,
+      encouragementEnglishText: encouragement.englishText,
+      statusMessage: "正在朗读鼓励语...",
+    } : current);
+
+    const sequenceId = startVoiceSequence();
+    const settings = modelSettingsRef.current;
+    await speakInVoiceSequence(sequenceId, encouragement.chineseText, settings.ttsChineseVoice, "zh-CN", settings);
+    if (await waitInVoiceSequence(sequenceId, 600)) {
+      await speakInVoiceSequence(sequenceId, encouragement.englishText, settings.ttsEnglishVoice, "en-US", settings);
+    }
+
+    setCelebrationSummary((current) => current ? {
+      ...current,
+      canContinue: true,
+      statusMessage: "鼓励语朗读完成，可以进入下一课。",
+    } : current);
+  }, [courseName, speakInVoiceSequence, startVoiceSequence, waitInVoiceSequence]);
+
+  const showCourseCompletion = useCallback(function showCourseCompletion() {
+    const durationSeconds = Math.max(1, Math.round((activeStudyMsRef.current - courseRunStartedActiveMsRef.current) / 1000));
+    const correctWordCount = courseRunCorrectWordKeysRef.current.size;
+
+    addCourseCompletion(courseId, durationSeconds, correctWordCount);
+    courseRunStartedActiveMsRef.current = activeStudyMsRef.current;
+    courseRunCorrectWordKeysRef.current = new Set();
+    setCelebrationSummary({
+      courseName,
+      durationSeconds,
+      correctWordCount,
+      encouragementChineseText: "正在生成一句鼓励的话...",
+      encouragementEnglishText: "",
+      canContinue: false,
+      statusMessage: "正在生成并准备朗读鼓励语，请稍等。",
+    });
+    playCelebrationSound();
+    void generateAndSpeakCompletionEncouragement(durationSeconds);
+  }, [courseId, courseName, generateAndSpeakCompletionEncouragement]);
+
+  const handleNextItem = useCallback(function handleNextItem(options: { completedCurrentItem?: boolean } = {}) {
     if (items.length === 0) {
       return;
     }
@@ -445,9 +849,12 @@ function StudyContent() {
     setCurrentIndex((index) => {
       const nextIndex = (index + 1) % items.length;
       window.localStorage.setItem(getStudyProgressKey(courseId), String(nextIndex));
+      if (options.completedCurrentItem && nextIndex === 0) {
+        window.setTimeout(showCourseCompletion, 0);
+      }
       return nextIndex;
     });
-  }, [courseId, items.length]);
+  }, [courseId, items.length, showCourseCompletion]);
 
   function isGeneratedItem(item: LearningItem): boolean {
     return item.id.startsWith("generated-");
@@ -659,7 +1066,14 @@ function StudyContent() {
       return;
     }
 
-    const isCorrect = normalizeTypedWord(wordAnswers[index] ?? "") === normalizeTypedWord(expectedWord);
+    // Ignore empty submissions — don't count them as mistakes
+    const typedValue = normalizeTypedWord(wordAnswers[index] ?? "");
+    if (!typedValue) {
+      window.setTimeout(() => inputRefs.current[index]?.focus(), 0);
+      return;
+    }
+
+    const isCorrect = typedValue === normalizeTypedWord(expectedWord);
     setWordStatuses((current) => {
       const nextStatuses = [...current];
       nextStatuses[index] = isCorrect ? "correct" : "incorrect";
@@ -679,6 +1093,9 @@ function StudyContent() {
       return;
     }
 
+    if (currentItem) {
+      markCorrectWord(currentItem, expectedWord, index);
+    }
     const nextIndex = isDynamicFillBlankItem ? dynamicReviewWordIndexes.find((wordIndex) => wordIndex > index) ?? currentWords.length : index + 1;
     if (nextIndex < currentWords.length) {
       setActiveWordIndex(nextIndex);
@@ -719,7 +1136,14 @@ function StudyContent() {
       return;
     }
 
-    const isCorrect = normalizeTypedWord(mistakePracticeAnswer) === normalizeTypedWord(expectedWord);
+    // Ignore empty submissions — don't count them as errors
+    const normalizedAnswer = normalizeTypedWord(mistakePracticeAnswer);
+    if (!normalizedAnswer) {
+      window.setTimeout(() => mistakePracticeInputRef.current?.focus(), 0);
+      return;
+    }
+
+    const isCorrect = normalizedAnswer === normalizeTypedWord(expectedWord);
     if (!isCorrect) {
       const nextErrorCount = mistakePracticeErrorCount + 1;
       if (nextErrorCount >= 3) {
@@ -742,6 +1166,9 @@ function StudyContent() {
     }
 
     const nextIndex = mistakePracticeIndex + 1;
+    if (currentItem) {
+      markCorrectWord(currentItem, expectedWord, `mistake-${normalizeEnglishKey(expectedWord)}`);
+    }
     if (nextIndex < mistakePracticeWords.length) {
       const nextWord = mistakePracticeWords[nextIndex];
       setMistakePracticeIndex(nextIndex);
@@ -761,7 +1188,7 @@ function StudyContent() {
     setMistakePracticeStatus("idle");
     setMistakePracticeErrorCount(0);
     setFeedbackMessage("错词单独拼写完成，进入下一句。");
-    handleNextItem();
+    handleNextItem({ completedCurrentItem: true });
   }
 
   function handleMistakePracticeKeyDown(event: KeyboardEvent<HTMLInputElement>) {
@@ -815,76 +1242,97 @@ function StudyContent() {
 
   useEffect(() => {
     function handleWindowKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key !== " " || answerState === "typing" || answerState === "mistake-word-practice") {
+      if (event.key !== " ") {
+        return;
+      }
+
+      // Read latest state from refs to avoid stale-closure bugs
+      const currentState = answerStateRef.current;
+      if (currentState === "typing" || currentState === "mistake-word-practice") {
         return;
       }
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
         return;
       }
+
+      // Cooldown lock: ignore rapid repeated spaces within 400ms
+      const now = Date.now();
+      if (now - spaceCooldownRef.current < 400) {
+        return;
+      }
+      spaceCooldownRef.current = now;
+
       event.preventDefault();
-      if (answerState === "sentence-complete") {
+
+      if (currentState === "sentence-complete") {
+        if (isTranslatingWordsRef.current) {
+          return;
+        }
         void revealWordTranslations();
         return;
       }
-      if (answerState === "word-translations-shown") {
-        handleNextItem();
+      if (currentState === "word-translations-shown") {
+        handleNextItem({ completedCurrentItem: true });
       }
     }
 
     window.addEventListener("keydown", handleWindowKeyDown);
     return () => window.removeEventListener("keydown", handleWindowKeyDown);
-  }, [answerState, revealWordTranslations, handleNextItem]);
+  }, [revealWordTranslations, handleNextItem]);
 
   return (
     <main className="flex min-h-screen flex-col bg-white">
-      <header className="border-b bg-white px-5 py-4">
+      {celebrationSummary ? <CelebrationModal nextCourse={nextCourse} summary={celebrationSummary} /> : null}
+      <header className="border-b bg-white px-5 py-4 ipad:px-7 ipad:py-5">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-4">
             <div className="rounded-md border bg-slate-50 px-3 py-2 text-left">
               <p className="text-xs text-muted-foreground">学习时长</p>
-              <p className="font-mono text-lg font-semibold text-slate-900">{formatStudyDuration(activeStudySeconds)}</p>
+              <p className="font-mono text-lg font-semibold text-slate-900 ipad:text-2xl">{formatStudyDuration(activeStudySeconds)}</p>
             </div>
-            <Link className="text-sm font-medium text-primary hover:underline" href="/learning/import">
-              返回课程目录
+            <Link className="text-sm font-medium text-primary hover:underline ipad:text-base" href="/learning">
+              返回开始学习
             </Link>
             <div>
-              <p className="text-lg font-semibold">课程学习</p>
-              <p className="text-sm text-muted-foreground">{items.length > 0 ? `第 ${currentIndex + 1} 题 / 共 ${items.length} 题` : "拼写练习"}</p>
+              <p className="text-lg font-semibold ipad:text-xl">课程学习</p>
+              <p className="text-sm text-muted-foreground ipad:text-base">{items.length > 0 ? `第 ${currentIndex + 1} 题 / 共 ${items.length} 题` : "拼写练习"}</p>
             </div>
           </div>
-          <div className="text-lg font-bold text-slate-700">单词输入完成按空格判定，整句完成后按空格查看逐词中文</div>
+          <div className="text-base font-semibold text-slate-600 ipad:text-lg">
+            {device.isIPad ? "⌨ 空格判定单词 · 整句完成后空格查看逐词中文" : "单词输入完成按空格判定，整句完成后按空格查看逐词中文"}
+          </div>
         </div>
-        <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-muted">
+        <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-muted ipad:h-2.5">
           <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${progressPercent}%` }} />
         </div>
       </header>
 
-      <section className="flex flex-1 items-center justify-center px-6 py-12">
-        {isLoading ? <p className="text-lg font-bold text-muted-foreground">正在加载学习内容...</p> : null}
-        {!isLoading && errorMessage ? <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{errorMessage}</p> : null}
-        {!isLoading && !errorMessage && !currentItem ? <p className="text-lg font-bold text-muted-foreground">当前课程还没有导入内容。</p> : null}
+      <section className="flex flex-1 items-center justify-center px-6 py-12 ipad:px-10 ipad:py-16">
+        {isLoading ? <p className="text-lg font-bold text-muted-foreground ipad:text-xl">正在加载学习内容...</p> : null}
+        {!isLoading && errorMessage ? <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 ipad:px-6 ipad:py-4 ipad:text-base">{errorMessage}</p> : null}
+        {!isLoading && !errorMessage && !currentItem ? <p className="text-lg font-bold text-muted-foreground ipad:text-xl">当前课程还没有导入内容。</p> : null}
 
         {!isLoading && !errorMessage && currentItem ? (
-          <div className="w-full max-w-5xl space-y-10 text-center">
-            <div className="flex justify-center gap-3 text-sm text-muted-foreground">
-              <span className="rounded-full border px-3 py-1">{itemTypeLabels[currentItem.item_type]}</span>
-              <span className="rounded-full border px-3 py-1">{currentIndex + 1} / {items.length}</span>
+          <div className="w-full max-w-5xl space-y-10 text-center ipad:space-y-14">
+            <div className="flex justify-center gap-3 text-sm text-muted-foreground ipad:text-base">
+              <span className="rounded-full border px-3 py-1 ipad:px-4 ipad:py-1.5">{itemTypeLabels[currentItem.item_type]}</span>
+              <span className="rounded-full border px-3 py-1 ipad:px-4 ipad:py-1.5">{currentIndex + 1} / {items.length}</span>
             </div>
 
-            <div className="space-y-10">
-              <p className="text-4xl font-semibold tracking-tight text-slate-900">{currentItem.chinese_text}</p>
+            <div className="space-y-10 ipad:space-y-14">
+              <p className="text-4xl font-semibold tracking-tight text-slate-900 ipad:text-5xl ipad:leading-tight">{currentItem.chinese_text}</p>
               {answerState === "mistake-word-practice" ? (
-                <div className="mx-auto flex max-w-xl flex-col items-center gap-5 rounded-lg border bg-slate-50 px-6 py-7">
-                  <div className="space-y-2">
-                    <p className="text-base font-bold text-muted-foreground">错词单独拼写 {mistakePracticeIndex + 1} / {mistakePracticeWords.length}</p>
-                    <p className="text-sm font-bold text-muted-foreground">根据中文拼写正确英文</p>
-                    <p className="text-3xl font-bold text-slate-900">{currentMistakePracticeTranslation || "中文提示准备中"}</p>
+                <div className="mx-auto flex max-w-xl flex-col items-center gap-5 rounded-lg border bg-slate-50 px-6 py-7 ipad:max-w-2xl ipad:gap-7 ipad:px-10 ipad:py-10">
+                  <div className="space-y-2 ipad:space-y-3">
+                    <p className="text-base font-bold text-muted-foreground ipad:text-lg">错词单独拼写 {mistakePracticeIndex + 1} / {mistakePracticeWords.length}</p>
+                    <p className="text-sm font-bold text-muted-foreground ipad:text-base">根据中文拼写正确英文</p>
+                    <p className="text-3xl font-bold text-slate-900 ipad:text-4xl">{currentMistakePracticeTranslation || "中文提示准备中"}</p>
                   </div>
                   <input
                     ref={mistakePracticeInputRef}
                     aria-label="错词单独拼写"
-                    autoComplete="off"
-                    className={`h-16 w-full max-w-sm border-0 border-b-4 bg-transparent px-1 text-center text-4xl outline-none transition ${mistakePracticeStatus === "incorrect" ? "border-red-500 text-red-700" : "border-primary"}`}
+                    autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false}
+                    className={`h-16 w-full max-w-sm border-0 border-b-4 bg-transparent px-1 text-center text-4xl outline-none transition ipad:h-20 ipad:max-w-md ipad:text-5xl ${mistakePracticeStatus === "incorrect" ? "border-red-500 text-red-700" : "border-primary"}`}
                     value={mistakePracticeAnswer}
                     onChange={(event) => {
                       setMistakePracticeAnswer(event.target.value.replace(/\s/g, ""));
@@ -893,10 +1341,12 @@ function StudyContent() {
                     }}
                     onKeyDown={handleMistakePracticeKeyDown}
                   />
-                  <p className="text-lg font-bold text-muted-foreground">按空格或回车判定，连续 3 次错误后先进入下一句。</p>
+                  <p className="text-base font-bold text-muted-foreground ipad:text-lg">
+                    {device.isIPad ? "⌨ 空格/回车判定 · 连续 3 次错误后进入下一句" : "按空格或回车判定，连续 3 次错误后先进入下一句。"}
+                  </p>
                 </div>
               ) : (
-                <div className="flex flex-wrap items-end justify-center gap-x-4 gap-y-6">
+                <div className="flex flex-wrap items-end justify-center gap-x-4 gap-y-6 ipad:gap-x-6 ipad:gap-y-8">
                   {currentWords.map((word, index) => {
                     const normalizedWord = normalizeEnglishKey(word);
                     const status = wordStatuses[index] ?? "idle";
@@ -904,9 +1354,9 @@ function StudyContent() {
                     const shouldShowInput = !isDynamicFillBlankItem || isDynamicBlank;
                     const isActive = activeWordIndex === index && answerState === "typing" && shouldShowInput;
                     return (
-                      <div className="flex flex-col items-center gap-2" key={`${word}-${index}`} style={{ minWidth: getWordInputWidth(word) }}>
+                      <div className="flex flex-col items-center gap-2 ipad:gap-3" key={`${word}-${index}`} style={{ minWidth: getWordInputWidth(word) }}>
                         {answerState !== "typing" && shouldShowInput ? (
-                          <span className="rounded-full border px-3 py-0.5 text-xs text-muted-foreground">
+                          <span className="rounded-full border px-3 py-0.5 text-xs text-muted-foreground ipad:px-4 ipad:text-sm">
                             {commonPartLabels[normalizedWord] ?? itemTypeLabels[currentItem.item_type]}
                           </span>
                         ) : null}
@@ -916,8 +1366,8 @@ function StudyContent() {
                               inputRefs.current[index] = element;
                             }}
                             aria-label={isDynamicBlank ? `填空：${currentItem.chinese_text}` : `第 ${index + 1} 个单词`}
-                            autoComplete="off"
-                            className={`h-16 border-0 border-b-4 bg-transparent px-1 text-center text-4xl outline-none transition ${status === "correct" ? "border-emerald-500 text-emerald-700" : ""} ${status === "incorrect" ? "border-red-500 text-red-700" : ""} ${status === "idle" ? annotationColors[index % annotationColors.length] : ""} ${isActive ? "bg-primary/5" : ""}`}
+                            autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false}
+                            className={`h-16 border-0 border-b-4 bg-transparent px-1 text-center text-4xl outline-none transition ipad:h-20 ipad:text-5xl ${status === "correct" ? "border-emerald-500 text-emerald-700" : ""} ${status === "incorrect" ? "border-red-500 text-red-700" : ""} ${status === "idle" ? annotationColors[index % annotationColors.length] : ""} ${isActive ? "bg-primary/5" : ""}`}
                             disabled={answerState !== "typing"}
                             placeholder={isDynamicBlank ? "____" : undefined}
                             style={{ width: getWordInputWidth(word) }}
@@ -927,22 +1377,22 @@ function StudyContent() {
                             onKeyDown={(event) => handleWordKeyDown(event, index)}
                           />
                         ) : (
-                          <span className="flex h-16 items-center text-4xl font-semibold text-slate-900">{word}</span>
+                          <span className="flex h-16 items-center text-4xl font-semibold text-slate-900 ipad:h-20 ipad:text-5xl">{word}</span>
                         )}
-                        {answerState !== "typing" && shouldShowInput ? <span className="text-2xl font-medium text-slate-900">{word}</span> : null}
+                        {answerState !== "typing" && shouldShowInput ? <span className="text-2xl font-medium text-slate-900 ipad:text-3xl">{word}</span> : null}
                         {answerState === "word-translations-shown" ? (
-                          <span className="max-w-44 rounded-md bg-secondary px-3 py-1.5 text-lg font-bold text-slate-800">
+                          <span className="max-w-44 rounded-md bg-secondary px-3 py-1.5 text-lg font-bold text-slate-800 ipad:max-w-56 ipad:px-4 ipad:py-2 ipad:text-xl">
                             {wordTranslations[index] || "翻译失败"}
                           </span>
                         ) : null}
-                        {status === "incorrect" ? <span className="text-base font-bold text-red-600">正确：{word}</span> : null}
+                        {status === "incorrect" ? <span className="text-base font-bold text-red-600 ipad:text-lg">正确：{word}</span> : null}
                       </div>
                     );
                   })}
                 </div>
               )}
-              {feedbackMessage ? <p className={answerState !== "typing" ? "text-lg font-bold text-emerald-600" : "text-lg font-bold text-red-600"}>{feedbackMessage}</p> : null}
-              <div className="flex flex-wrap justify-center gap-3">
+              {feedbackMessage ? <p className={answerState !== "typing" ? "text-lg font-bold text-emerald-600 ipad:text-xl" : "text-lg font-bold text-red-600 ipad:text-xl"}>{feedbackMessage}</p> : null}
+              <div className="flex flex-wrap justify-center gap-3 ipad:gap-4">
                 {answerState === "mistake-word-practice" ? (
                   <>
                     <Button onClick={() => void checkMistakePracticeWord()} type="button">判定错词</Button>
@@ -959,12 +1409,12 @@ function StudyContent() {
               </div>
             </div>
 
-            <div className="flex flex-wrap justify-center gap-3">
-              {answerState === "word-translations-shown" ? <Button onClick={handleNextItem} type="button">下一句</Button> : null}
-              <Button onClick={resetAnswer} type="button" variant="secondary">
+            <div className="flex flex-wrap justify-center gap-3 ipad:gap-4">
+              {answerState === "word-translations-shown" ? <Button className="ipad:text-lg ipad:px-6 ipad:py-3" onClick={() => handleNextItem({ completedCurrentItem: true })} type="button">下一句</Button> : null}
+              <Button className="ipad:text-lg ipad:px-6 ipad:py-3" onClick={resetAnswer} type="button" variant="secondary">
                 再来一次
               </Button>
-              <Button onClick={handleNextItem} type="button" variant="outline">
+              <Button className="ipad:text-lg ipad:px-6 ipad:py-3" onClick={() => handleNextItem()} type="button" variant="outline">
                 跳过
               </Button>
             </div>

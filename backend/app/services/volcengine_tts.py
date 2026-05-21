@@ -23,6 +23,7 @@ class VolcengineTtsSettings:
     model: str
     voice: str
     language: str | None = None
+    speech_rate: int = 0
 
 
 def synthesize_volcengine_speech(text: str, settings: VolcengineTtsSettings) -> bytes:
@@ -85,7 +86,7 @@ def build_payload(text: str, settings: VolcengineTtsSettings) -> dict[str, objec
         "audio_params": {
             "format": "mp3",
             "sample_rate": 24000,
-            "speech_rate": 0,
+            "speech_rate": settings.speech_rate,
             "loudness_rate": 0,
         },
     }

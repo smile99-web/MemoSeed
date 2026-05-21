@@ -53,23 +53,23 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center px-6 py-10">
-      <Card className="w-full max-w-md">
+    <main className="flex min-h-screen items-center justify-center px-6 py-10 ipad:px-8">
+      <Card className="w-full max-w-md ipad:max-w-lg">
         <CardHeader>
-          <CardTitle>登录 MemoSeed</CardTitle>
-          <CardDescription>进入你的英语长期记忆学习系统。</CardDescription>
+          <CardTitle className="ipad:text-2xl">登录 MemoSeed</CardTitle>
+          <CardDescription className="ipad:text-lg">进入你的英语长期记忆学习系统。</CardDescription>
         </CardHeader>
         <CardContent>
           <form className="space-y-5" onSubmit={handleSubmit} noValidate>
             <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="email">
+              <label className="text-sm font-medium ipad:text-base" htmlFor="email">
                 邮箱
               </label>
               <input
                 id="email"
                 type="email"
                 autoComplete="email"
-                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring ipad:h-12 ipad:px-4 ipad:text-base"
                 value={form.email}
                 onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))}
               />
@@ -77,14 +77,14 @@ export default function LoginPage() {
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="password">
+              <label className="text-sm font-medium ipad:text-base" htmlFor="password">
                 密码
               </label>
               <input
                 id="password"
                 type="password"
                 autoComplete="current-password"
-                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring ipad:h-12 ipad:px-4 ipad:text-base"
                 value={form.password}
                 onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
               />
@@ -93,12 +93,12 @@ export default function LoginPage() {
 
             {errors.form ? <p className="text-sm text-red-600">{errors.form}</p> : null}
 
-            <Button className="w-full" disabled={isSubmitting} type="submit">
+            <Button className="w-full ipad:h-12 ipad:text-lg" disabled={isSubmitting} type="submit">
               {isSubmitting ? "登录中..." : "登录"}
             </Button>
           </form>
 
-          <p className="mt-6 text-center text-sm text-muted-foreground">
+          <p className="mt-6 text-center text-sm text-muted-foreground ipad:text-base">
             还没有账号？{" "}
             <Link className="font-medium text-primary hover:underline" href="/register">
               立即注册

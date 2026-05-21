@@ -1,9 +1,11 @@
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -11,11 +13,14 @@ from app.core.config import settings as app_settings
 from app.db.session import get_db
 from app.models.course import Course
 from app.models.learning_item import LearningItem
+from app.models.memory_state import MemoryState
 from app.models.mistake_log import MistakeLog
 from app.models.user import User
 from app.schemas.learning import (
     DynamicSentenceRequest,
     DynamicSentenceResponse,
+    LearningEncouragementRequest,
+    LearningEncouragementResponse,
     LearningImportResponse,
     LearningItemCreate,
     LearningItemRead,
@@ -26,7 +31,8 @@ from app.schemas.learning import (
 )
 from app.services.dynamic_sentence import generate_dynamic_review_sentence
 from app.services.learning_import import SUPPORTED_IMPORT_EXTENSIONS, import_learning_items, parse_txt_import, parse_xlsx_import
-from app.services.llm_translation import DEFAULT_LLM_TRANSLATION_SETTINGS, LlmTranslationSettings, translate_english_to_chinese
+from app.services.llm_translation import DEFAULT_LLM_TRANSLATION_SETTINGS, LlmTranslationSettings, generate_learning_text, translate_english_to_chinese
+from app.services.memory_dashboard import extract_mistake_words
 
 router = APIRouter()
 
@@ -58,6 +64,73 @@ def list_learning_items(
         statement = statement.where(LearningItem.course_id == course_id)
     items = db.scalars(statement.order_by(LearningItem.created_at.desc())).all()
     return [LearningItemRead.model_validate(item) for item in items]
+
+
+@router.get("/review-items", response_model=list[LearningItemRead])
+def list_due_review_items(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    exclude_course_id: UUID | None = None,
+    limit: int = 12,
+) -> list[LearningItemRead]:
+    capped_limit = max(1, min(limit, 30))
+    now = datetime.now(UTC)
+    item_by_id: dict[UUID, LearningItem] = {}
+    focus_words_by_item_id: dict[UUID, list[str]] = {}
+
+    def can_include(item: LearningItem) -> bool:
+        return exclude_course_id is None or item.course_id != exclude_course_id
+
+    def add_focus_words(item_id: UUID, words: list[str]) -> None:
+        if not words:
+            return
+        current_words = focus_words_by_item_id.setdefault(item_id, [])
+        for word in words:
+            normalized_word = word.strip().lower()
+            if normalized_word and normalized_word not in current_words:
+                current_words.append(normalized_word)
+
+    due_statement = (
+        select(LearningItem, MemoryState)
+        .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
+        .where(LearningItem.user_id == current_user.id, MemoryState.next_review_at <= now)
+        .order_by(MemoryState.next_review_at.asc())
+    )
+    if exclude_course_id is not None:
+        due_statement = due_statement.where(or_(LearningItem.course_id.is_(None), LearningItem.course_id != exclude_course_id))
+
+    for item, _memory_state in db.execute(due_statement).all():
+        item_by_id.setdefault(item.id, item)
+
+    mistake_statement = (
+        select(MistakeLog, LearningItem)
+        .join(LearningItem, LearningItem.id == MistakeLog.learning_item_id)
+        .where(
+            MistakeLog.user_id == current_user.id,
+            MistakeLog.is_resolved.is_(False),
+            LearningItem.user_id == current_user.id,
+        )
+        .order_by(MistakeLog.occurred_at.desc())
+    )
+    if exclude_course_id is not None:
+        mistake_statement = mistake_statement.where(or_(LearningItem.course_id.is_(None), LearningItem.course_id != exclude_course_id))
+
+    for mistake, item in db.execute(mistake_statement).all():
+        if can_include(item):
+            item_by_id.setdefault(item.id, item)
+            add_focus_words(item.id, extract_mistake_words(mistake.mistake_type, mistake.expected_answer, mistake.actual_answer))
+
+    review_items: list[LearningItemRead] = []
+    for item in item_by_id.values():
+        item_read = LearningItemRead.model_validate(item)
+        focus_words = focus_words_by_item_id.get(item.id, [])
+        if focus_words:
+            item_read = item_read.model_copy(update={"source": f"AI 动态复习：{', '.join(focus_words)}"})
+        review_items.append(item_read)
+        if len(review_items) >= capped_limit:
+            break
+
+    return review_items
 
 
 @router.post("/items", response_model=LearningItemRead, status_code=status.HTTP_201_CREATED)
@@ -107,6 +180,48 @@ def translate_learning_text(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     return LearningTranslationResponse(english_text=payload.english_text, chinese_text=chinese_text)
+
+
+@router.post("/encouragements", response_model=LearningEncouragementResponse)
+def generate_learning_encouragement(
+    payload: LearningEncouragementRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> LearningEncouragementResponse:
+    del current_user
+    translation_settings = build_llm_translation_settings(
+        payload.llm_provider,
+        payload.llm_base_url,
+        payload.llm_model,
+        payload.llm_api_key,
+    )
+    prompt = (
+        "Generate one short, warm encouragement for a primary or middle school English learner who just finished a lesson. "
+        "Return only compact JSON with keys chinese_text and english_text. "
+        "The Chinese sentence must be natural Simplified Chinese, and the English sentence must be a simple equivalent sentence. "
+        "Keep each sentence under 22 words. "
+        f"Lesson name: {payload.course_name.strip() or '本课'}. "
+        f"Duration seconds: {payload.duration_seconds}."
+    )
+
+    try:
+        generated_text = generate_learning_text(prompt, translation_settings)
+        normalized_text = generated_text.strip()
+        if normalized_text.startswith("```"):
+            normalized_text = normalized_text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        json_start = normalized_text.find("{")
+        json_end = normalized_text.rfind("}")
+        if json_start >= 0 and json_end >= json_start:
+            normalized_text = normalized_text[json_start : json_end + 1]
+        body = json.loads(normalized_text)
+        chinese_text = str(body.get("chinese_text", "")).strip()
+        english_text = str(body.get("english_text", "")).strip()
+    except (ValueError, json.JSONDecodeError, AttributeError) as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    if not chinese_text or not english_text:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="LLM encouragement response is incomplete")
+
+    return LearningEncouragementResponse(chinese_text=chinese_text, english_text=english_text)
 
 
 @router.post("/word-mistakes", response_model=WordMistakeLogResponse, status_code=status.HTTP_201_CREATED)

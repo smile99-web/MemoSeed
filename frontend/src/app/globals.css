@@ -28,5 +28,48 @@
 
   body {
     @apply bg-background text-foreground antialiased;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", "PingFang SC", "Noto Sans SC", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* ── iPad / touch device optimizations ── */
+
+/* Larger tap targets on touch devices (Apple HIG minimum: 44pt) */
+@media (pointer: coarse) {
+  button,
+  [role="button"],
+  a,
+  input[type="submit"],
+  input[type="button"] {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  input,
+  select,
+  textarea {
+    font-size: 16px !important; /* prevents iOS zoom on focus */
+  }
+}
+
+/* iPad: slightly larger base font for comfortable reading distance */
+@supports (-webkit-touch-callout: none) {
+  @media only screen and (min-device-width: 744px) {
+    html {
+      font-size: 17px;
+    }
+  }
+}
+
+/* Prevent overscroll bounce on iPad for app-like feel */
+@supports (-webkit-overflow-scrolling: touch) {
+  html {
+    overscroll-behavior: none;
+  }
+  body {
+    overscroll-behavior-y: none;
+    -webkit-overflow-scrolling: touch;
   }
 }

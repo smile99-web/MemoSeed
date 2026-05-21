@@ -42,6 +42,11 @@ export interface DynamicSentenceResponse {
   weak_words: string[];
 }
 
+export interface LearningEncouragementResponse {
+  chinese_text: string;
+  english_text: string;
+}
+
 export interface ApiErrorResponse {
   detail?: string;
 }
@@ -321,10 +326,65 @@ export async function generateDynamicSentence(
   return (await response.json()) as DynamicSentenceResponse;
 }
 
+export async function generateLearningEncouragement(
+  payload: {
+    course_name: string;
+    duration_seconds: number;
+  },
+  accessToken: string,
+  modelSettings: ModelSettings,
+): Promise<LearningEncouragementResponse> {
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/learning/encouragements`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ...payload,
+        llm_provider: modelSettings.llmProvider,
+        llm_base_url: modelSettings.llmBaseUrl,
+        llm_model: modelSettings.llmModel,
+        llm_api_key: modelSettings.llmApiKey,
+      }),
+    },
+    accessToken,
+  );
+
+  if (!response.ok) {
+    throw new Error(await parseUploadError(response));
+  }
+
+  return (await response.json()) as LearningEncouragementResponse;
+}
+
 export async function listLearningItems(accessToken: string, courseId?: string): Promise<LearningItem[]> {
   const queryString = courseId ? `?course_id=${courseId}` : "";
   const response = await fetchWithAuth(
     `${getApiBaseUrl()}/learning/items${queryString}`,
+    {
+      cache: "no-store",
+    },
+    accessToken,
+  );
+
+  if (!response.ok) {
+    throw new Error(await parseUploadError(response));
+  }
+
+  return (await response.json()) as LearningItem[];
+}
+
+export async function listDueReviewItems(accessToken: string, excludeCourseId?: string, limit = 12): Promise<LearningItem[]> {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  if (excludeCourseId) {
+    params.set("exclude_course_id", excludeCourseId);
+  }
+
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/learning/review-items?${params.toString()}`,
     {
       cache: "no-store",
     },

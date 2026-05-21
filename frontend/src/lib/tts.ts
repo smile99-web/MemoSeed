@@ -4,6 +4,11 @@ import { ModelSettings } from "@/lib/model-settings";
 
 let refreshTokenPromise: Promise<string | null> | null = null;
 
+export interface TtsSynthesisOptions {
+  speechRate?: number;
+  speed?: number;
+}
+
 async function getFreshAccessToken(): Promise<string | null> {
   refreshTokenPromise ??= refreshAccessToken().finally(() => {
     refreshTokenPromise = null;
@@ -17,12 +22,13 @@ export async function synthesizeVolcengineSpeech(
   language: string,
   settings: ModelSettings,
   accessToken: string,
+  options: TtsSynthesisOptions = {},
 ): Promise<Blob> {
-  let response = await requestVolcengineSpeech(text, voice, language, settings, accessToken);
+  let response = await requestVolcengineSpeech(text, voice, language, settings, accessToken, options);
   if (response.status === 401) {
     const refreshedAccessToken = await getFreshAccessToken();
     if (refreshedAccessToken) {
-      response = await requestVolcengineSpeech(text, voice, language, settings, refreshedAccessToken);
+      response = await requestVolcengineSpeech(text, voice, language, settings, refreshedAccessToken, options);
     }
   }
 
@@ -38,12 +44,13 @@ export async function synthesizeKokoroSpeech(
   voice: string,
   settings: ModelSettings,
   accessToken: string,
+  options: TtsSynthesisOptions = {},
 ): Promise<Blob> {
-  let response = await requestKokoroSpeech(text, voice, settings, accessToken);
+  let response = await requestKokoroSpeech(text, voice, settings, accessToken, options);
   if (response.status === 401) {
     const refreshedAccessToken = await getFreshAccessToken();
     if (refreshedAccessToken) {
-      response = await requestKokoroSpeech(text, voice, settings, refreshedAccessToken);
+      response = await requestKokoroSpeech(text, voice, settings, refreshedAccessToken, options);
     }
   }
 
@@ -60,6 +67,7 @@ async function requestVolcengineSpeech(
   language: string,
   settings: ModelSettings,
   accessToken: string,
+  options: TtsSynthesisOptions,
 ): Promise<Response> {
   return fetch(`${getApiBaseUrl()}/tts/speech`, {
     method: "POST",
@@ -75,11 +83,12 @@ async function requestVolcengineSpeech(
       x_api_key: settings.volcengineTtsApiKey,
       resource_id: settings.volcengineTtsResourceId,
       model: settings.volcengineTtsModel,
+      speech_rate: options.speechRate,
     }),
   });
 }
 
-async function requestKokoroSpeech(text: string, voice: string, settings: ModelSettings, accessToken: string): Promise<Response> {
+async function requestKokoroSpeech(text: string, voice: string, settings: ModelSettings, accessToken: string, options: TtsSynthesisOptions): Promise<Response> {
   return fetch(`${getApiBaseUrl()}/tts/kokoro/speech`, {
     method: "POST",
     headers: {
@@ -91,6 +100,7 @@ async function requestKokoroSpeech(text: string, voice: string, settings: ModelS
       voice,
       api_url: settings.ttsApiUrl,
       model: settings.ttsProvider,
+      speed: options.speed,
     }),
   });
 }
@@ -115,7 +125,7 @@ function getOrCreateAudioContext(): AudioContext {
   return sharedAudioContext;
 }
 
-export async function playAudioBlob(audioBlob: Blob): Promise<void> {
+export async function playAudioBlob(audioBlob: Blob, playbackRate = 1): Promise<void> {
   if (audioBlob.size <= 0) {
     throw new Error("TTS returned empty audio");
   }
@@ -129,6 +139,7 @@ export async function playAudioBlob(audioBlob: Blob): Promise<void> {
   const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
   const source = audioContext.createBufferSource();
   source.buffer = audioBuffer;
+  source.playbackRate.value = Math.max(0.25, Math.min(playbackRate, 4));
   source.connect(audioContext.destination);
 
   await new Promise<void>((resolve, reject) => {

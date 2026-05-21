@@ -5,6 +5,12 @@ const config: Config = {
   content: ["./src/app/**/*.{ts,tsx}", "./src/components/**/*.{ts,tsx}", "./src/lib/**/*.{ts,tsx}"],
   theme: {
     extend: {
+      screens: {
+        // iPad Mini portrait: 744px, iPad Pro 11" portrait: 834px
+        ipad: "744px",
+        // iPad landscape / larger tablets
+        "ipad-lg": "1024px",
+      },
       colors: {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",

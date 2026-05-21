@@ -47,11 +47,11 @@ function StatCard({ label, value, hint }: { label: string; value: string | numbe
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardDescription>{label}</CardDescription>
-        <CardTitle className="text-3xl">{value}</CardTitle>
+        <CardDescription className="ipad:text-base">{label}</CardDescription>
+        <CardTitle className="text-3xl ipad:text-4xl">{value}</CardTitle>
       </CardHeader>
       <CardContent>
-        <p className="text-sm text-muted-foreground">{hint}</p>
+        <p className="text-sm text-muted-foreground ipad:text-base">{hint}</p>
       </CardContent>
     </Card>
   );
@@ -61,8 +61,8 @@ function WordTable({ title, words }: { title: string; words: WordMasterySummary[
   return (
     <Card>
       <CardHeader>
-        <CardTitle>{title}</CardTitle>
-        <CardDescription>显示已进入复习记录的单词，按记忆强度、错误次数和遗忘风险排序。</CardDescription>
+        <CardTitle className="ipad:text-xl">{title}</CardTitle>
+        <CardDescription className="ipad:text-base">显示已进入复习记录的单词，按记忆强度、错误次数和遗忘风险排序。</CardDescription>
       </CardHeader>
       <CardContent>
         {words.length === 0 ? (
@@ -129,23 +129,23 @@ export default function DashboardPage() {
   }, []);
 
   return (
-    <main className="min-h-screen px-6 py-10">
-      <section className="mx-auto max-w-6xl space-y-6">
+    <main className="min-h-screen px-6 py-10 ipad:px-8 ipad:py-14">
+      <section className="mx-auto max-w-6xl space-y-6 ipad:space-y-8">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
-            <Link className="text-sm font-medium text-primary hover:underline" href="/">
+            <Link className="text-sm font-medium text-primary hover:underline ipad:text-base" href="/">
               返回首页
             </Link>
-            <h1 className="mt-4 text-3xl font-bold tracking-tight">学习数据看板</h1>
-            <p className="mt-2 text-muted-foreground">基于 SM-2 复习记录、错词日志和记忆强度生成。</p>
+            <h1 className="mt-4 text-3xl font-bold tracking-tight ipad:text-4xl">学习数据看板</h1>
+            <p className="mt-2 text-muted-foreground ipad:text-lg">基于 SM-2 复习记录、错词日志和记忆强度生成。</p>
           </div>
-          <Button asChild variant="secondary">
-            <Link href="/learning/import">继续学习</Link>
+          <Button asChild variant="secondary" className="ipad:text-lg ipad:px-6 ipad:py-3">
+            <Link href="/learning">继续学习</Link>
           </Button>
         </div>
 
-        {isLoading ? <p className="text-sm text-muted-foreground">正在加载数据...</p> : null}
-        {!isLoading && errorMessage ? <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{errorMessage}</p> : null}
+        {isLoading ? <p className="text-sm text-muted-foreground ipad:text-base">正在加载数据...</p> : null}
+        {!isLoading && errorMessage ? <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 ipad:px-6 ipad:py-4 ipad:text-base">{errorMessage}</p> : null}
 
         {dashboard ? (
           <>
@@ -172,11 +172,11 @@ export default function DashboardPage() {
             <Card>
               <CardHeader>
                 <CardTitle>复习时间分布</CardTitle>
-                <CardDescription>按下一次复习时间聚合。</CardDescription>
+                <CardDescription>按短期错词强化和长期 SM-2 复习曲线聚合。</CardDescription>
               </CardHeader>
               <CardContent className="space-y-3">
                 {dashboard.review_buckets.map((bucket) => (
-                  <div className="grid grid-cols-[5rem_1fr_3rem] items-center gap-3" key={bucket.label}>
+                  <div className="grid grid-cols-[6rem_1fr_3rem] items-center gap-3" key={bucket.label}>
                     <span className="text-sm text-muted-foreground">{bucket.label}</span>
                     <div className="h-2 overflow-hidden rounded-full bg-muted">
                       <div

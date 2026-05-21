@@ -36,16 +36,18 @@ def synthesize_kokoro_speech(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Kokoro API URL must point to localhost")
 
     api_url = payload.api_url.strip().rstrip("/")
+    request_body: dict[str, object] = {
+        "model": payload.model,
+        "input": payload.text,
+        "voice": payload.voice,
+        "response_format": "mp3",
+    }
+    if payload.speed is not None:
+        request_body["speed"] = payload.speed
+
     request = Request(
         f"{api_url}/v1/audio/speech",
-        data=json.dumps(
-            {
-                "model": payload.model,
-                "input": payload.text,
-                "voice": payload.voice,
-                "response_format": "mp3",
-            }
-        ).encode("utf-8"),
+        data=json.dumps(request_body).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -78,6 +80,7 @@ def synthesize_speech(
         model=payload.model or app_settings.volcengine_tts_model or DEFAULT_VOLCENGINE_TTS_MODEL,
         voice=voice,
         language=payload.language,
+        speech_rate=payload.speech_rate or 0,
     )
 
     try:

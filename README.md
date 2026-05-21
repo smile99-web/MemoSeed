@@ -105,6 +105,11 @@ docker compose up --build
 - OpenAPI: http://localhost:8000/docs
 - PostgreSQL: localhost:5432
 
+局域网设备访问：
+
+- Frontend: `http://你的电脑局域网IP:3000`
+- 前端默认通过同源 `/api/v1` 代理访问后端，手机或其他电脑不需要把 API 地址改成自己的 `localhost`。
+
 停止服务：
 
 ```bash
@@ -177,6 +182,12 @@ npx prisma generate --schema prisma/schema.prisma
 cd frontend
 npm install
 npm run dev
+```
+
+局域网设备访问本地前端时，使用：
+
+```text
+http://你的电脑局域网IP:3000
 ```
 
 常用命令：
