@@ -39,6 +39,14 @@ export interface StudyTimeSummary {
   total_seconds: number;
 }
 
+export interface CourseProgressStats {
+  course_id: string;
+  completed_count: number;
+  total_duration_seconds: number;
+  total_correct_word_count: number;
+  last_completed_at: string | null;
+}
+
 export interface MemoryDashboard {
   total_items: number;
   total_words: number;
@@ -140,4 +148,36 @@ export async function recordStudyTime(accessToken: string, durationSeconds: numb
   if (!response.ok) {
     throw new Error(await parseApiError(response));
   }
+}
+
+export async function recordCourseCompletion(accessToken: string, courseId: string, durationSeconds: number, correctWordCount: number): Promise<void> {
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/memory/course-completions`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        course_id: courseId,
+        duration_seconds: Math.max(0, Math.round(durationSeconds)),
+        correct_word_count: Math.max(0, Math.round(correctWordCount)),
+      }),
+    },
+    accessToken,
+  );
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+}
+
+export async function listCourseProgressStats(accessToken: string, packageId?: string): Promise<CourseProgressStats[]> {
+  const searchParams = new URLSearchParams();
+  if (packageId) {
+    searchParams.set("package_id", packageId);
+  }
+  const query = searchParams.toString();
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/memory/course-stats${query ? `?${query}` : ""}`, { cache: "no-store" }, accessToken);
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as CourseProgressStats[];
 }

@@ -10,6 +10,7 @@ from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.ai_daily_report import AiDailyReport
 from app.models.course import Course
+from app.models.course_completion_log import CourseCompletionLog
 from app.models.course_package import CoursePackage
 from app.models.daily_plan import DailyPlan
 from app.models.learning_item import LearningItem
@@ -70,6 +71,11 @@ def export_user_data(
         "study_time_logs": serialize_models(
             db.scalars(select(StudyTimeLog).where(StudyTimeLog.user_id == current_user.id).order_by(StudyTimeLog.recorded_at.asc())).all()
         ),
+        "course_completion_logs": serialize_models(
+            db.scalars(
+                select(CourseCompletionLog).where(CourseCompletionLog.user_id == current_user.id).order_by(CourseCompletionLog.completed_at.asc())
+            ).all()
+        ),
         "daily_plans": serialize_models(db.scalars(select(DailyPlan).where(DailyPlan.user_id == current_user.id).order_by(DailyPlan.plan_date.asc())).all()),
         "ai_daily_reports": serialize_models(
             db.scalars(select(AiDailyReport).where(AiDailyReport.user_id == current_user.id).order_by(AiDailyReport.report_date.asc())).all()
@@ -97,6 +103,7 @@ def import_user_data(
         "review_logs": 0,
         "mistake_logs": 0,
         "study_time_logs": 0,
+        "course_completion_logs": 0,
         "daily_plans": 0,
         "ai_daily_reports": 0,
     }
@@ -216,6 +223,21 @@ def import_user_data(
             )
         )
         summary["study_time_logs"] += 1
+
+    for row in as_rows(payload.get("course_completion_logs")):
+        course_id = id_maps["courses"].get(str(row.get("course_id")))
+        if course_id is None:
+            continue
+        db.add(
+            CourseCompletionLog(
+                user_id=current_user.id,
+                course_id=course_id,
+                duration_seconds=as_int(row.get("duration_seconds"), 0),
+                correct_word_count=as_int(row.get("correct_word_count"), 0),
+                completed_at=parse_datetime(row.get("completed_at")) or datetime.now(UTC),
+            )
+        )
+        summary["course_completion_logs"] += 1
 
     for row in as_rows(payload.get("daily_plans")):
         db.add(

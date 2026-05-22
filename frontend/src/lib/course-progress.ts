@@ -54,8 +54,16 @@ export function addCourseCompletion(courseId: string, durationSeconds: number, c
   return nextStats;
 }
 
-export function sumCourseCompletionDuration(courseIds: string[]): number {
-  return courseIds.reduce((totalSeconds, courseId) => totalSeconds + loadCourseCompletionStats(courseId).totalDurationSeconds, 0);
+export function sumCourseCompletionStats(courseIds: string[]): CourseCompletionStats {
+  return courseIds.reduce<CourseCompletionStats>((totalStats, courseId) => {
+    const stats = loadCourseCompletionStats(courseId);
+    return {
+      completedCount: totalStats.completedCount + stats.completedCount,
+      totalDurationSeconds: totalStats.totalDurationSeconds + stats.totalDurationSeconds,
+      totalCorrectWordCount: totalStats.totalCorrectWordCount + stats.totalCorrectWordCount,
+      lastCompletedAt: !totalStats.lastCompletedAt || (stats.lastCompletedAt && stats.lastCompletedAt > totalStats.lastCompletedAt) ? stats.lastCompletedAt : totalStats.lastCompletedAt,
+    };
+  }, { ...emptyStats });
 }
 
 export function formatCourseDuration(totalSeconds: number): string {

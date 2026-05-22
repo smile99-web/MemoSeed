@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
 from app.core.config import settings
+from app.db.session import engine
+from app.models.course_completion_log import CourseCompletionLog
 
 app = FastAPI(
     title=settings.app_name,
@@ -19,6 +21,11 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix=settings.api_v1_prefix)
+
+
+@app.on_event("startup")
+def ensure_runtime_tables() -> None:
+    CourseCompletionLog.__table__.create(bind=engine, checkfirst=True)
 
 
 @app.get("/health", tags=["health"])

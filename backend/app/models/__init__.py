@@ -1,5 +1,6 @@
 from app.models.ai_daily_report import AiDailyReport
 from app.models.course import Course
+from app.models.course_completion_log import CourseCompletionLog
 from app.models.course_package import CoursePackage
 from app.models.daily_plan import DailyPlan
 from app.models.learning_item import LearningItem
@@ -14,6 +15,7 @@ from app.models.user_model_settings import UserModelSettings
 __all__ = [
     "AiDailyReport",
     "Course",
+    "CourseCompletionLog",
     "CoursePackage",
     "DailyPlan",
     "LearningItem",

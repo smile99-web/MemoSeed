@@ -2,17 +2,18 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.course import Course
+from app.models.course_completion_log import CourseCompletionLog
 from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
 from app.models.study_time_log import StudyTimeLog
 from app.models.user import User
-from app.schemas.memory import MemoryDashboardResponse, MemoryScheduleResponse, MemoryStateRead, ReviewScoreRequest, StudyTimeLogRequest
+from app.schemas.memory import CourseCompletionRequest, CourseProgressStats, MemoryDashboardResponse, MemoryScheduleResponse, MemoryStateRead, ReviewScoreRequest, StudyTimeLogRequest
 from app.services.memory_dashboard import build_memory_dashboard
 from app.schemas.review import MistakeLogRead, ReviewLogRead
 from app.services.memory_scheduler import schedule_memory_review
@@ -81,3 +82,71 @@ def record_study_time(
 
     db.add(StudyTimeLog(user_id=current_user.id, course_id=payload.course_id, duration_seconds=payload.duration_seconds))
     db.commit()
+
+
+@router.post("/course-completions", status_code=status.HTTP_204_NO_CONTENT)
+def record_course_completion(
+    payload: CourseCompletionRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> None:
+    course = db.scalar(select(Course).where(Course.id == payload.course_id, Course.user_id == current_user.id))
+    if course is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Course not found")
+
+    db.add(
+        CourseCompletionLog(
+            user_id=current_user.id,
+            course_id=payload.course_id,
+            duration_seconds=payload.duration_seconds,
+            correct_word_count=payload.correct_word_count,
+        )
+    )
+    db.commit()
+
+
+@router.get("/course-stats", response_model=list[CourseProgressStats])
+def get_course_progress_stats(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    package_id: UUID | None = None,
+) -> list[CourseProgressStats]:
+    course_statement = select(Course.id).where(Course.user_id == current_user.id)
+    if package_id is not None:
+        course_statement = course_statement.where(Course.package_id == package_id)
+    course_ids = list(db.scalars(course_statement).all())
+    if not course_ids:
+        return []
+
+    duration_by_course = {
+        course_id: int(total_seconds or 0)
+        for course_id, total_seconds in db.execute(
+            select(StudyTimeLog.course_id, func.coalesce(func.sum(StudyTimeLog.duration_seconds), 0))
+            .where(StudyTimeLog.user_id == current_user.id, StudyTimeLog.course_id.in_(course_ids))
+            .group_by(StudyTimeLog.course_id)
+        ).all()
+    }
+    completion_by_course = {
+        course_id: (int(completed_count or 0), int(correct_word_count or 0), last_completed_at)
+        for course_id, completed_count, correct_word_count, last_completed_at in db.execute(
+            select(
+                CourseCompletionLog.course_id,
+                func.count(CourseCompletionLog.id),
+                func.coalesce(func.sum(CourseCompletionLog.correct_word_count), 0),
+                func.max(CourseCompletionLog.completed_at),
+            )
+            .where(CourseCompletionLog.user_id == current_user.id, CourseCompletionLog.course_id.in_(course_ids))
+            .group_by(CourseCompletionLog.course_id)
+        ).all()
+    }
+
+    return [
+        CourseProgressStats(
+            course_id=course_id,
+            completed_count=completion_by_course.get(course_id, (0, 0, None))[0],
+            total_duration_seconds=duration_by_course.get(course_id, 0),
+            total_correct_word_count=completion_by_course.get(course_id, (0, 0, None))[1],
+            last_completed_at=completion_by_course.get(course_id, (0, 0, None))[2],
+        )
+        for course_id in course_ids
+    ]

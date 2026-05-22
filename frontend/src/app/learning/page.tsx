@@ -7,9 +7,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { getAccessToken } from "@/lib/auth";
-import { CourseCompletionStats, formatCourseDuration, loadCourseCompletionStats, sumCourseCompletionDuration } from "@/lib/course-progress";
+import { CourseCompletionStats, formatCourseDuration, loadCourseCompletionStats } from "@/lib/course-progress";
 import { Course, CoursePackage, listCoursePackages, listCourses } from "@/lib/courses";
 import { LearningItem, listLearningItems } from "@/lib/learning";
+import { CourseProgressStats, listCourseProgressStats } from "@/lib/memory";
 
 interface CourseWithItems {
   course: Course;
@@ -20,6 +21,36 @@ interface CourseWithItems {
 
 const previewLimit = 3;
 
+function statsFromServer(courseId: string, statsByCourseId: Map<string, CourseProgressStats>): CourseCompletionStats {
+  const stats = statsByCourseId.get(courseId);
+  return {
+    completedCount: stats?.completed_count ?? 0,
+    totalDurationSeconds: stats?.total_duration_seconds ?? 0,
+    totalCorrectWordCount: stats?.total_correct_word_count ?? 0,
+    lastCompletedAt: stats?.last_completed_at ?? null,
+  };
+}
+
+function sumStats(stats: CourseCompletionStats[]): CourseCompletionStats {
+  return stats.reduce<CourseCompletionStats>(
+    (totalStats, statsItem) => ({
+      completedCount: totalStats.completedCount + statsItem.completedCount,
+      totalDurationSeconds: totalStats.totalDurationSeconds + statsItem.totalDurationSeconds,
+      totalCorrectWordCount: totalStats.totalCorrectWordCount + statsItem.totalCorrectWordCount,
+      lastCompletedAt:
+        !totalStats.lastCompletedAt || (statsItem.lastCompletedAt && statsItem.lastCompletedAt > totalStats.lastCompletedAt)
+          ? statsItem.lastCompletedAt
+          : totalStats.lastCompletedAt,
+    }),
+    {
+      completedCount: 0,
+      totalDurationSeconds: 0,
+      totalCorrectWordCount: 0,
+      lastCompletedAt: null,
+    },
+  );
+}
+
 export default function LearningStartPage() {
   const [packages, setPackages] = useState<CoursePackage[]>([]);
   const [selectedPackageId, setSelectedPackageId] = useState("");
@@ -27,7 +58,7 @@ export default function LearningStartPage() {
   const [isLoadingPackages, setIsLoadingPackages] = useState(true);
   const [isLoadingCourses, setIsLoadingCourses] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [packageDurationSeconds, setPackageDurationSeconds] = useState<Record<string, number>>({});
+  const [packageCompletionStats, setPackageCompletionStats] = useState<Record<string, CourseCompletionStats>>({});
 
   const packagesRef = useRef<CoursePackage[]>([]);
   packagesRef.current = packages;
@@ -53,13 +84,15 @@ export default function LearningStartPage() {
       try {
         const nextPackages = await listCoursePackages(accessToken);
         setPackages(nextPackages);
-        const packageDurations = await Promise.all(
+        const nextPackageCompletionStats = await Promise.all(
           nextPackages.map(async (coursePackage) => {
             const packageCourses = await listCourses(accessToken, coursePackage.id);
-            return [coursePackage.id, sumCourseCompletionDuration(packageCourses.map((course) => course.id))] as const;
+            const serverStats = await listCourseProgressStats(accessToken, coursePackage.id);
+            const statsByCourseId = new Map(serverStats.map((stats) => [stats.course_id, stats]));
+            return [coursePackage.id, sumStats(packageCourses.map((course) => statsFromServer(course.id, statsByCourseId)))] as const;
           }),
         );
-        setPackageDurationSeconds(Object.fromEntries(packageDurations));
+        setPackageCompletionStats(Object.fromEntries(nextPackageCompletionStats));
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "读取课程包失败");
       } finally {
@@ -82,18 +115,28 @@ export default function LearningStartPage() {
       setErrorMessage(null);
       try {
         const nextCourses = await listCourses(accessToken, packageId);
+        const serverStats = await listCourseProgressStats(accessToken, packageId);
+        const statsByCourseId = new Map(serverStats.map((stats) => [stats.course_id, stats]));
         const nextRows = await Promise.all(
           nextCourses.map(async (course) => {
             const items = await listLearningItems(accessToken, course.id);
+            const serverCourseStats = statsFromServer(course.id, statsByCourseId);
+            const localCourseStats = loadCourseCompletionStats(course.id);
             return {
               course,
               itemCount: items.length,
               previewItems: items.slice(0, previewLimit),
-              completionStats: loadCourseCompletionStats(course.id),
+              completionStats: {
+                completedCount: Math.max(serverCourseStats.completedCount, localCourseStats.completedCount),
+                totalDurationSeconds: Math.max(serverCourseStats.totalDurationSeconds, localCourseStats.totalDurationSeconds),
+                totalCorrectWordCount: Math.max(serverCourseStats.totalCorrectWordCount, localCourseStats.totalCorrectWordCount),
+                lastCompletedAt: serverCourseStats.lastCompletedAt ?? localCourseStats.lastCompletedAt,
+              },
             };
           }),
         );
         setCourseRows(nextRows);
+        setPackageCompletionStats((prev) => ({ ...prev, [packageId]: sumStats(nextRows.map((row) => row.completionStats)) }));
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "读取课程内容失败");
         setCourseRows([]);
@@ -110,22 +153,32 @@ export default function LearningStartPage() {
     void loadPackageCourses(selectedPackageId);
   }, [selectedPackageId]);
 
-  const refreshCompletionStats = useCallback(function refreshCompletionStats() {
-    // Re-read per-course stats from localStorage so the UI reflects
-    // completions from the study session even when the page wasn't remounted.
+  const refreshCompletionStats = useCallback(async function refreshCompletionStats() {
+    const accessToken = getAccessToken();
+    if (!accessToken) {
+      return;
+    }
+    const pkgId = selectedPackageIdRef.current;
+    const serverStats = await listCourseProgressStats(accessToken, pkgId || undefined);
+    const statsByCourseId = new Map(serverStats.map((stats) => [stats.course_id, stats]));
+
     setCourseRows((current) => {
       if (current.length === 0) {
         return current;
       }
-      let totalSeconds = 0;
       const refreshed = current.map((row) => {
-        const stats = loadCourseCompletionStats(row.course.id);
-        totalSeconds += stats.totalDurationSeconds;
+        const serverCourseStats = statsFromServer(row.course.id, statsByCourseId);
+        const localCourseStats = loadCourseCompletionStats(row.course.id);
+        const stats = {
+          completedCount: Math.max(serverCourseStats.completedCount, localCourseStats.completedCount),
+          totalDurationSeconds: Math.max(serverCourseStats.totalDurationSeconds, localCourseStats.totalDurationSeconds),
+          totalCorrectWordCount: Math.max(serverCourseStats.totalCorrectWordCount, localCourseStats.totalCorrectWordCount),
+          lastCompletedAt: serverCourseStats.lastCompletedAt ?? localCourseStats.lastCompletedAt,
+        };
         return { ...row, completionStats: stats };
       });
-      const pkgId = selectedPackageIdRef.current;
       if (pkgId) {
-        setPackageDurationSeconds((prev) => ({ ...prev, [pkgId]: totalSeconds }));
+        setPackageCompletionStats((prev) => ({ ...prev, [pkgId]: sumStats(refreshed.map((row) => row.completionStats)) }));
       }
       return refreshed;
     });
@@ -134,7 +187,7 @@ export default function LearningStartPage() {
   useEffect(() => {
     function handleVisibilityChange() {
       if (document.visibilityState === "visible") {
-        refreshCompletionStats();
+        void refreshCompletionStats();
       }
     }
 
@@ -177,6 +230,7 @@ export default function LearningStartPage() {
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
                 {packages.map((coursePackage) => {
                   const isSelected = coursePackage.id === selectedPackageId;
+                  const stats = packageCompletionStats[coursePackage.id];
                   return (
                     <button
                       className={`rounded-lg border bg-card p-4 text-left shadow-sm transition-colors hover:border-primary ipad:p-5 ${
@@ -196,9 +250,10 @@ export default function LearningStartPage() {
                             <p className="mt-1 line-clamp-2 text-sm leading-6 text-muted-foreground ipad:text-base">
                               {coursePackage.description || "暂无课程包说明"}
                             </p>
-                            <p className="mt-2 text-sm font-medium text-slate-700 ipad:text-base">
-                              总时长：{formatCourseDuration(packageDurationSeconds[coursePackage.id] ?? 0)}
-                            </p>
+                            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm font-medium text-slate-700 ipad:text-base">
+                              <span>完成：{stats?.completedCount ?? 0} 次</span>
+                              <span>总时长：{formatCourseDuration(stats?.totalDurationSeconds ?? 0)}</span>
+                            </div>
                           </div>
                         </div>
                         <ChevronRight className={`mt-2 h-5 w-5 shrink-0 ${isSelected ? "text-primary" : "text-muted-foreground"}`} />

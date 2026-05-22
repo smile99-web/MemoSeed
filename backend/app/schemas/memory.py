@@ -56,6 +56,20 @@ class StudyTimeLogRequest(BaseModel):
     duration_seconds: int = Field(ge=1, le=3600)
 
 
+class CourseCompletionRequest(BaseModel):
+    course_id: UUID
+    duration_seconds: int = Field(default=0, ge=0, le=86400)
+    correct_word_count: int = Field(default=0, ge=0)
+
+
+class CourseProgressStats(BaseModel):
+    course_id: UUID
+    completed_count: int
+    total_duration_seconds: int
+    total_correct_word_count: int
+    last_completed_at: datetime | None
+
+
 class StudyTimeSummary(BaseModel):
     today_seconds: int
     week_seconds: int

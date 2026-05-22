@@ -10,7 +10,7 @@ import { getAccessToken, getAuthUser } from "@/lib/auth";
 import { addCourseCompletion, formatCourseDuration } from "@/lib/course-progress";
 import { Course, listCoursePackages, listCourses } from "@/lib/courses";
 import { generateDynamicSentence, generateLearningEncouragement, LearningItem, listDueReviewItems, listLearningItems, logWordMistake, translateLearningText } from "@/lib/learning";
-import { recordStudyTime, scheduleMemoryReview } from "@/lib/memory";
+import { recordCourseCompletion, recordStudyTime, scheduleMemoryReview } from "@/lib/memory";
 import { ModelSettings, defaultModelSettings, getModelSettings, loadPersistedModelSettings } from "@/lib/model-settings";
 import { playAudioBlob, synthesizeKokoroSpeech, synthesizeVolcengineSpeech, TtsSynthesisOptions } from "@/lib/tts";
 
@@ -470,9 +470,9 @@ function StudyContent() {
     setPendingMistakePracticeWords(words);
   }, []);
 
-  function getRequiredWordIndexes(): number[] {
+  const getRequiredWordIndexes = useCallback(function getRequiredWordIndexes(): number[] {
     return isDynamicFillBlankItem ? dynamicReviewWordIndexes : currentWords.map((_, index) => index);
-  }
+  }, [currentWords, dynamicReviewWordIndexes, isDynamicFillBlankItem]);
 
   function areRequiredWordAnswersCorrect(nextAnswers: string[]): boolean {
     return getRequiredWordIndexes().every((wordIndex) => normalizeTypedWord(nextAnswers[wordIndex] ?? "") === normalizeTypedWord(currentWords[wordIndex] ?? ""));
@@ -549,14 +549,44 @@ function StudyContent() {
     await speakInVoiceSequence(sequenceId, englishText, settings.ttsEnglishVoice, "en-US", settings);
   }, [speakInVoiceSequence, startVoiceSequence, waitInVoiceSequence]);
 
+  const focusInputAtEnd = useCallback(function focusInputAtEnd(input: HTMLInputElement | null) {
+    if (!input) {
+      return;
+    }
+    input.focus();
+    const cursorPosition = input.value.length;
+    input.setSelectionRange(cursorPosition, cursorPosition);
+  }, []);
+
+  const focusCurrentUnfinishedWord = useCallback(function focusCurrentUnfinishedWord() {
+    if (answerStateRef.current === "mistake-word-practice") {
+      focusInputAtEnd(mistakePracticeInputRef.current);
+      return;
+    }
+    if (answerStateRef.current !== "typing") {
+      return;
+    }
+
+    const requiredIndexes = getRequiredWordIndexes();
+    const firstUnfinished = requiredIndexes.find((index) => {
+      const inputValue = inputRefs.current[index]?.value ?? wordAnswers[index] ?? "";
+      return normalizeTypedWord(inputValue) !== normalizeTypedWord(currentWords[index] ?? "");
+    });
+    const targetIndex = firstUnfinished ?? activeWordIndex;
+    focusInputAtEnd(inputRefs.current[targetIndex] ?? null);
+  }, [activeWordIndex, currentWords, focusInputAtEnd, getRequiredWordIndexes, wordAnswers]);
+
   const handleSpeakEnglish = useCallback(function handleSpeakEnglish() {
     if (!currentItem?.english_text) {
       return;
     }
+    focusCurrentUnfinishedWord();
     const sequenceId = startVoiceSequence();
     const settings = modelSettingsRef.current;
-    void speakInVoiceSequence(sequenceId, currentItem.english_text, settings.ttsEnglishVoice, "en-US", settings, MANUAL_ENGLISH_TTS_OPTIONS);
-  }, [currentItem, speakInVoiceSequence, startVoiceSequence]);
+    void speakInVoiceSequence(sequenceId, currentItem.english_text, settings.ttsEnglishVoice, "en-US", settings, MANUAL_ENGLISH_TTS_OPTIONS).finally(() => {
+      window.setTimeout(focusCurrentUnfinishedWord, 0);
+    });
+  }, [currentItem, focusCurrentUnfinishedWord, speakInVoiceSequence, startVoiceSequence]);
 
   const flushStudyTime = useCallback(async function flushStudyTime(force = false) {
     if (isFlushingStudyTimeRef.current) {
@@ -868,6 +898,10 @@ function StudyContent() {
     const correctWordCount = courseRunCorrectWordKeysRef.current.size;
 
     addCourseCompletion(courseId, durationSeconds, correctWordCount);
+    const accessToken = getAccessToken();
+    if (accessToken) {
+      void recordCourseCompletion(accessToken, courseId, durationSeconds, correctWordCount).catch(() => undefined);
+    }
     courseRunStartedActiveMsRef.current = activeStudyMsRef.current;
     courseRunCorrectWordKeysRef.current = new Set();
     setCelebrationSummary({
