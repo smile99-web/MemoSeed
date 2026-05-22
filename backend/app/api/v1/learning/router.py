@@ -33,6 +33,7 @@ from app.services.dynamic_sentence import generate_dynamic_review_sentence
 from app.services.learning_import import SUPPORTED_IMPORT_EXTENSIONS, import_learning_items, parse_txt_import, parse_xlsx_import
 from app.services.llm_translation import DEFAULT_LLM_TRANSLATION_SETTINGS, LlmTranslationSettings, generate_learning_text, translate_english_to_chinese
 from app.services.memory_dashboard import extract_mistake_words
+from app.services.secure_model_settings import get_private_model_settings
 
 router = APIRouter()
 
@@ -42,15 +43,24 @@ def build_llm_translation_settings(
     llm_base_url: str | None,
     llm_model: str | None,
     llm_api_key: str | None,
+    stored_settings: dict[str, object] | None = None,
 ) -> LlmTranslationSettings:
     base_settings = DEFAULT_LLM_TRANSLATION_SETTINGS
-    provider = llm_provider or app_settings.ai_provider or base_settings.provider
+    stored_settings = stored_settings or {}
+    provider = llm_provider or _string_setting(stored_settings, "llmProvider") or app_settings.ai_provider or base_settings.provider
     return LlmTranslationSettings(
-        provider=provider,
-        base_url=llm_base_url or app_settings.ai_base_url or base_settings.base_url,
-        model=llm_model or app_settings.ai_model or base_settings.model,
-        api_key=llm_api_key or app_settings.ai_api_key,
+        provider=str(provider),
+        base_url=llm_base_url or _string_setting(stored_settings, "llmBaseUrl") or app_settings.ai_base_url or base_settings.base_url,
+        model=llm_model or _string_setting(stored_settings, "llmModel") or app_settings.ai_model or base_settings.model,
+        api_key=llm_api_key or _string_setting(stored_settings, "llmApiKey") or app_settings.ai_api_key,
     )
+
+
+def _string_setting(settings: dict[str, object], key: str) -> str | None:
+    value = settings.get(key)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
 
 
 @router.get("/items", response_model=list[LearningItemRead])
@@ -166,12 +176,15 @@ def create_learning_item(
 def translate_learning_text(
     payload: LearningTranslationRequest,
     current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ) -> LearningTranslationResponse:
+    stored_settings = get_private_model_settings(db, current_user.id)
     translation_settings = build_llm_translation_settings(
         payload.llm_provider,
         payload.llm_base_url,
         payload.llm_model,
         payload.llm_api_key,
+        stored_settings,
     )
 
     try:
@@ -186,13 +199,15 @@ def translate_learning_text(
 def generate_learning_encouragement(
     payload: LearningEncouragementRequest,
     current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ) -> LearningEncouragementResponse:
-    del current_user
+    stored_settings = get_private_model_settings(db, current_user.id)
     translation_settings = build_llm_translation_settings(
         payload.llm_provider,
         payload.llm_base_url,
         payload.llm_model,
         payload.llm_api_key,
+        stored_settings,
     )
     prompt = (
         "Generate one short, warm encouragement for a primary or middle school English learner who just finished a lesson. "
@@ -253,7 +268,8 @@ def create_dynamic_sentence(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> DynamicSentenceResponse:
-    translation_settings = build_llm_translation_settings(payload.llm_provider, payload.llm_base_url, payload.llm_model, payload.llm_api_key)
+    stored_settings = get_private_model_settings(db, current_user.id)
+    translation_settings = build_llm_translation_settings(payload.llm_provider, payload.llm_base_url, payload.llm_model, payload.llm_api_key, stored_settings)
     result = generate_dynamic_review_sentence(
         db=db,
         user_id=current_user.id,
@@ -312,7 +328,8 @@ async def import_learning_items_file(
     else:
         parse_result = parse_xlsx_import(content, filename)
 
-    translation_settings = build_llm_translation_settings(llm_provider, llm_base_url, llm_model, llm_api_key)
+    stored_settings = get_private_model_settings(db, current_user.id)
+    translation_settings = build_llm_translation_settings(llm_provider, llm_base_url, llm_model, llm_api_key, stored_settings)
 
     imported_items, duplicate_skipped_items = import_learning_items(db, current_user.id, course_id, parse_result.items, translation_settings)
     skipped_items = [*parse_result.skipped_items, *duplicate_skipped_items]

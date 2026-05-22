@@ -10,6 +10,7 @@ from app.db.session import get_db
 from app.models.user import User
 from app.models.user_model_settings import UserModelSettings
 from app.schemas.settings import ModelSettingsPayload
+from app.services.secure_model_settings import encrypt_model_settings, public_model_settings
 
 router = APIRouter()
 
@@ -25,7 +26,12 @@ def get_model_settings(
         raise_settings_table_missing_error(exc)
     if stored_settings is None:
         return ModelSettingsPayload(settings={})
-    return ModelSettingsPayload(settings=stored_settings.settings)
+    protected_settings = encrypt_model_settings(stored_settings.settings)
+    if protected_settings != stored_settings.settings:
+        stored_settings.settings = protected_settings
+        db.commit()
+        db.refresh(stored_settings)
+    return ModelSettingsPayload(settings=public_model_settings(stored_settings.settings))
 
 
 @router.put("/model", response_model=ModelSettingsPayload, status_code=status.HTTP_200_OK)
@@ -40,14 +46,14 @@ def save_model_settings(
     except ProgrammingError as exc:
         raise_settings_table_missing_error(exc)
     if stored_settings is None:
-        stored_settings = UserModelSettings(user_id=current_user.id, settings=settings)
+        stored_settings = UserModelSettings(user_id=current_user.id, settings=encrypt_model_settings(settings))
         db.add(stored_settings)
     else:
-        stored_settings.settings = settings
+        stored_settings.settings = encrypt_model_settings(settings, stored_settings.settings)
 
     db.commit()
     db.refresh(stored_settings)
-    return ModelSettingsPayload(settings=stored_settings.settings)
+    return ModelSettingsPayload(settings=public_model_settings(stored_settings.settings))
 
 
 def raise_settings_table_missing_error(exc: ProgrammingError) -> None:
@@ -74,6 +80,8 @@ def sanitize_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "volcengineTtsApiKey",
         "volcengineTtsResourceId",
         "volcengineTtsModel",
+        "llmApiKeyConfigured",
+        "volcengineTtsApiKeyConfigured",
     }
     return {key: value for key, value in settings.items() if key in allowed_keys and isinstance(value, str)}
 

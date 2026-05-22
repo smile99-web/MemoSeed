@@ -1,6 +1,6 @@
 from functools import cached_property
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     volcengine_tts_model: str | None = Field(default=None, alias="VOLCENGINE_TTS_MODEL")
     volcengine_tts_english_voice: str | None = Field(default=None, alias="VOLCENGINE_TTS_ENGLISH_VOICE")
     volcengine_tts_chinese_voice: str | None = Field(default=None, alias="VOLCENGINE_TTS_CHINESE_VOICE")
+
+    @model_validator(mode="after")
+    def validate_security_defaults(self) -> "Settings":
+        if self.app_env.lower() in {"production", "prod"} and self.jwt_secret_key == "change_me_to_a_long_random_secret":
+            raise ValueError("JWT_SECRET_KEY must be changed before running in production")
+        return self
 
     @cached_property
     def cors_origins(self) -> list[str]:

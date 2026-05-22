@@ -5,11 +5,14 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.config import settings as app_settings
+from app.db.session import get_db
 from app.models.user import User
 from app.schemas.tts import KokoroSpeechSynthesisRequest, SpeechSynthesisRequest
+from app.services.secure_model_settings import get_private_model_settings
 from app.services.volcengine_tts import (
     DEFAULT_VOLCENGINE_TTS_CHINESE_VOICE,
     DEFAULT_VOLCENGINE_TTS_ENDPOINT,
@@ -56,8 +59,8 @@ def synthesize_kokoro_speech(
         with urlopen(request, timeout=60) as response:
             audio = response.read()
     except HTTPError as exc:
-        error_body = exc.read().decode("utf-8", errors="replace")
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Kokoro TTS failed: HTTP {exc.code} {error_body}") from exc
+        exc.read()
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Kokoro TTS failed: HTTP {exc.code}") from exc
     except (URLError, TimeoutError) as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Kokoro TTS failed: {exc}") from exc
 
@@ -71,13 +74,18 @@ def synthesize_kokoro_speech(
 def synthesize_speech(
     payload: SpeechSynthesisRequest,
     current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ) -> Response:
-    voice = payload.voice or select_default_voice(payload.language)
+    stored_settings = get_private_model_settings(db, current_user.id)
+    voice = payload.voice or select_default_voice(payload.language, stored_settings)
     tts_settings = VolcengineTtsSettings(
-        endpoint=payload.endpoint or app_settings.volcengine_tts_endpoint or DEFAULT_VOLCENGINE_TTS_ENDPOINT,
-        api_key=payload.x_api_key or app_settings.volcengine_tts_api_key,
-        resource_id=payload.resource_id or app_settings.volcengine_tts_resource_id or DEFAULT_VOLCENGINE_TTS_RESOURCE_ID,
-        model=payload.model or app_settings.volcengine_tts_model or DEFAULT_VOLCENGINE_TTS_MODEL,
+        endpoint=payload.endpoint or _string_setting(stored_settings, "volcengineTtsEndpoint") or app_settings.volcengine_tts_endpoint or DEFAULT_VOLCENGINE_TTS_ENDPOINT,
+        api_key=payload.x_api_key or _string_setting(stored_settings, "volcengineTtsApiKey") or app_settings.volcengine_tts_api_key,
+        resource_id=payload.resource_id
+        or _string_setting(stored_settings, "volcengineTtsResourceId")
+        or app_settings.volcengine_tts_resource_id
+        or DEFAULT_VOLCENGINE_TTS_RESOURCE_ID,
+        model=payload.model or _string_setting(stored_settings, "volcengineTtsModel") or app_settings.volcengine_tts_model or DEFAULT_VOLCENGINE_TTS_MODEL,
         voice=voice,
         language=payload.language,
         speech_rate=payload.speech_rate or 0,
@@ -91,8 +99,16 @@ def synthesize_speech(
     return Response(content=audio, media_type="audio/mpeg")
 
 
-def select_default_voice(language: str | None) -> str:
+def select_default_voice(language: str | None, stored_settings: dict[str, object] | None = None) -> str:
+    stored_settings = stored_settings or {}
     if language and language.lower().startswith("en"):
-        return app_settings.volcengine_tts_english_voice or DEFAULT_VOLCENGINE_TTS_ENGLISH_VOICE
-    return app_settings.volcengine_tts_chinese_voice or DEFAULT_VOLCENGINE_TTS_CHINESE_VOICE
+        return _string_setting(stored_settings, "ttsEnglishVoice") or app_settings.volcengine_tts_english_voice or DEFAULT_VOLCENGINE_TTS_ENGLISH_VOICE
+    return _string_setting(stored_settings, "ttsChineseVoice") or app_settings.volcengine_tts_chinese_voice or DEFAULT_VOLCENGINE_TTS_CHINESE_VOICE
+
+
+def _string_setting(settings: dict[str, object], key: str) -> str | None:
+    value = settings.get(key)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
 

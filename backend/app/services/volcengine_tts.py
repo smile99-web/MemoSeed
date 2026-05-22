@@ -35,8 +35,15 @@ def synthesize_volcengine_speech(text: str, settings: VolcengineTtsSettings) -> 
         raise ValueError("Volcengine TTS X-Api-Key is required")
 
     payload = build_payload(text, settings)
-    print(f"[TTS DEBUG] Request: endpoint={settings.endpoint} resource={settings.resource_id} model={settings.model} voice={settings.voice} language={settings.language} text_len={len(text)}", flush=True)
-    print(f"[TTS DEBUG] Payload: {json.dumps(payload, ensure_ascii=False)[:500]}", flush=True)
+    logger.info(
+        "Volcengine TTS request: endpoint=%s resource=%s model=%s voice=%s language=%s text_len=%d",
+        settings.endpoint,
+        settings.resource_id,
+        settings.model,
+        settings.voice,
+        settings.language,
+        len(text),
+    )
 
     request = Request(
         settings.endpoint.strip(),
@@ -47,12 +54,11 @@ def synthesize_volcengine_speech(text: str, settings: VolcengineTtsSettings) -> 
 
     try:
         with urlopen(request, timeout=60) as response:
-            print(f"[TTS DEBUG] Response: status={response.status} content_type={response.headers.get('Content-Type', '')}", flush=True)
             audio_chunks = collect_audio_chunks(response)
     except HTTPError as exc:
-        error_body = exc.read().decode("utf-8", errors="replace")
-        logger.error("Volcengine TTS HTTP error: code=%d body=%s", exc.code, error_body)
-        raise ValueError(f"Volcengine TTS failed: HTTP {exc.code} {error_body}") from exc
+        exc.read()
+        logger.error("Volcengine TTS HTTP error: code=%d", exc.code)
+        raise ValueError(f"Volcengine TTS failed: HTTP {exc.code}") from exc
     except (URLError, TimeoutError) as exc:
         logger.error("Volcengine TTS network error: %s", exc)
         raise ValueError(f"Volcengine TTS failed: {exc}") from exc
@@ -102,18 +108,12 @@ def build_payload(text: str, settings: VolcengineTtsSettings) -> dict[str, objec
 def collect_audio_chunks(response: object) -> list[bytes]:
     chunks: list[bytes] = []
     raw_lines = response.readlines()  # type: ignore[attr-defined]
-    print(f"[TTS DEBUG] Response lines: count={len(raw_lines)}", flush=True)
     if len(raw_lines) == 1:
-        print(f"[TTS DEBUG] Response single-line (len={len(raw_lines[0])}): {raw_lines[0][:300]!r}", flush=True)
         chunks.extend(parse_response_fragment(raw_lines[0]))
-        print(f"[TTS DEBUG] Chunks collected from single-line: {len(chunks)}", flush=True)
         return chunks
 
-    for i, raw_line in enumerate(raw_lines):
-        if i < 3 or i >= len(raw_lines) - 1:
-            print(f"[TTS DEBUG] Response line[{i}] (len={len(raw_line)}): {raw_line[:200]!r}", flush=True)
+    for raw_line in raw_lines:
         chunks.extend(parse_response_fragment(raw_line))
-    print(f"[TTS DEBUG] Total chunks collected: {len(chunks)}", flush=True)
     return chunks
 
 
@@ -135,14 +135,14 @@ def parse_response_fragment(raw_fragment: bytes) -> list[bytes]:
         try:
             body = json.loads(parsed_fragment)
         except json.JSONDecodeError:
-            logger.warning("Volcengine TTS unparseable fragment: %.200s", parsed_fragment)
+            logger.warning("Volcengine TTS returned an unparseable response fragment")
             continue
 
         code = body.get("code")
         # Volcengine TTS API returns 0, 200, 20000000 as success codes
         if code is not None and code not in (0, 200, "0", "200") and str(code) not in ("0", "200", "20000000"):
             msg = body.get("message") or "Volcengine TTS returned an error"
-            logger.error("Volcengine TTS API error: code=%s message=%s full_body=%.500s", code, msg, body)
+            logger.error("Volcengine TTS API error: code=%s message=%s", code, msg)
             raise ValueError(msg)
         data = body.get("data")
         if isinstance(data, str) and data:

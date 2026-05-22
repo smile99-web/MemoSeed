@@ -2,7 +2,7 @@
 
 import { BookOpen, ChevronRight, FolderOpen } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -28,6 +28,11 @@ export default function LearningStartPage() {
   const [isLoadingCourses, setIsLoadingCourses] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [packageDurationSeconds, setPackageDurationSeconds] = useState<Record<string, number>>({});
+
+  const packagesRef = useRef<CoursePackage[]>([]);
+  packagesRef.current = packages;
+  const selectedPackageIdRef = useRef("");
+  selectedPackageIdRef.current = selectedPackageId;
 
   const selectedPackage = useMemo(
     () => packages.find((coursePackage) => coursePackage.id === selectedPackageId) ?? null,
@@ -104,6 +109,38 @@ export default function LearningStartPage() {
 
     void loadPackageCourses(selectedPackageId);
   }, [selectedPackageId]);
+
+  const refreshCompletionStats = useCallback(function refreshCompletionStats() {
+    // Re-read per-course stats from localStorage so the UI reflects
+    // completions from the study session even when the page wasn't remounted.
+    setCourseRows((current) => {
+      if (current.length === 0) {
+        return current;
+      }
+      let totalSeconds = 0;
+      const refreshed = current.map((row) => {
+        const stats = loadCourseCompletionStats(row.course.id);
+        totalSeconds += stats.totalDurationSeconds;
+        return { ...row, completionStats: stats };
+      });
+      const pkgId = selectedPackageIdRef.current;
+      if (pkgId) {
+        setPackageDurationSeconds((prev) => ({ ...prev, [pkgId]: totalSeconds }));
+      }
+      return refreshed;
+    });
+  }, []);
+
+  useEffect(() => {
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        refreshCompletionStats();
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [refreshCompletionStats]);
 
   return (
     <main className="min-h-screen px-6 py-10 ipad:px-8 ipad:py-14">

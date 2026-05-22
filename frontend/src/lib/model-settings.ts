@@ -23,6 +23,11 @@ export interface ModelSettings {
   volcengineTtsModel: string;
 }
 
+type PublicModelSettings = Partial<ModelSettings> & {
+  llmApiKeyConfigured?: boolean;
+  volcengineTtsApiKeyConfigured?: boolean;
+};
+
 export interface SaveModelSettingsResult {
   synced: boolean;
   error?: string;
@@ -118,7 +123,7 @@ export function getModelSettings(): ModelSettings {
 }
 
 export function saveLocalModelSettings(settings: ModelSettings): void {
-  window.localStorage.setItem(modelSettingsKey, JSON.stringify(settings));
+  window.localStorage.setItem(modelSettingsKey, JSON.stringify(stripSecretSettings(settings)));
 }
 
 export function saveModelSettings(settings: ModelSettings): void {
@@ -132,8 +137,8 @@ export async function loadPersistedModelSettings(accessToken = getAccessToken())
   }
 
   try {
-    const response = await apiRequest<{ settings: Partial<ModelSettings> }>("/settings/model", { accessToken });
-    const settings = normalizeModelSettings(response.settings);
+    const response = await apiRequest<{ settings: PublicModelSettings }>("/settings/model", { accessToken });
+    const settings = normalizeModelSettings({ ...localSettings, ...response.settings, llmApiKey: "", volcengineTtsApiKey: "" });
     saveLocalModelSettings(settings);
     return settings;
   } catch (error) {
@@ -146,8 +151,8 @@ export async function loadPersistedModelSettings(accessToken = getAccessToken())
     }
 
     try {
-      const response = await apiRequest<{ settings: Partial<ModelSettings> }>("/settings/model", { accessToken: refreshedAccessToken });
-      const settings = normalizeModelSettings(response.settings);
+      const response = await apiRequest<{ settings: PublicModelSettings }>("/settings/model", { accessToken: refreshedAccessToken });
+      const settings = normalizeModelSettings({ ...localSettings, ...response.settings, llmApiKey: "", volcengineTtsApiKey: "" });
       saveLocalModelSettings(settings);
       return settings;
     } catch {
@@ -163,7 +168,7 @@ export async function savePersistedModelSettings(settings: ModelSettings, access
   }
 
   try {
-    await apiRequest<{ settings: Partial<ModelSettings> }, { settings: ModelSettings }>("/settings/model", {
+    await apiRequest<{ settings: PublicModelSettings }, { settings: ModelSettings }>("/settings/model", {
       method: "PUT",
       accessToken,
       body: { settings },
@@ -178,7 +183,7 @@ export async function savePersistedModelSettings(settings: ModelSettings, access
       return { synced: false, error: error instanceof Error ? error.message : "服务器同步失败" };
     }
     try {
-      await apiRequest<{ settings: Partial<ModelSettings> }, { settings: ModelSettings }>("/settings/model", {
+      await apiRequest<{ settings: PublicModelSettings }, { settings: ModelSettings }>("/settings/model", {
         method: "PUT",
         accessToken: refreshedAccessToken,
         body: { settings },
@@ -188,6 +193,10 @@ export async function savePersistedModelSettings(settings: ModelSettings, access
       return { synced: false, error: retryError instanceof Error ? retryError.message : "服务器同步失败" };
     }
   }
+}
+
+function stripSecretSettings(settings: ModelSettings): ModelSettings {
+  return { ...settings, llmApiKey: "", volcengineTtsApiKey: "" };
 }
 
 function isUnauthorizedError(error: unknown): boolean {

@@ -327,7 +327,7 @@ export default function LearningImportPage() {
           <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl ipad:max-w-lg ipad:p-8">
             <h2 className="text-xl font-bold tracking-tight ipad:text-2xl">确认删除</h2>
             <p className="mt-3 text-sm leading-6 text-muted-foreground ipad:text-base">
-              确认删除{deleteTarget.type === "package" ? "课程包" : "课程"}"{deleteTarget.name}"吗？
+              确认删除{deleteTarget.type === "package" ? "课程包" : "课程"}“{deleteTarget.name}”吗？
               {deleteTarget.type === "package" ? "删除后会同步删除该课程包下的所有课程和学习内容。" : "删除后会同步删除该课程下的所有学习内容。"}
             </p>
             <div className="mt-6 flex justify-end gap-3">
@@ -354,7 +354,7 @@ export default function LearningImportPage() {
               返回首页
             </Link>
             <h1 className="mt-4 text-3xl font-bold tracking-tight ipad:text-4xl">课程目录与学习内容</h1>
-            <p className="mt-2 text-muted-foreground ipad:text-lg">按"课程包 → 课程 → 导入内容"的结构管理学习资料，学习入口已独立到开始学习页面。</p>
+            <p className="mt-2 text-muted-foreground ipad:text-lg">按“课程包 → 课程 → 导入内容”的结构管理学习资料，学习入口已独立到开始学习页面。</p>
           </div>
           <Button asChild variant="secondary" className="ipad:text-lg ipad:px-6 ipad:py-3">
             <Link href="/learning">去开始学习</Link>

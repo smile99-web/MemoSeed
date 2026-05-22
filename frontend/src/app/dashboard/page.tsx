@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { apiRequest } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
 import { getMemoryDashboard, MemoryDashboard, WordMasterySummary } from "@/lib/memory";
 
@@ -105,7 +106,10 @@ function WordTable({ title, words }: { title: string; words: WordMasterySummary[
 export default function DashboardPage() {
   const [dashboard, setDashboard] = useState<MemoryDashboard | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     async function loadDashboard() {
@@ -128,6 +132,58 @@ export default function DashboardPage() {
     void loadDashboard();
   }, []);
 
+  async function exportUserData() {
+    const accessToken = getAccessToken();
+    if (!accessToken) {
+      setErrorMessage("请先登录后再导出数据");
+      return;
+    }
+    setIsExporting(true);
+    try {
+      const exportedData = await apiRequest<Record<string, unknown>>("/reports/export", { accessToken });
+      const blob = new Blob([JSON.stringify(exportedData, null, 2)], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `memoseed-export-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "导出数据失败");
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
+  async function importUserData(file: File | null) {
+    if (!file) {
+      return;
+    }
+    const accessToken = getAccessToken();
+    if (!accessToken) {
+      setErrorMessage("请先登录后再导入数据");
+      return;
+    }
+    setIsImporting(true);
+    try {
+      const payload = JSON.parse(await file.text()) as Record<string, unknown>;
+      await apiRequest<{ message: string; imported: Record<string, number> }, Record<string, unknown>>("/reports/import", {
+        method: "POST",
+        accessToken,
+        body: payload,
+      });
+      setDashboard(await getMemoryDashboard(accessToken));
+      setErrorMessage(null);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "导入数据失败");
+    } finally {
+      setIsImporting(false);
+      if (importInputRef.current) {
+        importInputRef.current.value = "";
+      }
+    }
+  }
+
   return (
     <main className="min-h-screen px-6 py-10 ipad:px-8 ipad:py-14">
       <section className="mx-auto max-w-6xl space-y-6 ipad:space-y-8">
@@ -139,9 +195,26 @@ export default function DashboardPage() {
             <h1 className="mt-4 text-3xl font-bold tracking-tight ipad:text-4xl">学习数据看板</h1>
             <p className="mt-2 text-muted-foreground ipad:text-lg">基于 SM-2 复习记录、错词日志和记忆强度生成。</p>
           </div>
-          <Button asChild variant="secondary" className="ipad:text-lg ipad:px-6 ipad:py-3">
-            <Link href="/learning">继续学习</Link>
-          </Button>
+          <div className="flex flex-wrap gap-3">
+            <input
+              ref={importInputRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(event) => {
+                void importUserData(event.target.files?.[0] ?? null);
+              }}
+            />
+            <Button type="button" variant="outline" className="ipad:text-lg ipad:px-6 ipad:py-3" onClick={() => importInputRef.current?.click()} disabled={isImporting}>
+              {isImporting ? "正在导入" : "导入数据"}
+            </Button>
+            <Button type="button" variant="outline" className="ipad:text-lg ipad:px-6 ipad:py-3" onClick={exportUserData} disabled={isExporting}>
+              {isExporting ? "正在导出" : "导出数据"}
+            </Button>
+            <Button asChild variant="secondary" className="ipad:text-lg ipad:px-6 ipad:py-3">
+              <Link href="/learning">继续学习</Link>
+            </Button>
+          </div>
         </div>
 
         {isLoading ? <p className="text-sm text-muted-foreground ipad:text-base">正在加载数据...</p> : null}
