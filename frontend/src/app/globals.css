@@ -52,6 +52,38 @@
   textarea {
     font-size: 16px !important; /* prevents iOS zoom on focus */
   }
+
+  input.study-word-input {
+    font-size: 2.25rem !important;
+  }
+}
+
+input.study-word-input {
+  font-size: 2.25rem !important;
+}
+
+input.study-word-input--immersive {
+  font-size: 3rem !important;
+}
+
+@media (min-width: 744px) {
+  input.study-word-input {
+    font-size: 2.25rem !important;
+  }
+
+  input.study-word-input--immersive {
+    font-size: 3.75rem !important;
+  }
+}
+
+@media (min-width: 1024px) {
+  input.study-word-input {
+    font-size: 3rem !important;
+  }
+
+  input.study-word-input--immersive {
+    font-size: 4.5rem !important;
+  }
 }
 
 /* iPad: slightly larger base font for comfortable reading distance */

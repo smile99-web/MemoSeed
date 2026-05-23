@@ -10,6 +10,7 @@ from app.db.session import get_db
 from app.models.user import User
 from app.models.user_model_settings import UserModelSettings
 from app.schemas.settings import ModelSettingsPayload
+from app.services.memory_scheduler import FSRS_WEIGHTS_SETTING_KEY
 from app.services.secure_model_settings import encrypt_model_settings, public_model_settings
 
 router = APIRouter()
@@ -49,7 +50,8 @@ def save_model_settings(
         stored_settings = UserModelSettings(user_id=current_user.id, settings=encrypt_model_settings(settings))
         db.add(stored_settings)
     else:
-        stored_settings.settings = encrypt_model_settings(settings, stored_settings.settings)
+        preserved_settings = preserve_non_model_settings(stored_settings.settings)
+        stored_settings.settings = {**encrypt_model_settings(settings, stored_settings.settings), **preserved_settings}
 
     db.commit()
     db.refresh(stored_settings)
@@ -80,8 +82,22 @@ def sanitize_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "volcengineTtsApiKey",
         "volcengineTtsResourceId",
         "volcengineTtsModel",
+        "cosyvoiceBaseUrl",
+        "cosyvoiceEnglishSpeaker",
+        "cosyvoiceChineseSpeaker",
         "llmApiKeyConfigured",
         "volcengineTtsApiKeyConfigured",
     }
     return {key: value for key, value in settings.items() if key in allowed_keys and isinstance(value, str)}
+
+
+def preserve_non_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    preserved_keys = {
+        FSRS_WEIGHTS_SETTING_KEY,
+        "fsrsFittedAt",
+        "fsrsTrainingReviewCount",
+        "fsrsTrainingPairCount",
+        "fsrsAccuracyRate",
+    }
+    return {key: value for key, value in settings.items() if key in preserved_keys}
 

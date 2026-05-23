@@ -93,6 +93,8 @@ Copy-Item .env.example .env
 
 ## Docker 启动
 
+开发环境（热更新，挂载本地代码）：
+
 ```bash
 docker compose up --build
 ```
@@ -109,6 +111,14 @@ docker compose up --build
 
 - Frontend: `http://你的电脑局域网IP:3000`
 - 前端默认通过同源 `/api/v1` 代理访问后端，手机或其他电脑不需要把 API 地址改成自己的 `localhost`。
+
+生产镜像验证（不挂载本地代码，前端使用 Next standalone）：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build
+```
+
+生产镜像会复用同一组端口和数据库卷；停止命令同样可以追加 `-f docker-compose.prod.yml`。
 
 停止服务：
 

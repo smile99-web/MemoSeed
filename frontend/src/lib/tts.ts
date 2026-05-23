@@ -88,6 +88,42 @@ async function requestVolcengineSpeech(
   });
 }
 
+export async function synthesizeCosyVoiceSpeech(
+  text: string,
+  speaker: string,
+  settings: ModelSettings,
+  accessToken: string,
+): Promise<Blob> {
+  let response = await requestCosyVoiceSpeech(text, speaker, settings, accessToken);
+  if (response.status === 401) {
+    const refreshedAccessToken = await getFreshAccessToken();
+    if (refreshedAccessToken) {
+      response = await requestCosyVoiceSpeech(text, speaker, settings, refreshedAccessToken);
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(await parseSpeechError(response));
+  }
+
+  return response.blob();
+}
+
+async function requestCosyVoiceSpeech(text: string, speaker: string, settings: ModelSettings, accessToken: string): Promise<Response> {
+  return fetch(`${getApiBaseUrl()}/tts/cosyvoice/speech`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      text,
+      speaker,
+      api_url: settings.cosyvoiceBaseUrl,
+    }),
+  });
+}
+
 async function requestKokoroSpeech(text: string, voice: string, settings: ModelSettings, accessToken: string, options: TtsSynthesisOptions): Promise<Response> {
   return fetch(`${getApiBaseUrl()}/tts/kokoro/speech`, {
     method: "POST",
@@ -108,6 +144,9 @@ async function requestKokoroSpeech(text: string, voice: string, settings: ModelS
 const AUDIO_PLAYBACK_TIMEOUT_MS = 30_000;
 
 let sharedAudioContext: AudioContext | null = null;
+let activeAudioSource: AudioBufferSourceNode | null = null;
+let activeAudioTimeoutId: number | null = null;
+let resolveActiveAudioPlayback: (() => void) | null = null;
 
 export function unlockAudio(): void {
   if (!sharedAudioContext) {
@@ -123,6 +162,33 @@ function getOrCreateAudioContext(): AudioContext {
     sharedAudioContext = new AudioContext();
   }
   return sharedAudioContext;
+}
+
+export function stopAudioPlayback(): void {
+  if (typeof window !== "undefined" && "speechSynthesis" in window) {
+    window.speechSynthesis.cancel();
+  }
+  if (activeAudioTimeoutId !== null) {
+    window.clearTimeout(activeAudioTimeoutId);
+    activeAudioTimeoutId = null;
+  }
+  const source = activeAudioSource;
+  activeAudioSource = null;
+  if (source) {
+    source.onended = null;
+    try {
+      source.stop();
+    } catch {
+      // The source may already have ended.
+    }
+    try {
+      source.disconnect();
+    } catch {
+      // The source may already be disconnected.
+    }
+  }
+  resolveActiveAudioPlayback?.();
+  resolveActiveAudioPlayback = null;
 }
 
 export async function playAudioBlob(audioBlob: Blob, playbackRate = 1): Promise<void> {
@@ -142,10 +208,40 @@ export async function playAudioBlob(audioBlob: Blob, playbackRate = 1): Promise<
   source.playbackRate.value = Math.max(0.25, Math.min(playbackRate, 4));
   source.connect(audioContext.destination);
 
+  stopAudioPlayback();
+  activeAudioSource = source;
+
   await new Promise<void>((resolve, reject) => {
-    const timeoutId = window.setTimeout(() => reject(new Error("Audio playback timed out")), AUDIO_PLAYBACK_TIMEOUT_MS);
+    activeAudioTimeoutId = window.setTimeout(() => {
+      activeAudioTimeoutId = null;
+      if (activeAudioSource === source) {
+        activeAudioSource = null;
+        source.onended = null;
+        try {
+          source.stop();
+        } catch {
+          // The source may already have ended.
+        }
+        try {
+          source.disconnect();
+        } catch {
+          // The source may already be disconnected.
+        }
+      }
+      resolveActiveAudioPlayback = null;
+      reject(new Error("Audio playback timed out"));
+    }, AUDIO_PLAYBACK_TIMEOUT_MS);
+    resolveActiveAudioPlayback = resolve;
     source.onended = () => {
-      window.clearTimeout(timeoutId);
+      if (activeAudioSource !== source) {
+        return;
+      }
+      if (activeAudioTimeoutId !== null) {
+        window.clearTimeout(activeAudioTimeoutId);
+        activeAudioTimeoutId = null;
+      }
+      activeAudioSource = null;
+      resolveActiveAudioPlayback = null;
       resolve();
     };
     source.start();

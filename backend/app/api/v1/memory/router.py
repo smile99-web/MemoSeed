@@ -13,9 +13,10 @@ from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
 from app.models.study_time_log import StudyTimeLog
 from app.models.user import User
-from app.schemas.memory import CourseCompletionRequest, CourseProgressStats, MemoryDashboardResponse, MemoryScheduleResponse, MemoryStateRead, ReviewScoreRequest, StudyTimeLogRequest
+from app.schemas.memory import CourseCompletionRequest, CourseProgressStats, FsrsFitResponse, MemoryDashboardResponse, MemoryScheduleResponse, MemoryStateRead, ReviewScoreRequest, StudyTimeLogRequest
 from app.services.memory_dashboard import build_memory_dashboard
 from app.schemas.review import MistakeLogRead, ReviewLogRead
+from app.services.fsrs_fitting import fit_user_fsrs_parameters
 from app.services.memory_scheduler import schedule_memory_review
 
 router = APIRouter()
@@ -27,6 +28,21 @@ def get_memory_dashboard(
     db: Annotated[Session, Depends(get_db)],
 ) -> MemoryDashboardResponse:
     return build_memory_dashboard(db, current_user.id)
+
+
+@router.post("/fsrs/fit", response_model=FsrsFitResponse)
+def fit_fsrs_parameters(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> FsrsFitResponse:
+    result = fit_user_fsrs_parameters(db, current_user.id)
+    return FsrsFitResponse(
+        fitted_at=result.fitted_at,
+        training_review_count=result.training_review_count,
+        training_pair_count=result.training_pair_count,
+        accuracy_rate=result.accuracy_rate,
+        weights=result.weights,
+    )
 
 
 @router.get("/states/{learning_item_id}", response_model=MemoryStateRead)

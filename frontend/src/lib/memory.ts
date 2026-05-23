@@ -63,11 +63,24 @@ export interface MemoryDashboard {
   accuracy_rate: number;
   total_mistakes: number;
   unresolved_mistakes: number;
+  fsrs_parameters_source: "built_in" | "user_fitted";
+  fsrs_min_training_reviews: number;
+  fsrs_training_review_count: number;
+  fsrs_training_pair_count: number;
+  fsrs_fitted_at: string | null;
   next_review_at: string | null;
   study_time: StudyTimeSummary;
   review_buckets: ReviewBucket[];
   weakest_words: WordMasterySummary[];
   strongest_words: WordMasterySummary[];
+}
+
+export interface FsrsFitResponse {
+  fitted_at: string;
+  training_review_count: number;
+  training_pair_count: number;
+  accuracy_rate: number;
+  weights: number[];
 }
 
 async function getFreshAccessToken(): Promise<string | null> {
@@ -129,6 +142,21 @@ export async function getMemoryDashboard(accessToken: string): Promise<MemoryDas
     throw new Error(await parseApiError(response));
   }
   return (await response.json()) as MemoryDashboard;
+}
+
+export async function fitFsrsParameters(accessToken: string): Promise<FsrsFitResponse> {
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/memory/fsrs/fit`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    },
+    accessToken,
+  );
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as FsrsFitResponse;
 }
 
 export async function recordStudyTime(accessToken: string, durationSeconds: number, courseId?: string): Promise<void> {

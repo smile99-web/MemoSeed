@@ -94,8 +94,21 @@ class MemoryDashboardResponse(BaseModel):
     accuracy_rate: float
     total_mistakes: int
     unresolved_mistakes: int
+    fsrs_parameters_source: str
+    fsrs_min_training_reviews: int
+    fsrs_training_review_count: int
+    fsrs_training_pair_count: int
+    fsrs_fitted_at: datetime | None
     next_review_at: datetime | None
     study_time: StudyTimeSummary
     review_buckets: list[ReviewBucket]
     weakest_words: list[WordMasterySummary]
     strongest_words: list[WordMasterySummary]
+
+
+class FsrsFitResponse(BaseModel):
+    fitted_at: datetime
+    training_review_count: int
+    training_pair_count: int
+    accuracy_rate: float
+    weights: list[float]

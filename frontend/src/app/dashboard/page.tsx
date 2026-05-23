@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiRequest } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
-import { getMemoryDashboard, MemoryDashboard, WordMasterySummary } from "@/lib/memory";
+import { fitFsrsParameters, getMemoryDashboard, MemoryDashboard, WordMasterySummary } from "@/lib/memory";
 
 const statusLabels: Record<WordMasterySummary["status"], string> = {
   mastered: "已掌握",
@@ -107,8 +107,10 @@ export default function DashboardPage() {
   const [dashboard, setDashboard] = useState<MemoryDashboard | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [isFittingFsrs, setIsFittingFsrs] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [fsrsFitMessage, setFsrsFitMessage] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -184,6 +186,27 @@ export default function DashboardPage() {
     }
   }
 
+  async function fitFsrsFromHistory() {
+    const accessToken = getAccessToken();
+    if (!accessToken) {
+      setErrorMessage("请先登录后再拟合 FSRS 参数");
+      return;
+    }
+
+    setIsFittingFsrs(true);
+    setFsrsFitMessage(null);
+    try {
+      const result = await fitFsrsParameters(accessToken);
+      setDashboard(await getMemoryDashboard(accessToken));
+      setErrorMessage(null);
+      setFsrsFitMessage(`已使用 ${result.training_review_count} 条答题记录和 ${result.training_pair_count} 组连续复习样本完成 FSRS 参数拟合。`);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "FSRS 参数拟合失败");
+    } finally {
+      setIsFittingFsrs(false);
+    }
+  }
+
   return (
     <main className="min-h-screen px-6 py-10 ipad:px-8 ipad:py-14">
       <section className="mx-auto max-w-6xl space-y-6 ipad:space-y-8">
@@ -193,7 +216,7 @@ export default function DashboardPage() {
               返回首页
             </Link>
             <h1 className="mt-4 text-3xl font-bold tracking-tight ipad:text-4xl">学习数据看板</h1>
-            <p className="mt-2 text-muted-foreground ipad:text-lg">基于 SM-2 复习记录、错词日志和记忆强度生成。</p>
+            <p className="mt-2 text-muted-foreground ipad:text-lg">基于 FSRS 复习记录、错词日志和记忆强度生成。</p>
           </div>
           <div className="flex flex-wrap gap-3">
             <input
@@ -211,6 +234,16 @@ export default function DashboardPage() {
             <Button type="button" variant="outline" className="ipad:text-lg ipad:px-6 ipad:py-3" onClick={exportUserData} disabled={isExporting}>
               {isExporting ? "正在导出" : "导出数据"}
             </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="ipad:text-lg ipad:px-6 ipad:py-3"
+              onClick={fitFsrsFromHistory}
+              disabled={isFittingFsrs || !dashboard || dashboard.total_reviews < dashboard.fsrs_min_training_reviews}
+              title={dashboard && dashboard.total_reviews < dashboard.fsrs_min_training_reviews ? `至少需要 ${dashboard.fsrs_min_training_reviews} 条历史答题记录` : undefined}
+            >
+              {isFittingFsrs ? "正在拟合" : "拟合 FSRS 参数"}
+            </Button>
             <Button asChild variant="secondary" className="ipad:text-lg ipad:px-6 ipad:py-3">
               <Link href="/learning">继续学习</Link>
             </Button>
@@ -219,6 +252,7 @@ export default function DashboardPage() {
 
         {isLoading ? <p className="text-sm text-muted-foreground ipad:text-base">正在加载数据...</p> : null}
         {!isLoading && errorMessage ? <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 ipad:px-6 ipad:py-4 ipad:text-base">{errorMessage}</p> : null}
+        {fsrsFitMessage ? <p className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 ipad:px-6 ipad:py-4 ipad:text-base">{fsrsFitMessage}</p> : null}
 
         {dashboard ? (
           <>
@@ -232,8 +266,33 @@ export default function DashboardPage() {
             <div className="grid gap-4 md:grid-cols-3">
               <StatCard label="平均记忆强度" value={formatPercent(dashboard.average_memory_strength)} hint="越高说明回忆越稳定" />
               <StatCard label="平均遗忘风险" value={formatPercent(dashboard.average_forget_risk)} hint="越高越需要尽快复习" />
-              <StatCard label="平均复习间隔" value={`${dashboard.average_interval_days} 天`} hint="由 SM-2 和英语难度修正共同决定" />
+              <StatCard label="平均复习间隔" value={`${dashboard.average_interval_days} 天`} hint="由 FSRS 稳定度和英语难度修正共同决定" />
             </div>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>FSRS 参数</CardTitle>
+                <CardDescription>
+                  {dashboard.fsrs_parameters_source === "user_fitted"
+                    ? `当前使用用户历史数据拟合参数，训练记录 ${dashboard.fsrs_training_review_count} 条，连续复习样本 ${dashboard.fsrs_training_pair_count} 组。`
+                    : `当前使用内置 FSRS 权重；历史答题记录达到 ${dashboard.fsrs_min_training_reviews} 条后可拟合个人参数。`}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-wrap items-center justify-between gap-4">
+                <div className="space-y-1 text-sm text-muted-foreground">
+                  <p>当前模式：{dashboard.fsrs_parameters_source === "user_fitted" ? "个人拟合参数" : "内置权重"}</p>
+                  <p>历史答题记录：{dashboard.total_reviews} / {dashboard.fsrs_min_training_reviews}</p>
+                  <p>上次拟合：{formatDateTime(dashboard.fsrs_fitted_at)}</p>
+                </div>
+                <Button
+                  type="button"
+                  onClick={fitFsrsFromHistory}
+                  disabled={isFittingFsrs || dashboard.total_reviews < dashboard.fsrs_min_training_reviews}
+                >
+                  {isFittingFsrs ? "正在拟合" : dashboard.fsrs_parameters_source === "user_fitted" ? "重新拟合" : "拟合 FSRS 参数"}
+                </Button>
+              </CardContent>
+            </Card>
 
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
               <StatCard label="今日学习时长" value={formatDuration(dashboard.study_time.today_seconds)} hint="20 秒无键盘输入会自动暂停计时" />
@@ -245,7 +304,7 @@ export default function DashboardPage() {
             <Card>
               <CardHeader>
                 <CardTitle>复习时间分布</CardTitle>
-                <CardDescription>按短期错词强化和长期 SM-2 复习曲线聚合。</CardDescription>
+                <CardDescription>按短期错词强化和长期 FSRS 复习曲线聚合。</CardDescription>
               </CardHeader>
               <CardContent className="space-y-3">
                 {dashboard.review_buckets.map((bucket) => (

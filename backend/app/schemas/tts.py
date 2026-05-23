@@ -19,3 +19,9 @@ class KokoroSpeechSynthesisRequest(BaseModel):
     model: str = "kokoro"
     speed: float | None = Field(default=None, ge=0.25, le=4.0)
 
+
+class CosyVoiceSpeechSynthesisRequest(BaseModel):
+    text: str = Field(min_length=1)
+    speaker: str = Field(min_length=1)
+    api_url: str
+

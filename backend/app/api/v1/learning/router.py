@@ -32,8 +32,9 @@ from app.schemas.learning import (
 from app.services.dynamic_sentence import generate_dynamic_review_sentence
 from app.services.learning_import import SUPPORTED_IMPORT_EXTENSIONS, import_learning_items, parse_txt_import, parse_xlsx_import
 from app.services.llm_translation import DEFAULT_LLM_TRANSLATION_SETTINGS, LlmTranslationSettings, generate_learning_text, translate_english_to_chinese
-from app.services.memory_dashboard import extract_mistake_words
+from app.services.memory_scheduler import calculate_review_priority
 from app.services.secure_model_settings import get_private_model_settings
+from app.utils import extract_mistake_words, string_setting
 
 router = APIRouter()
 
@@ -47,20 +48,13 @@ def build_llm_translation_settings(
 ) -> LlmTranslationSettings:
     base_settings = DEFAULT_LLM_TRANSLATION_SETTINGS
     stored_settings = stored_settings or {}
-    provider = llm_provider or _string_setting(stored_settings, "llmProvider") or app_settings.ai_provider or base_settings.provider
+    provider = llm_provider or string_setting(stored_settings, "llmProvider") or app_settings.ai_provider or base_settings.provider
     return LlmTranslationSettings(
         provider=str(provider),
-        base_url=llm_base_url or _string_setting(stored_settings, "llmBaseUrl") or app_settings.ai_base_url or base_settings.base_url,
-        model=llm_model or _string_setting(stored_settings, "llmModel") or app_settings.ai_model or base_settings.model,
-        api_key=llm_api_key or _string_setting(stored_settings, "llmApiKey") or app_settings.ai_api_key,
+        base_url=llm_base_url or string_setting(stored_settings, "llmBaseUrl") or app_settings.ai_base_url or base_settings.base_url,
+        model=llm_model or string_setting(stored_settings, "llmModel") or app_settings.ai_model or base_settings.model,
+        api_key=llm_api_key or string_setting(stored_settings, "llmApiKey") or app_settings.ai_api_key,
     )
-
-
-def _string_setting(settings: dict[str, object], key: str) -> str | None:
-    value = settings.get(key)
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
 
 
 @router.get("/items", response_model=list[LearningItemRead])
@@ -109,7 +103,9 @@ def list_due_review_items(
     if exclude_course_id is not None:
         due_statement = due_statement.where(or_(LearningItem.course_id.is_(None), LearningItem.course_id != exclude_course_id))
 
-    for item, _memory_state in db.execute(due_statement).all():
+    due_rows = list(db.execute(due_statement).all())
+    due_rows.sort(key=lambda row: (-calculate_review_priority(row[1], now), row[1].next_review_at))
+    for item, _memory_state in due_rows:
         item_by_id.setdefault(item.id, item)
 
     mistake_statement = (

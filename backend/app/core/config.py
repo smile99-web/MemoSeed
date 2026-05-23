@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     backend_cors_origins: str = Field(default="http://localhost:3000,http://127.0.0.1:3000", alias="BACKEND_CORS_ORIGINS")
     database_url: str = Field(
-        default="postgresql+psycopg://memoseed:memoseed_password@localhost:5432/memoseed",
+        default="postgresql+psycopg://memoseed:memoseed_password@postgres:5432/memoseed",
         alias="DATABASE_URL",
     )
 
@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     volcengine_tts_model: str | None = Field(default=None, alias="VOLCENGINE_TTS_MODEL")
     volcengine_tts_english_voice: str | None = Field(default=None, alias="VOLCENGINE_TTS_ENGLISH_VOICE")
     volcengine_tts_chinese_voice: str | None = Field(default=None, alias="VOLCENGINE_TTS_CHINESE_VOICE")
+
+    cosyvoice_base_url: str | None = Field(default=None, alias="COSYVOICE_BASE_URL")
+    cosyvoice_english_speaker: str | None = Field(default=None, alias="COSYVOICE_ENGLISH_SPEAKER")
+    cosyvoice_chinese_speaker: str | None = Field(default=None, alias="COSYVOICE_CHINESE_SPEAKER")
 
     @model_validator(mode="after")
     def validate_security_defaults(self) -> "Settings":

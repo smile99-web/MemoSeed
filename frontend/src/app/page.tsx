@@ -13,11 +13,13 @@ import {
   defaultModelSettings,
   getModelSettings,
   loadPersistedModelSettings,
-  localModelModeSettings,
-  onlineModelModeSettings,
+  deepSeekModelSettings,
+  qwenModelSettings,
+  volcarkTtsModelSettings,
+  cosyvoiceTtsModelSettings,
   savePersistedModelSettings,
 } from "@/lib/model-settings";
-import { playAudioBlob, synthesizeKokoroSpeech, synthesizeVolcengineSpeech, unlockAudio } from "@/lib/tts";
+import { playAudioBlob, synthesizeCosyVoiceSpeech, synthesizeKokoroSpeech, synthesizeVolcengineSpeech, unlockAudio } from "@/lib/tts";
 
 const kokoroEnglishVoices = [
   "af_heart",
@@ -68,6 +70,22 @@ const volcengineChineseVoices = [
   { label: "猴哥 2.0（角色男声）", value: "zh_male_sunwukong_uranus_bigtts" },
   { label: "儒雅逸辰 2.0（书卷男声）", value: "zh_male_ruyayichen_uranus_bigtts" },
 ] as const;
+
+const cosyvoiceSpeakers = [
+  { label: "中文女", value: "中文女" },
+  { label: "中文男", value: "中文男" },
+  { label: "英文女", value: "英文女" },
+  { label: "英文男", value: "英文男" },
+  { label: "粤语女", value: "粤语女" },
+  { label: "日语男", value: "日语男" },
+  { label: "韩语女", value: "韩语女" },
+] as const;
+
+type ModelSettingsTextField = Extract<{
+  [Key in keyof ModelSettings]: ModelSettings[Key] extends string ? Key : never;
+}[keyof ModelSettings], string>;
+
+const savedSecretPlaceholder = "••••••••（已保存，重新输入可覆盖）";
 
 const workflowCards = [
   {
@@ -123,13 +141,43 @@ export default function HomePage() {
     setCurrentUser(null);
   }
 
-  function handleModelSettingsChange(field: keyof ModelSettings, value: string) {
+  function handleModelSettingsChange(field: ModelSettingsTextField, value: string) {
     setModelSettings((current) => ({ ...current, [field]: value }));
   }
 
-  function handleModelModeChange(mode: ModelSettings["modelMode"]) {
+  function getLlmProviderLabel() {
+    if (modelSettings.llmProvider === "deepseek") {
+      return "DeepSeek";
+    }
+    if (modelSettings.llmProvider === "qwen") {
+      return "Qwen";
+    }
+    return "Ollama";
+  }
+
+  function handleLlmProviderChange(provider: ModelSettings["llmProvider"]) {
     setSettingsMessage(null);
-    setModelSettings((current) => ({ ...current, ...(mode === "online" ? onlineModelModeSettings : localModelModeSettings) }));
+    setModelSettings((current) => ({
+      ...current,
+      ...(provider === "deepseek" ? deepSeekModelSettings : provider === "qwen" ? qwenModelSettings : {
+        modelMode: "local",
+        llmProvider: "ollama",
+        llmBaseUrl: defaultModelSettings.llmBaseUrl,
+        llmModel: defaultModelSettings.llmModel,
+      }),
+    }));
+  }
+
+  function handleTtsProviderChange(provider: ModelSettings["ttsProvider"]) {
+    setSettingsMessage(null);
+    setModelSettings((current) => ({
+      ...current,
+      ...(provider === "volcark" ? volcarkTtsModelSettings : provider === "cosyvoice" ? cosyvoiceTtsModelSettings : {
+        ttsProvider: "kokoro",
+        ttsEnglishVoice: defaultModelSettings.ttsEnglishVoice,
+        ttsChineseVoice: defaultModelSettings.ttsChineseVoice,
+      }),
+    }));
   }
 
   async function handleSaveModelSettings() {
@@ -138,6 +186,15 @@ export default function HomePage() {
     try {
       const result = await savePersistedModelSettings(modelSettings);
       if (result.synced) {
+        setModelSettings((current) => ({
+          ...current,
+          llmApiKey: "",
+          volcengineTtsApiKey: "",
+          llmApiKeyConfigured: current.llmApiKey.trim() ? true : current.llmApiKeyConfigured,
+          volcengineTtsApiKeyConfigured: current.volcengineTtsApiKey.trim()
+            ? true
+            : current.volcengineTtsApiKeyConfigured,
+        }));
         setSettingsMessage("模型设置已保存。");
         setIsSettingsOpen(false);
         return;
@@ -162,27 +219,44 @@ export default function HomePage() {
     setSettingsMessage("正在测试本地模型...");
     const results: string[] = [];
 
-    try {
-      await translateLearningText("hello", accessToken, { ...modelSettings, modelMode: "local", llmProvider: "ollama", ttsProvider: "kokoro" });
-      results.push("Ollama：连通正常");
-    } catch (error) {
-      results.push(`Ollama：${error instanceof Error ? error.message : "测试失败"}`);
-    }
-
-    try {
-      const audio = await synthesizeKokoroSpeech("你好，这是本地 Kokoro TTS 中文音色测试。", modelSettings.ttsChineseVoice, { ...modelSettings, modelMode: "local", ttsProvider: "kokoro" }, accessToken);
-      if (audio.size > 0) {
-        await playAudioBlob(audio);
-        results.push("Kokoro TTS：连通正常");
-      } else {
-        results.push("Kokoro TTS：返回音频为空");
+    if (modelSettings.llmProvider === "ollama") {
+      try {
+        await translateLearningText("hello", accessToken, { ...modelSettings, modelMode: "local", llmProvider: "ollama" });
+        results.push("Ollama：连通正常");
+      } catch (error) {
+        results.push(`Ollama：${error instanceof Error ? error.message : "测试失败"}`);
       }
-    } catch (error) {
-      results.push(`Kokoro TTS：${error instanceof Error ? error.message : "测试失败"}`);
-    } finally {
-      setIsTestingLocalModels(false);
     }
 
+    if (modelSettings.ttsProvider === "kokoro") {
+      try {
+        const audio = await synthesizeKokoroSpeech("你好，这是本地 Kokoro TTS 中文音色测试。", modelSettings.ttsChineseVoice, { ...modelSettings, modelMode: "local", ttsProvider: "kokoro" }, accessToken);
+        if (audio.size > 0) {
+          await playAudioBlob(audio);
+          results.push("Kokoro TTS：连通正常");
+        } else {
+          results.push("Kokoro TTS：返回音频为空");
+        }
+      } catch (error) {
+        results.push(`Kokoro TTS：${error instanceof Error ? error.message : "测试失败"}`);
+      }
+    }
+
+    if (modelSettings.ttsProvider === "cosyvoice") {
+      try {
+        const audio = await synthesizeCosyVoiceSpeech("你好，这是本地 CosyVoice 2.0 中文音色测试。", modelSettings.cosyvoiceChineseSpeaker, { ...modelSettings, modelMode: "local", ttsProvider: "cosyvoice" }, accessToken);
+        if (audio.size > 0) {
+          await playAudioBlob(audio);
+          results.push("CosyVoice 2.0 TTS：连通正常");
+        } else {
+          results.push("CosyVoice 2.0 TTS：返回音频为空");
+        }
+      } catch (error) {
+        results.push(`CosyVoice 2.0 TTS：${error instanceof Error ? error.message : "测试失败"}`);
+      }
+    }
+
+    setIsTestingLocalModels(false);
     setSettingsMessage(results.join("；"));
   }
 
@@ -198,35 +272,40 @@ export default function HomePage() {
     setSettingsMessage("正在测试网络模型...");
     const results: string[] = [];
 
-    try {
-      await translateLearningText("hello", accessToken, { ...modelSettings, modelMode: "online", llmProvider: "deepseek" });
-      results.push("DeepSeek：连通正常");
-    } catch (error) {
-      results.push(`DeepSeek：${error instanceof Error ? error.message : "测试失败"}`);
+    if (modelSettings.llmProvider !== "ollama") {
+      const providerLabel = getLlmProviderLabel();
+      try {
+        await translateLearningText("hello", accessToken, { ...modelSettings, modelMode: "online" });
+        results.push(`${providerLabel}：连通正常`);
+      } catch (error) {
+        results.push(`${providerLabel}：${error instanceof Error ? error.message : "测试失败"}`);
+      }
     }
 
-    try {
-      const audio = await synthesizeVolcengineSpeech("你好，正在测试中文音色。", modelSettings.ttsChineseVoice, "zh-CN", { ...modelSettings, modelMode: "online", ttsProvider: "volcark" }, accessToken);
-      if (audio.size > 0) {
-        await playAudioBlob(audio);
-        results.push(`火山方舟中文音色：连通正常（${modelSettings.ttsChineseVoice}）`);
-      } else {
-        results.push(`火山方舟中文音色：返回音频为空（${modelSettings.ttsChineseVoice}）`);
+    if (modelSettings.ttsProvider === "volcark") {
+      try {
+        const audio = await synthesizeVolcengineSpeech("你好，正在测试中文音色。", modelSettings.ttsChineseVoice, "zh-CN", { ...modelSettings, modelMode: "online", ttsProvider: "volcark" }, accessToken);
+        if (audio.size > 0) {
+          await playAudioBlob(audio);
+          results.push(`火山方舟中文音色：连通正常（${modelSettings.ttsChineseVoice}）`);
+        } else {
+          results.push(`火山方舟中文音色：返回音频为空（${modelSettings.ttsChineseVoice}）`);
+        }
+      } catch (error) {
+        results.push(`火山方舟中文音色（${modelSettings.ttsChineseVoice}）：${error instanceof Error ? error.message : "测试失败"}`);
       }
-    } catch (error) {
-      results.push(`火山方舟中文音色（${modelSettings.ttsChineseVoice}）：${error instanceof Error ? error.message : "测试失败"}`);
-    }
 
-    try {
-      const audio = await synthesizeVolcengineSpeech("Hello, this is an English voice test.", modelSettings.ttsEnglishVoice, "en-US", { ...modelSettings, modelMode: "online", ttsProvider: "volcark" }, accessToken);
-      if (audio.size > 0) {
-        await playAudioBlob(audio);
-        results.push(`火山方舟英文音色：连通正常（${modelSettings.ttsEnglishVoice}）`);
-      } else {
-        results.push(`火山方舟英文音色：返回音频为空（${modelSettings.ttsEnglishVoice}）`);
+      try {
+        const audio = await synthesizeVolcengineSpeech("Hello, this is an English voice test.", modelSettings.ttsEnglishVoice, "en-US", { ...modelSettings, modelMode: "online", ttsProvider: "volcark" }, accessToken);
+        if (audio.size > 0) {
+          await playAudioBlob(audio);
+          results.push(`火山方舟英文音色：连通正常（${modelSettings.ttsEnglishVoice}）`);
+        } else {
+          results.push(`火山方舟英文音色：返回音频为空（${modelSettings.ttsEnglishVoice}）`);
+        }
+      } catch (error) {
+        results.push(`火山方舟英文音色（${modelSettings.ttsEnglishVoice}）：${error instanceof Error ? error.message : "测试失败"}`);
       }
-    } catch (error) {
-      results.push(`火山方舟英文音色（${modelSettings.ttsEnglishVoice}）：${error instanceof Error ? error.message : "测试失败"}`);
     }
 
     setIsTestingNetworkModels(false);
@@ -249,35 +328,37 @@ export default function HomePage() {
             </div>
 
             <div className="mt-6 grid gap-5 md:grid-cols-2">
-              <div className="space-y-2 md:col-span-2">
-                <label className="text-sm font-medium">模型运行模式</label>
-                <div className="relative h-14 rounded-full border border-input bg-muted p-1">
-                  <div
-                    className={`absolute bottom-1 top-1 w-[calc(50%-0.25rem)] rounded-full bg-white shadow-sm transition-transform ${
-                      modelSettings.modelMode === "online" ? "translate-x-[calc(100%+0.5rem)]" : "translate-x-0"
-                    }`}
-                  />
-                  <div className="pointer-events-none relative z-10 grid h-full grid-cols-2 items-center text-center text-sm font-semibold">
-                    <span className={modelSettings.modelMode === "local" ? "text-primary" : "text-muted-foreground"}>本地模型</span>
-                    <span className={modelSettings.modelMode === "online" ? "text-primary" : "text-muted-foreground"}>网络模型</span>
-                  </div>
-                  <input
-                    aria-label="模型运行模式"
-                    className="absolute inset-0 z-20 h-full w-full cursor-grab opacity-0 active:cursor-grabbing"
-                    max={1}
-                    min={0}
-                    step={1}
-                    type="range"
-                    value={modelSettings.modelMode === "online" ? 1 : 0}
-                    onChange={(event) => handleModelModeChange(Number(event.target.value) === 1 ? "online" : "local")}
-                  />
-                </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium" htmlFor="llm-provider">LLM 模型来源</label>
+                <select
+                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                  id="llm-provider"
+                  value={modelSettings.llmProvider}
+                  onChange={(event) => handleLlmProviderChange(event.target.value as ModelSettings["llmProvider"])}
+                >
+                  <option value="ollama">本地 Ollama</option>
+                  <option value="deepseek">网络 DeepSeek</option>
+                  <option value="qwen">网络 Qwen</option>
+                </select>
               </div>
-              {modelSettings.modelMode === "online" ? (
-                <div className="border-t pt-5 md:col-span-2">
-                  <h3 className="text-base font-semibold">LLM 模型（DeepSeek）</h3>
-                </div>
-              ) : null}
+              <div className="space-y-2">
+                <label className="text-sm font-medium" htmlFor="tts-provider">TTS 语音来源</label>
+                <select
+                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                  id="tts-provider"
+                  value={modelSettings.ttsProvider}
+                  onChange={(event) => handleTtsProviderChange(event.target.value as ModelSettings["ttsProvider"])}
+                >
+                  <option value="kokoro">本地 Kokoro</option>
+                  <option value="cosyvoice">本地 CosyVoice 2.0</option>
+                  <option value="volcark">网络火山方舟</option>
+                </select>
+              </div>
+              <div className="border-t pt-5 md:col-span-2">
+                <h3 className="text-base font-semibold">
+                  LLM 模型（{getLlmProviderLabel()}）
+                </h3>
+              </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium" htmlFor="llm-model">LLM 模型</label>
                 <input
@@ -289,7 +370,7 @@ export default function HomePage() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium" htmlFor="llm-base-url">
-                  {modelSettings.modelMode === "online" ? "OpenAI Base URL" : "Ollama 调用地址"}
+                  {modelSettings.llmProvider !== "ollama" ? "OpenAI Base URL" : "Ollama 调用地址"}
                 </label>
                 <input
                   className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
@@ -298,14 +379,14 @@ export default function HomePage() {
                   onChange={(event) => handleModelSettingsChange("llmBaseUrl", event.target.value)}
                 />
               </div>
-              {modelSettings.modelMode === "online" ? (
+              {modelSettings.llmProvider !== "ollama" ? (
                 <div className="space-y-2 md:col-span-2">
-                  <label className="text-sm font-medium" htmlFor="llm-api-key">DeepSeek API Key</label>
+                  <label className="text-sm font-medium" htmlFor="llm-api-key">{getLlmProviderLabel()} API Key</label>
                   <input
                     autoComplete="off"
                     className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
                     id="llm-api-key"
-                    placeholder="稍后填写"
+                    placeholder={modelSettings.llmApiKeyConfigured ? savedSecretPlaceholder : "稍后填写"}
                     type="password"
                     value={modelSettings.llmApiKey}
                     onChange={(event) => handleModelSettingsChange("llmApiKey", event.target.value)}
@@ -313,12 +394,12 @@ export default function HomePage() {
                 </div>
               ) : null}
 
-              {modelSettings.modelMode === "online" ? (
-                <div className="border-t pt-5 md:col-span-2">
-                  <h3 className="text-base font-semibold">TTS 模型（火山方舟）</h3>
-                </div>
-              ) : null}
-              {modelSettings.modelMode === "local" ? (
+              <div className="border-t pt-5 md:col-span-2">
+                <h3 className="text-base font-semibold">
+                  TTS 模型（{modelSettings.ttsProvider === "volcark" ? "火山方舟" : modelSettings.ttsProvider === "cosyvoice" ? "CosyVoice 2.0" : "Kokoro"}）
+                </h3>
+              </div>
+              {modelSettings.ttsProvider === "kokoro" ? (
                 <div className="space-y-2 md:col-span-2">
                   <label className="text-sm font-medium" htmlFor="tts-api-url">Kokoro API 地址</label>
                   <input
@@ -326,6 +407,17 @@ export default function HomePage() {
                     id="tts-api-url"
                     value={modelSettings.ttsApiUrl}
                     onChange={(event) => handleModelSettingsChange("ttsApiUrl", event.target.value)}
+                  />
+                </div>
+              ) : modelSettings.ttsProvider === "cosyvoice" ? (
+                <div className="space-y-2 md:col-span-2">
+                  <label className="text-sm font-medium" htmlFor="cosyvoice-base-url">CosyVoice API 地址</label>
+                  <input
+                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                    id="cosyvoice-base-url"
+                    placeholder="http://cosyvoice:50000（留空使用默认）"
+                    value={modelSettings.cosyvoiceBaseUrl}
+                    onChange={(event) => handleModelSettingsChange("cosyvoiceBaseUrl", event.target.value)}
                   />
                 </div>
               ) : (
@@ -336,7 +428,7 @@ export default function HomePage() {
                       autoComplete="off"
                       className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
                       id="volcengine-tts-api-key"
-                      placeholder="稍后填写"
+                      placeholder={modelSettings.volcengineTtsApiKeyConfigured ? savedSecretPlaceholder : "稍后填写"}
                       type="password"
                       value={modelSettings.volcengineTtsApiKey}
                       onChange={(event) => handleModelSettingsChange("volcengineTtsApiKey", event.target.value)}
@@ -373,7 +465,7 @@ export default function HomePage() {
               )}
               <div className="space-y-2">
                 <label className="text-sm font-medium" htmlFor="tts-english-voice">英文语音音色</label>
-                {modelSettings.modelMode === "local" ? (
+                {modelSettings.ttsProvider === "kokoro" ? (
                   <select
                     className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
                     id="tts-english-voice"
@@ -382,6 +474,20 @@ export default function HomePage() {
                   >
                     {kokoroEnglishVoices.map((voice) => (
                       <option key={voice} value={voice}>{voice}</option>
+                    ))}
+                  </select>
+                ) : modelSettings.ttsProvider === "cosyvoice" ? (
+                  <select
+                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                    id="tts-english-voice"
+                    value={modelSettings.ttsEnglishVoice}
+                    onChange={(event) => {
+                      handleModelSettingsChange("ttsEnglishVoice", event.target.value);
+                      handleModelSettingsChange("cosyvoiceEnglishSpeaker", event.target.value);
+                    }}
+                  >
+                    {cosyvoiceSpeakers.map((speaker) => (
+                      <option key={speaker.value} value={speaker.value}>{speaker.label}</option>
                     ))}
                   </select>
                 ) : (
@@ -399,7 +505,7 @@ export default function HomePage() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium" htmlFor="tts-chinese-voice">中文语音音色</label>
-                {modelSettings.modelMode === "local" ? (
+                {modelSettings.ttsProvider === "kokoro" ? (
                   <select
                     className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
                     id="tts-chinese-voice"
@@ -408,6 +514,20 @@ export default function HomePage() {
                   >
                     {kokoroChineseVoices.map((voice) => (
                       <option key={voice} value={voice}>{voice}</option>
+                    ))}
+                  </select>
+                ) : modelSettings.ttsProvider === "cosyvoice" ? (
+                  <select
+                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                    id="tts-chinese-voice"
+                    value={modelSettings.ttsChineseVoice}
+                    onChange={(event) => {
+                      handleModelSettingsChange("ttsChineseVoice", event.target.value);
+                      handleModelSettingsChange("cosyvoiceChineseSpeaker", event.target.value);
+                    }}
+                  >
+                    {cosyvoiceSpeakers.map((speaker) => (
+                      <option key={speaker.value} value={speaker.value}>{speaker.label}</option>
                     ))}
                   </select>
                 ) : (
@@ -423,7 +543,7 @@ export default function HomePage() {
                   </select>
                 )}
               </div>
-              {modelSettings.modelMode === "local" ? (
+              {modelSettings.ttsProvider === "kokoro" ? (
                 <>
                   <div className="space-y-2">
                     <label className="text-sm font-medium" htmlFor="tts-docs-url">Kokoro API 文档</label>
@@ -445,18 +565,25 @@ export default function HomePage() {
                   </div>
                 </>
               ) : null}
+              {modelSettings.ttsProvider === "cosyvoice" ? (
+                <div className="space-y-2 md:col-span-2">
+                  <p className="text-xs text-muted-foreground">
+                    CosyVoice 2.0 本地 TTS 模型。请确保 Docker 容器已启动，默认端口 50000。支持预训练音色：中文女、中文男、英文女、英文男。
+                  </p>
+                </div>
+              ) : null}
             </div>
 
             <div className="mt-6 flex flex-wrap justify-end gap-3">
               <Button onClick={() => setModelSettings(defaultModelSettings)} type="button" variant="outline">
                 恢复默认
               </Button>
-              {modelSettings.modelMode === "local" ? (
+              {modelSettings.llmProvider === "ollama" || modelSettings.ttsProvider === "kokoro" || modelSettings.ttsProvider === "cosyvoice" ? (
                 <Button disabled={isTestingLocalModels} onClick={handleTestLocalModels} type="button" variant="secondary">
                   {isTestingLocalModels ? "测试中..." : "测试本地模型"}
                 </Button>
               ) : null}
-              {modelSettings.modelMode === "online" ? (
+              {modelSettings.llmProvider !== "ollama" || modelSettings.ttsProvider === "volcark" ? (
                 <Button disabled={isTestingNetworkModels} onClick={handleTestNetworkModels} type="button" variant="secondary">
                   {isTestingNetworkModels ? "测试中..." : "测试网络模型"}
                 </Button>
@@ -515,7 +642,7 @@ export default function HomePage() {
             英语记忆种子
           </h1>
           <p className="mt-6 max-w-2xl text-lg leading-8 text-muted-foreground ipad:text-xl ipad:leading-9">
-            基于艾宾浩斯记忆曲线、SM-2 和 AI 动态调度，专注中小学阶段英语基础薄弱学生的单词、短语与简单句长期记忆。
+            基于艾宾浩斯记忆曲线、FSRS算法推荐 和 AI 动态调度，专注中小学阶段英语基础薄弱学生的单词、短语与简单句长期记忆。
           </p>
           <div className="mt-8 flex flex-wrap gap-3">
             <Button asChild>

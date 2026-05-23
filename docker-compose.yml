@@ -24,19 +24,47 @@ services:
     build:
       context: .
       dockerfile: docker/backend/Dockerfile
+      target: development
     container_name: memoseed-backend
     restart: unless-stopped
     env_file:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-memoseed}:${POSTGRES_PASSWORD:-memoseed_password}@postgres:5432/${POSTGRES_DB:-memoseed}
+      PRISMA_DATABASE_URL: postgresql://${POSTGRES_USER:-memoseed}:${POSTGRES_PASSWORD:-memoseed_password}@postgres:5432/${POSTGRES_DB:-memoseed}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     volumes:
       - ./backend:/app/backend
+    networks:
+      - memoseed-network
+
+  cosyvoice:
+    image: cosyvoice:cpu
+    container_name: memoseed-cosyvoice
+    restart: unless-stopped
+    profiles:
+      - tts
+      - full
+    command:
+      - sh
+      - -c
+      - |
+        cd /workspace/CosyVoice/runtime/python/fastapi
+        exec python server.py --port 50000 --model_dir iic/CosyVoice-300M-SFT
+    ports:
+      - "127.0.0.1:50000:50000"
+    volumes:
+      - cosyvoice_models:/workspace/CosyVoice/pretrained_models
     networks:
       - memoseed-network
 
@@ -44,17 +72,23 @@ services:
     build:
       context: .
       dockerfile: docker/frontend/Dockerfile
+      target: development
     container_name: memoseed-frontend
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-/api/v1}
       API_PROXY_BASE_URL: http://backend:8000/api/v1
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     volumes:
       - ./frontend:/app/frontend
       - frontend_node_modules:/app/frontend/node_modules
@@ -66,6 +100,7 @@ volumes:
   postgres_data:
   frontend_node_modules:
   frontend_next:
+  cosyvoice_models:
 
 networks:
   memoseed-network:

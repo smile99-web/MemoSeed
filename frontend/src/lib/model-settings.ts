@@ -2,8 +2,8 @@ import { ApiRequestError, apiRequest } from "@/lib/api";
 import { getAccessToken, refreshAccessToken } from "@/lib/auth";
 
 export type ModelMode = "local" | "online";
-export type LlmProvider = "ollama" | "deepseek";
-export type TtsProvider = "kokoro" | "volcark";
+export type LlmProvider = "ollama" | "deepseek" | "qwen";
+export type TtsProvider = "kokoro" | "volcark" | "cosyvoice";
 
 export interface ModelSettings {
   modelMode: ModelMode;
@@ -21,12 +21,14 @@ export interface ModelSettings {
   volcengineTtsApiKey: string;
   volcengineTtsResourceId: string;
   volcengineTtsModel: string;
-}
-
-type PublicModelSettings = Partial<ModelSettings> & {
+  cosyvoiceBaseUrl: string;
+  cosyvoiceEnglishSpeaker: string;
+  cosyvoiceChineseSpeaker: string;
   llmApiKeyConfigured?: boolean;
   volcengineTtsApiKeyConfigured?: boolean;
-};
+}
+
+type PublicModelSettings = Partial<ModelSettings>;
 
 export interface SaveModelSettingsResult {
   synced: boolean;
@@ -39,7 +41,7 @@ export const defaultModelSettings: ModelSettings = {
   modelMode: "local",
   llmProvider: "ollama",
   llmBaseUrl: "http://localhost:11434",
-  llmModel: "phi4-mini",
+  llmModel: "ali6parmak/hy-mt1.5:latest",
   llmApiKey: "",
   ttsProvider: "kokoro",
   ttsApiUrl: "http://localhost:8880",
@@ -51,12 +53,21 @@ export const defaultModelSettings: ModelSettings = {
   volcengineTtsApiKey: "",
   volcengineTtsResourceId: "seed-tts-2.0",
   volcengineTtsModel: "seed-tts-2.0-standard",
+  cosyvoiceBaseUrl: "",
+  cosyvoiceEnglishSpeaker: "英文女",
+  cosyvoiceChineseSpeaker: "中文女",
 };
 
 export const deepSeekModelSettings: Pick<ModelSettings, "llmProvider" | "llmBaseUrl" | "llmModel"> = {
   llmProvider: "deepseek",
   llmBaseUrl: "https://api.deepseek.com",
   llmModel: "deepseek-v4-flash",
+};
+
+export const qwenModelSettings: Pick<ModelSettings, "llmProvider" | "llmBaseUrl" | "llmModel"> = {
+  llmProvider: "qwen",
+  llmBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  llmModel: "qwen3.6-flash",
 };
 
 export const volcarkTtsModelSettings: Pick<
@@ -68,6 +79,17 @@ export const volcarkTtsModelSettings: Pick<
   ttsChineseVoice: "zh_female_xiaohe_uranus_bigtts",
   volcengineTtsResourceId: "seed-tts-2.0",
   volcengineTtsModel: "seed-tts-2.0-standard",
+};
+
+export const cosyvoiceTtsModelSettings: Pick<
+  ModelSettings,
+  "ttsProvider" | "ttsEnglishVoice" | "ttsChineseVoice" | "cosyvoiceEnglishSpeaker" | "cosyvoiceChineseSpeaker"
+> = {
+  ttsProvider: "cosyvoice",
+  ttsEnglishVoice: "英文女",
+  ttsChineseVoice: "中文女",
+  cosyvoiceEnglishSpeaker: "英文女",
+  cosyvoiceChineseSpeaker: "中文女",
 };
 
 export const localModelModeSettings: Pick<
@@ -112,9 +134,9 @@ export function getModelSettings(): ModelSettings {
 
   try {
     const parsedSettings = JSON.parse(storedSettings) as Partial<ModelSettings>;
-    const llmProvider = parsedSettings.llmProvider === "deepseek" ? "deepseek" : "ollama";
-    const ttsProvider = parsedSettings.ttsProvider === "volcark" ? "volcark" : "kokoro";
-    const modelMode = parsedSettings.modelMode === "online" || llmProvider === "deepseek" || ttsProvider === "volcark" ? "online" : "local";
+    const llmProvider = normalizeLlmProvider(parsedSettings.llmProvider);
+    const ttsProvider = parsedSettings.ttsProvider === "volcark" ? "volcark" : parsedSettings.ttsProvider === "cosyvoice" ? "cosyvoice" : "kokoro";
+    const modelMode = parsedSettings.modelMode === "online" ? "online" : "local";
     return { ...defaultModelSettings, ...parsedSettings, modelMode, llmProvider, ttsProvider };
   } catch {
     window.localStorage.removeItem(modelSettingsKey);
@@ -203,13 +225,17 @@ function isUnauthorizedError(error: unknown): boolean {
   return error instanceof ApiRequestError && error.status === 401;
 }
 
+function normalizeLlmProvider(provider: unknown): LlmProvider {
+  return provider === "deepseek" || provider === "qwen" ? provider : "ollama";
+}
+
 export function normalizeModelSettings(settings: Partial<ModelSettings>): ModelSettings {
   const mergedSettings = { ...defaultModelSettings, ...settings };
-  const llmProvider: LlmProvider = mergedSettings.llmProvider === "deepseek" ? "deepseek" : "ollama";
-  const ttsProvider: TtsProvider = mergedSettings.ttsProvider === "volcark" ? "volcark" : "kokoro";
-  const modelMode: ModelMode = mergedSettings.modelMode === "online" || llmProvider === "deepseek" || ttsProvider === "volcark" ? "online" : "local";
+  const llmProvider = normalizeLlmProvider(mergedSettings.llmProvider);
+  const ttsProvider: TtsProvider = mergedSettings.ttsProvider === "volcark" ? "volcark" : mergedSettings.ttsProvider === "cosyvoice" ? "cosyvoice" : "kokoro";
+  const modelMode: ModelMode = mergedSettings.modelMode === "online" ? "online" : "local";
   const normalizedSettings = { ...mergedSettings, modelMode, llmProvider, ttsProvider };
-  if (modelMode === "online" && normalizedSettings.volcengineTtsResourceId === "seed-tts-2.0") {
+  if (ttsProvider === "volcark" && normalizedSettings.volcengineTtsResourceId === "seed-tts-2.0") {
     if (!normalizedSettings.ttsEnglishVoice.endsWith("_uranus_bigtts")) {
       normalizedSettings.ttsEnglishVoice = volcarkTtsModelSettings.ttsEnglishVoice;
     }

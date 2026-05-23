@@ -13,7 +13,7 @@ class LlmTranslationSettings:
     api_key: str | None = None
 
 
-DEFAULT_LLM_TRANSLATION_SETTINGS = LlmTranslationSettings(provider="ollama", base_url="http://localhost:11434", model="phi4-mini")
+DEFAULT_LLM_TRANSLATION_SETTINGS = LlmTranslationSettings(provider="ollama", base_url="http://localhost:11434", model="ali6parmak/hy-mt1.5:latest")
 
 
 def needs_translation(chinese_text: str) -> bool:
@@ -45,7 +45,7 @@ def call_llm_generate(settings: LlmTranslationSettings, prompt: str) -> str:
     provider = settings.provider.strip().lower()
     if provider in {"ollama", "local"}:
         return call_ollama_generate(settings.base_url, settings.model, prompt)
-    if provider in {"deepseek", "openai"}:
+    if provider in {"deepseek", "openai", "qwen"}:
         return call_openai_chat_completion(settings.base_url, settings.model, settings.api_key, prompt)
     raise ValueError(f"Unsupported LLM provider: {settings.provider}")
 
@@ -85,9 +85,9 @@ def call_openai_chat_completion(base_url: str, model: str, api_key: str | None, 
     if not model.strip():
         raise ValueError("LLM model is required")
     if not api_key or not api_key.strip():
-        raise ValueError("DeepSeek API key is required")
+        raise ValueError("LLM API key is required")
 
-    url = base_url.rstrip("/") + "/chat/completions"
+    url = build_openai_chat_completions_url(base_url)
     payload = json.dumps(
         {
             "model": model.strip(),
@@ -111,8 +111,11 @@ def call_openai_chat_completion(base_url: str, model: str, api_key: str | None, 
     try:
         with urlopen(request, timeout=30) as response:
             body = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, TimeoutError) as exc:
-        raise ValueError(f"LLM translation failed: {base_url}: {exc}") from exc
+    except HTTPError as exc:
+        detail = read_http_error_detail(exc)
+        raise ValueError(f"LLM translation failed: {url}: HTTP {exc.code}{detail}") from exc
+    except (URLError, TimeoutError) as exc:
+        raise ValueError(f"LLM translation failed: {url}: {exc}") from exc
 
     choices = body.get("choices")
     if not isinstance(choices, list) or not choices:
@@ -122,6 +125,23 @@ def call_openai_chat_completion(base_url: str, model: str, api_key: str | None, 
     if not isinstance(generated_text, str):
         raise ValueError("Invalid OpenAI-compatible response")
     return generated_text
+
+
+def build_openai_chat_completions_url(base_url: str) -> str:
+    trimmed_base_url = base_url.strip().rstrip("/")
+    if trimmed_base_url.endswith("/chat/completions"):
+        return trimmed_base_url
+    if trimmed_base_url.endswith("/compatible-mode/v1"):
+        return f"{trimmed_base_url}/chat/completions"
+    return f"{trimmed_base_url}/chat/completions"
+
+
+def read_http_error_detail(exc: HTTPError) -> str:
+    try:
+        body = exc.read().decode("utf-8", errors="replace").strip()
+    except Exception:
+        body = ""
+    return f" {body}" if body else ""
 
 
 def get_candidate_base_urls(base_url: str) -> list[str]:

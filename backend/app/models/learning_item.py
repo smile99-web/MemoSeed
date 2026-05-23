@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -18,6 +18,10 @@ if TYPE_CHECKING:
 
 class LearningItem(Base):
     __tablename__ = "learning_items"
+    __table_args__ = (
+        CheckConstraint("item_type IN ('word', 'phrase', 'sentence')", name="ck_learning_items_item_type"),
+        CheckConstraint("difficulty_level BETWEEN 1 AND 5", name="ck_learning_items_difficulty_level"),
+    )
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)

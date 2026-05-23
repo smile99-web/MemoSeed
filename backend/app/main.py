@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -6,10 +8,18 @@ from app.core.config import settings
 from app.db.session import engine
 from app.models.course_completion_log import CourseCompletionLog
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    CourseCompletionLog.__table__.create(bind=engine, checkfirst=True)
+    yield
+
+
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
     openapi_url=f"{settings.api_v1_prefix}/openapi.json",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -21,11 +31,6 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix=settings.api_v1_prefix)
-
-
-@app.on_event("startup")
-def ensure_runtime_tables() -> None:
-    CourseCompletionLog.__table__.create(bind=engine, checkfirst=True)
 
 
 @app.get("/health", tags=["health"])

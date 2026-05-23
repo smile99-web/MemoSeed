@@ -1,4 +1,3 @@
-import re
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -9,6 +8,7 @@ from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
 from app.models.mistake_log import MistakeLog
 from app.services.llm_translation import LlmTranslationSettings, generate_learning_text, translate_english_to_chinese
+from app.utils import extract_mistake_words, normalize_word, tokenize_words
 
 
 @dataclass(frozen=True)
@@ -23,15 +23,6 @@ class DynamicSentenceResult:
 COMMON_FILLER_WORDS = ["I", "can", "see", "the", "and", "like", "my", "this", "is", "a"]
 MIN_DYNAMIC_SENTENCE_WORDS = 5
 MAX_DYNAMIC_SENTENCE_WORDS = 7
-
-
-def normalize_word(value: str) -> str:
-    return re.sub(r"^[^a-zA-Z0-9']+|[^a-zA-Z0-9']+$", "", value).lower()
-
-
-def tokenize_words(value: str) -> list[str]:
-    words = [normalize_word(part) for part in value.split()]
-    return [word for word in words if word]
 
 
 def unique_preserve_order(words: list[str]) -> list[str]:
@@ -159,10 +150,3 @@ def translate_sentence_or_fallback(sentence: str, settings: LlmTranslationSettin
         return "AI 生成复习句"
 
 
-def extract_mistake_words(mistake_type: str, expected_answer: str, actual_answer: str) -> list[str]:
-    if mistake_type == "word-spelling":
-        return tokenize_words(expected_answer)
-    if "错词：" in actual_answer:
-        _, words_text = actual_answer.split("错词：", 1)
-        return tokenize_words(words_text.replace(",", " "))
-    return []
