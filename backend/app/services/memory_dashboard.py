@@ -1,4 +1,3 @@
-import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -6,6 +5,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
 from app.models.learning_item import LearningItem
@@ -13,7 +13,11 @@ from app.models.memory_state import MemoryState
 from app.models.mistake_log import MistakeLog
 from app.models.review_log import ReviewLog
 from app.models.study_time_log import StudyTimeLog
+from app.models.user_model_settings import UserModelSettings
 from app.schemas.memory import MemoryDashboardResponse, ReviewBucket, StudyTimeSummary, WordMasterySummary
+from app.services.fsrs_fitting import MIN_FSRS_TRAINING_REVIEWS
+from app.services.memory_scheduler import FSRS_WEIGHTS_SETTING_KEY, calculate_current_forget_risk
+from app.utils import average, extract_mistake_words, normalize_word, parse_datetime_setting, tokenize_words
 
 
 LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -30,14 +34,6 @@ class WordStats:
     mistake_count: int = 0
 
 
-def normalize_word(value: str) -> str:
-    return re.sub(r"^[^a-zA-Z0-9']+|[^a-zA-Z0-9']+$", "", value).lower()
-
-
-def tokenize_words(value: str) -> list[str]:
-    return [word for word in (normalize_word(part) for part in value.split()) if word]
-
-
 def build_memory_dashboard(db: Session, user_id: UUID) -> MemoryDashboardResponse:
     now = datetime.now(UTC)
     item_rows = db.execute(
@@ -48,11 +44,13 @@ def build_memory_dashboard(db: Session, user_id: UUID) -> MemoryDashboardRespons
     for learning_item, memory_state in item_rows:
         if memory_state is None:
             continue
+        current_forget_risk = calculate_current_forget_risk(memory_state, now)
+        current_memory_strength = round(1 - current_forget_risk, 2)
         item_words = set(tokenize_words(learning_item.english_text))
         for word in item_words:
             stats = word_stats.setdefault(word, WordStats(word=word, strengths=[], risks=[], intervals=[], next_reviews=[]))
-            stats.strengths.append(memory_state.memory_strength)
-            stats.risks.append(memory_state.forget_risk)
+            stats.strengths.append(current_memory_strength)
+            stats.risks.append(current_forget_risk)
             stats.intervals.append(memory_state.interval_days)
             stats.next_reviews.append(memory_state.next_review_at)
 
@@ -81,10 +79,20 @@ def build_memory_dashboard(db: Session, user_id: UUID) -> MemoryDashboardRespons
     learning_words = max(len(summaries) - mastered_words - weak_words, 0)
 
     memory_states = [memory_state for _, memory_state in item_rows if memory_state is not None]
+    current_forget_risks = [calculate_current_forget_risk(state, now) for state in memory_states]
+    current_memory_strengths = [round(1 - risk, 2) for risk in current_forget_risks]
+
     total_reviews = db.scalar(select(func.count(ReviewLog.id)).where(ReviewLog.user_id == user_id)) or 0
     correct_reviews = db.scalar(select(func.count(ReviewLog.id)).where(ReviewLog.user_id == user_id, ReviewLog.is_correct.is_(True))) or 0
     total_mistakes = db.scalar(select(func.count(MistakeLog.id)).where(MistakeLog.user_id == user_id)) or 0
     unresolved_mistakes = db.scalar(select(func.count(MistakeLog.id)).where(MistakeLog.user_id == user_id, MistakeLog.is_resolved.is_(False))) or 0
+
+    try:
+        stored_settings = db.scalar(select(UserModelSettings).where(UserModelSettings.user_id == user_id))
+    except ProgrammingError:
+        stored_settings = None
+    fsrs_settings = stored_settings.settings if stored_settings is not None else {}
+    fsrs_fitted_at = parse_datetime_setting(fsrs_settings.get("fsrsFittedAt"))
     next_review_at = min((state.next_review_at for state in memory_states), default=None)
     study_time = build_study_time_summary(db, user_id)
 
@@ -96,14 +104,19 @@ def build_memory_dashboard(db: Session, user_id: UUID) -> MemoryDashboardRespons
         weak_words=weak_words,
         due_now_count=len([state for state in memory_states if state.next_review_at <= now]),
         overdue_count=len([state for state in memory_states if state.next_review_at < now - timedelta(hours=1)]),
-        average_memory_strength=round(average([state.memory_strength for state in memory_states]), 2),
-        average_forget_risk=round(average([state.forget_risk for state in memory_states]), 2),
+        average_memory_strength=round(average(current_memory_strengths), 2),
+        average_forget_risk=round(average(current_forget_risks), 2),
         average_interval_days=round(average([state.interval_days for state in memory_states]), 1),
         total_reviews=total_reviews,
         correct_reviews=correct_reviews,
         accuracy_rate=round(correct_reviews / total_reviews, 2) if total_reviews else 0.0,
         total_mistakes=total_mistakes,
         unresolved_mistakes=unresolved_mistakes,
+        fsrs_parameters_source="user_fitted" if isinstance(fsrs_settings.get(FSRS_WEIGHTS_SETTING_KEY), list) else "built_in",
+        fsrs_min_training_reviews=MIN_FSRS_TRAINING_REVIEWS,
+        fsrs_training_review_count=int(fsrs_settings.get("fsrsTrainingReviewCount") or 0),
+        fsrs_training_pair_count=int(fsrs_settings.get("fsrsTrainingPairCount") or 0),
+        fsrs_fitted_at=fsrs_fitted_at,
         next_review_at=next_review_at,
         study_time=study_time,
         review_buckets=build_review_buckets(memory_states, now),
@@ -173,18 +186,3 @@ def build_review_buckets(memory_states: list[MemoryState], now: datetime) -> lis
         ("长期保持", lambda state: state.next_review_at > now + timedelta(days=30)),
     ]
     return [ReviewBucket(label=label, count=len([state for state in memory_states if predicate(state)])) for label, predicate in buckets]
-
-
-def average(values: list[float] | list[int]) -> float:
-    if not values:
-        return 0.0
-    return sum(values) / len(values)
-
-
-def extract_mistake_words(mistake_type: str, expected_answer: str, actual_answer: str) -> list[str]:
-    if mistake_type == "word-spelling":
-        return tokenize_words(expected_answer)
-    if "错词：" in actual_answer:
-        _, words_text = actual_answer.split("错词：", 1)
-        return tokenize_words(words_text.replace(",", " "))
-    return []

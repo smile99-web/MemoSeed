@@ -12,7 +12,7 @@ import { Course, listCoursePackages, listCourses } from "@/lib/courses";
 import { generateDynamicSentence, generateLearningEncouragement, LearningItem, listDueReviewItems, listLearningItems, logWordMistake, translateLearningText } from "@/lib/learning";
 import { recordCourseCompletion, recordStudyTime, scheduleMemoryReview } from "@/lib/memory";
 import { ModelSettings, defaultModelSettings, getModelSettings, loadPersistedModelSettings } from "@/lib/model-settings";
-import { playAudioBlob, synthesizeKokoroSpeech, synthesizeVolcengineSpeech, TtsSynthesisOptions } from "@/lib/tts";
+import { playAudioBlob, stopAudioPlayback, synthesizeCosyVoiceSpeech, synthesizeKokoroSpeech, synthesizeVolcengineSpeech, TtsSynthesisOptions } from "@/lib/tts";
 
 const itemTypeLabels: Record<LearningItem["item_type"], string> = {
   word: "单词",
@@ -20,13 +20,19 @@ const itemTypeLabels: Record<LearningItem["item_type"], string> = {
   sentence: "句子",
 };
 
-const annotationColors = ["border-primary", "border-emerald-500", "border-sky-500", "border-violet-500", "border-amber-500"] as const;
+const annotationColors = ["border-emerald-500", "border-sky-500", "border-violet-500", "border-amber-500", "border-rose-400"] as const;
 const STUDY_IDLE_TIMEOUT_MS = 20_000;
 const STUDY_TIME_FLUSH_SECONDS = 10;
 const DUE_REVIEW_POLL_MS = 60_000;
-const MANUAL_ENGLISH_TTS_OPTIONS: TtsSynthesisOptions = {
-  speechRate: -20,
-  speed: 0.8,
+const WORD_PREVIEW_MS = 3000;
+const NATURAL_ENGLISH_TTS_OPTIONS: TtsSynthesisOptions = {
+  speechRate: -12,
+};
+const SLOW_ENGLISH_TTS_OPTIONS: TtsSynthesisOptions = {
+  speechRate: -32,
+};
+const WORD_ENGLISH_TTS_OPTIONS: TtsSynthesisOptions = {
+  speechRate: -38,
 };
 const commonPartLabels: Record<string, string> = {
   i: "代词",
@@ -63,8 +69,8 @@ const commonPartLabels: Record<string, string> = {
   bad: "形容词",
 };
 
-type AnswerState = "typing" | "mistake-word-practice" | "sentence-complete" | "word-translations-shown";
-type WordStatus = "idle" | "correct" | "incorrect";
+type AnswerState = "typing" | "mistake-word-practice" | "sentence-complete";
+type WordStatus = "idle" | "correct" | "incorrect" | "skipped";
 type MistakePracticeStatus = "idle" | "incorrect";
 
 interface CelebrationSummary {
@@ -100,13 +106,147 @@ function normalizeEnglishKey(value: string): string {
   return value.trim().toLowerCase().replace(/^[^a-z0-9']+|[^a-z0-9']+$/g, "");
 }
 
-function cleanWordForTranslation(value: string): string {
+function cleanEnglishSpeechWord(value: string): string {
   return value.trim().replace(/^[^a-zA-Z0-9']+|[^a-zA-Z0-9']+$/g, "");
+}
+
+function buildChunkedEnglishSpeechText(value: string): string {
+  const words = tokenizeEnglish(value).map(cleanEnglishSpeechWord).filter(Boolean);
+  if (words.length <= 3) {
+    return words.join(" ");
+  }
+
+  const chunks: string[] = [];
+  for (let index = 0; index < words.length; index += 3) {
+    chunks.push(words.slice(index, index + 3).join(" "));
+  }
+  return chunks.join(". ");
+}
+
+function buildWordByWordEnglishSpeechText(value: string): string {
+  return tokenizeEnglish(value).map(cleanEnglishSpeechWord).filter(Boolean).join(". ");
+}
+
+function buildFocusedWordSpeechText(word: string): string {
+  const cleanWord = cleanEnglishSpeechWord(word);
+  if (!cleanWord) {
+    return "";
+  }
+  return `${cleanWord}. ${cleanWord}.`;
+}
+
+function getFirstLetter(value: string): string {
+  return normalizeEnglishKey(value).charAt(0);
+}
+
+function getMatchedPrefixLength(expectedWord: string, typedWord: string): number {
+  const normalizedExpected = normalizeEnglishKey(expectedWord);
+  const normalizedTyped = normalizeEnglishKey(typedWord);
+  let matchedPrefixLength = 0;
+  while (
+    matchedPrefixLength < normalizedExpected.length
+    && matchedPrefixLength < normalizedTyped.length
+    && normalizedExpected[matchedPrefixLength] === normalizedTyped[matchedPrefixLength]
+  ) {
+    matchedPrefixLength += 1;
+  }
+
+  return matchedPrefixLength;
+}
+
+function maskWordByIndexes(word: string, visibleIndexes: Set<number>): string {
+  const normalizedWord = normalizeEnglishKey(word);
+  return normalizedWord
+    .split("")
+    .map((letter, index) => (visibleIndexes.has(index) ? letter : "_"))
+    .join(" ");
+}
+
+function formatChunkLengths(lengths: number[]): string {
+  return lengths.join(" + ");
+}
+
+function getFrontHintChunkLengths(wordLength: number): number[] {
+  if (wordLength <= 3) {
+    return [wordLength];
+  }
+
+  const firstChunkLength = wordLength <= 6 ? 2 : 3;
+  return [firstChunkLength, wordLength - firstChunkLength];
+}
+
+function getBackHintChunkLengths(wordLength: number): number[] {
+  if (wordLength <= 3) {
+    return [wordLength];
+  }
+
+  const lastChunkLength = Math.min(3, wordLength - 1);
+  const remainingLength = wordLength - lastChunkLength;
+  if (remainingLength <= 3) {
+    return [remainingLength, lastChunkLength];
+  }
+
+  return [Math.ceil(remainingLength / 2), Math.floor(remainingLength / 2), lastChunkLength];
+}
+
+function buildFrontChunkHint(word: string): string {
+  const normalizedWord = normalizeEnglishKey(word);
+  const chunkLengths = getFrontHintChunkLengths(normalizedWord.length);
+  const visibleLength = chunkLengths[0] ?? 0;
+  const visibleIndexes = new Set<number>();
+  for (let index = 0; index < visibleLength; index += 1) {
+    visibleIndexes.add(index);
+  }
+
+  return `分段提示：按 ${formatChunkLengths(chunkLengths)} 个字母分段，一共 ${normalizedWord.length} 个字母。前面音节：${maskWordByIndexes(word, visibleIndexes)}`;
+}
+
+function buildBackChunkHint(word: string): string {
+  const normalizedWord = normalizeEnglishKey(word);
+  const chunkLengths = getBackHintChunkLengths(normalizedWord.length);
+  const visibleLength = chunkLengths[chunkLengths.length - 1] ?? 0;
+  const visibleIndexes = new Set<number>();
+  for (let index = Math.max(normalizedWord.length - visibleLength, 0); index < normalizedWord.length; index += 1) {
+    visibleIndexes.add(index);
+  }
+
+  return `分段提示：按 ${formatChunkLengths(chunkLengths)} 个字母分段，一共 ${normalizedWord.length} 个字母。后面音节：${maskWordByIndexes(word, visibleIndexes)}`;
+}
+
+function buildProgressiveSpellingHint(expectedWord: string, typedWord: string, errorCount: number): string {
+  const normalizedExpected = normalizeEnglishKey(expectedWord);
+  const matchedPrefixLength = getMatchedPrefixLength(expectedWord, typedWord);
+  const nextLetterIndex = Math.max(matchedPrefixLength + 1, 2);
+
+  if (errorCount <= 1) {
+    return `前 ${Math.max(matchedPrefixLength, 1)} 个字母是对的，从第 ${nextLetterIndex} 个字母再想想。`;
+  }
+
+  if (errorCount === 2) {
+    return `提示：${maskWordByIndexes(expectedWord, new Set([0]))}，一共 ${normalizedExpected.length} 个字母。`;
+  }
+
+  if (errorCount === 3) {
+    return buildFrontChunkHint(expectedWord);
+  }
+
+  if (errorCount === 4) {
+    return buildBackChunkHint(expectedWord);
+  }
+
+  const nextVisibleIndex = Math.min(Math.max(matchedPrefixLength, 1), Math.max(normalizedExpected.length - 1, 0));
+  const visibleIndexes = new Set<number>([0]);
+  for (let index = 0; index < Math.min(matchedPrefixLength, normalizedExpected.length); index += 1) {
+    visibleIndexes.add(index);
+  }
+  visibleIndexes.add(nextVisibleIndex);
+  const nextLetter = normalizedExpected[nextVisibleIndex] ?? "";
+  return `下一步提示：第 ${nextVisibleIndex + 1} 个字母是 ${nextLetter}。${maskWordByIndexes(expectedWord, visibleIndexes)}。先遮住答案，在心里拼一遍再输入。`;
 }
 
 function getWordInputWidth(word: string): string {
   const normalizedLength = Math.max(normalizeEnglishKey(word).length, 2);
-  return `${Math.min(Math.max(normalizedLength * 2.1, 4.5), 18)}rem`;
+  return `${Math.min(Math.max(normalizedLength * 3, 8), 24)}rem`;
 }
 
 function wait(ms: number): Promise<void> {
@@ -129,15 +269,32 @@ function speakWithBrowser(text: string, language: string, playbackRate = 0.85): 
   });
 }
 
-async function speakWithKokoro(text: string, voice: string, language: string, settings: ModelSettings, options: TtsSynthesisOptions = {}) {
-  if (!text.trim()) {
+async function speakWithKokoro(
+  text: string,
+  voice: string,
+  language: string,
+  settings: ModelSettings,
+  options: TtsSynthesisOptions = {},
+  shouldContinue: () => boolean = () => true,
+) {
+  if (!text.trim() || !shouldContinue()) {
     return;
   }
 
   try {
-    const audioBlob = settings.ttsProvider === "volcark" ? await speakWithVolcengine(text, voice, language, settings, options) : await speakWithKokoroApi(text, voice, settings, options);
+    const audioBlob = settings.ttsProvider === "volcark"
+      ? await speakWithVolcengine(text, voice, language, settings, options)
+      : settings.ttsProvider === "cosyvoice"
+        ? await speakWithCosyVoice(text, voice, settings)
+        : await speakWithKokoroApi(text, voice, settings, options);
+    if (!shouldContinue()) {
+      return;
+    }
     await playAudioBlob(audioBlob);
   } catch (error) {
+    if (!shouldContinue()) {
+      return;
+    }
     console.warn("课程学习 TTS 播放失败，已回退到浏览器语音。", error);
     await speakWithBrowser(text, language, options.speed ?? 0.85);
   }
@@ -204,6 +361,15 @@ async function speakWithKokoroApi(text: string, voice: string, settings: ModelSe
   }
 
   return synthesizeKokoroSpeech(text, voice, settings, accessToken, options);
+}
+
+async function speakWithCosyVoice(text: string, voice: string, settings: ModelSettings): Promise<Blob> {
+  const accessToken = getAccessToken();
+  if (!accessToken) {
+    throw new Error("Login required for CosyVoice TTS");
+  }
+  const speaker = voice === settings.ttsEnglishVoice ? settings.cosyvoiceEnglishSpeaker : settings.cosyvoiceChineseSpeaker;
+  return synthesizeCosyVoiceSpeech(text, speaker, settings, accessToken);
 }
 
 async function speakWithVolcengine(text: string, voice: string, language: string, settings: ModelSettings, options: TtsSynthesisOptions = {}): Promise<Blob> {
@@ -334,13 +500,13 @@ function CelebrationModal({ nextCourse, summary }: { nextCourse: NextCourseTarge
         </div>
         <div className="mt-6 flex flex-wrap justify-center gap-3 ipad:gap-4">
           {summary.canContinue ? (
-            <Button asChild className="ipad:text-lg ipad:px-6 ipad:py-3">
+            <Button asChild className="ipad:text-base ipad:px-5 ipad:py-2">
               <Link href={nextCourseHref}>{nextCourse ? "学习下一课" : "返回开始学习"}</Link>
             </Button>
           ) : (
-            <Button disabled type="button" className="ipad:text-lg ipad:px-6 ipad:py-3">{nextCourse ? "朗读后进入下一课" : "朗读后返回"}</Button>
+            <Button disabled type="button" className="ipad:text-base ipad:px-5 ipad:py-2">{nextCourse ? "朗读后进入下一课" : "朗读后返回"}</Button>
           )}
-          <Button asChild variant="secondary" className="ipad:text-lg ipad:px-6 ipad:py-3">
+          <Button asChild variant="secondary" className="ipad:text-base ipad:px-5 ipad:py-2">
             <Link href="/learning">返回开始学习</Link>
           </Button>
         </div>
@@ -363,25 +529,29 @@ function StudyContent() {
   const [activeWordIndex, setActiveWordIndex] = useState(0);
   const [answerState, setAnswerState] = useState<AnswerState>("typing");
   const [wordStatuses, setWordStatuses] = useState<WordStatus[]>([]);
-  const [wordTranslations, setWordTranslations] = useState<string[]>([]);
+  const [wordErrorCounts, setWordErrorCounts] = useState<number[]>([]);
+  const [previewWordIndex, setPreviewWordIndex] = useState<number | null>(null);
+  const [previewMistakePracticeWord, setPreviewMistakePracticeWord] = useState(false);
   const [mistakenWords, setMistakenWords] = useState<string[]>([]);
   const [mistakePracticeWords, setMistakePracticeWords] = useState<string[]>([]);
   const [mistakePracticeIndex, setMistakePracticeIndex] = useState(0);
   const [mistakePracticeAnswer, setMistakePracticeAnswer] = useState("");
   const [mistakePracticeStatus, setMistakePracticeStatus] = useState<MistakePracticeStatus>("idle");
   const [mistakePracticeErrorCount, setMistakePracticeErrorCount] = useState(0);
+  const [wordConsecutiveCorrect, setWordConsecutiveCorrect] = useState<number[]>([]);
+  const [mistakePracticeConsecutiveCorrect, setMistakePracticeConsecutiveCorrect] = useState(0);
   const [mistakePracticeTranslations, setMistakePracticeTranslations] = useState<Record<string, string>>({});
   const [pendingMistakePracticeWords, setPendingMistakePracticeWords] = useState<string[]>([]);
   const [deferredDynamicWords, setDeferredDynamicWords] = useState<string[]>([]);
   const [hasFinalizedCurrentItem, setHasFinalizedCurrentItem] = useState(false);
   const [startedAt, setStartedAt] = useState<number>(() => Date.now());
-  const [isTranslatingWords, setIsTranslatingWords] = useState(false);
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [modelSettings, setModelSettings] = useState<ModelSettings>(defaultModelSettings);
   const [activeStudySeconds, setActiveStudySeconds] = useState(0);
   const [celebrationSummary, setCelebrationSummary] = useState<CelebrationSummary | null>(null);
+  const [isStudyFullscreen, setIsStudyFullscreen] = useState(true);
   const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
   const mistakePracticeInputRef = useRef<HTMLInputElement | null>(null);
   const activeStudyMsRef = useRef(0);
@@ -394,9 +564,7 @@ function StudyContent() {
   const voiceSequenceRef = useRef(0);
   const modelSettingsRef = useRef<ModelSettings>(defaultModelSettings);
   const answerStateRef = useRef<AnswerState>("typing");
-  const isTranslatingWordsRef = useRef(false);
   const isCompletingSentenceRef = useRef(false);
-  const areWordTranslationsReadyRef = useRef(false);
   const pendingMistakePracticeWordsRef = useRef<string[]>([]);
   const pendingMistakePracticeTranslationsRef = useRef<Record<string, string>>({});
   const spaceCooldownRef = useRef(0);
@@ -404,6 +572,8 @@ function StudyContent() {
   const currentIndexRef = useRef(0);
   const currentItemRef = useRef<LearningItem | null>(null);
   const celebrationSummaryRef = useRef<CelebrationSummary | null>(null);
+  const wordPreviewTimeoutRef = useRef<number | null>(null);
+  const mistakePracticePreviewTimeoutRef = useRef<number | null>(null);
 
   const currentItem = items[currentIndex] ?? null;
   const currentWords = useMemo(() => tokenizeEnglish(currentItem?.english_text ?? ""), [currentItem]);
@@ -455,13 +625,74 @@ function StudyContent() {
     answerStateRef.current = answerState;
   }, [answerState]);
 
-  useEffect(() => {
-    isTranslatingWordsRef.current = isTranslatingWords;
-  }, [isTranslatingWords]);
-
   const updateAnswerState = useCallback(function updateAnswerState(nextState: AnswerState) {
     answerStateRef.current = nextState;
     setAnswerState(nextState);
+  }, []);
+
+  const clearWordPreview = useCallback(function clearWordPreview() {
+    if (wordPreviewTimeoutRef.current !== null) {
+      window.clearTimeout(wordPreviewTimeoutRef.current);
+      wordPreviewTimeoutRef.current = null;
+    }
+    setPreviewWordIndex(null);
+  }, []);
+
+  const clearMistakePracticePreview = useCallback(function clearMistakePracticePreview() {
+    if (mistakePracticePreviewTimeoutRef.current !== null) {
+      window.clearTimeout(mistakePracticePreviewTimeoutRef.current);
+      mistakePracticePreviewTimeoutRef.current = null;
+    }
+    setPreviewMistakePracticeWord(false);
+  }, []);
+
+  const showWordPreview = useCallback(function showWordPreview(index: number, expectedWord: string) {
+    clearWordPreview();
+    setPreviewWordIndex(index);
+    setWordAnswers((current) => {
+      const nextAnswers = [...current];
+      nextAnswers[index] = "";
+      return nextAnswers;
+    });
+    setFeedbackMessage(`看清这个单词 ${Math.round(WORD_PREVIEW_MS / 1000)} 秒：${expectedWord}。它会自动隐藏，然后请凭记忆完整拼写。`);
+    wordPreviewTimeoutRef.current = window.setTimeout(() => {
+      wordPreviewTimeoutRef.current = null;
+      setPreviewWordIndex(null);
+      setWordStatuses((current) => {
+        const nextStatuses = [...current];
+        if (nextStatuses[index] === "incorrect") {
+          nextStatuses[index] = "idle";
+        }
+        return nextStatuses;
+      });
+      setFeedbackMessage("现在请凭记忆重新拼写这个单词。");
+      window.setTimeout(() => inputRefs.current[index]?.focus(), 0);
+    }, WORD_PREVIEW_MS);
+  }, [clearWordPreview]);
+
+  const showMistakePracticePreview = useCallback(function showMistakePracticePreview(expectedWord: string) {
+    clearMistakePracticePreview();
+    setPreviewMistakePracticeWord(true);
+    setMistakePracticeAnswer("");
+    setFeedbackMessage(`看清这个单词 ${Math.round(WORD_PREVIEW_MS / 1000)} 秒：${expectedWord}。它会自动隐藏，然后请凭记忆完整拼写。`);
+    mistakePracticePreviewTimeoutRef.current = window.setTimeout(() => {
+      mistakePracticePreviewTimeoutRef.current = null;
+      setPreviewMistakePracticeWord(false);
+      setMistakePracticeStatus("idle");
+      setFeedbackMessage("现在请凭记忆重新拼写这个错词。");
+      window.setTimeout(() => mistakePracticeInputRef.current?.focus(), 0);
+    }, WORD_PREVIEW_MS);
+  }, [clearMistakePracticePreview]);
+
+  useEffect(() => {
+    return () => {
+      if (wordPreviewTimeoutRef.current !== null) {
+        window.clearTimeout(wordPreviewTimeoutRef.current);
+      }
+      if (mistakePracticePreviewTimeoutRef.current !== null) {
+        window.clearTimeout(mistakePracticePreviewTimeoutRef.current);
+      }
+    };
   }, []);
 
   const setPendingMistakePractice = useCallback(function setPendingMistakePractice(words: string[], translations: Record<string, string>) {
@@ -474,23 +705,16 @@ function StudyContent() {
     return isDynamicFillBlankItem ? dynamicReviewWordIndexes : currentWords.map((_, index) => index);
   }, [currentWords, dynamicReviewWordIndexes, isDynamicFillBlankItem]);
 
-  function areRequiredWordAnswersCorrect(nextAnswers: string[]): boolean {
-    return getRequiredWordIndexes().every((wordIndex) => normalizeTypedWord(nextAnswers[wordIndex] ?? "") === normalizeTypedWord(currentWords[wordIndex] ?? ""));
+  function areRequiredWordAnswersComplete(nextAnswers: string[], nextStatuses = wordStatuses): boolean {
+    return getRequiredWordIndexes().every((wordIndex) => (
+      nextStatuses[wordIndex] === "skipped"
+      || normalizeTypedWord(nextAnswers[wordIndex] ?? "") === normalizeTypedWord(currentWords[wordIndex] ?? "")
+    ));
   }
-
-  const buildMistakePracticeTranslations = useCallback(function buildMistakePracticeTranslations(words: string[], translations: string[]): Record<string, string> {
-    const translationByWord: Record<string, string> = {};
-    words.forEach((word) => {
-      const normalizedWord = normalizeEnglishKey(word);
-      const translatedIndex = currentWords.findIndex((currentWord) => normalizeEnglishKey(currentWord) === normalizedWord);
-      translationByWord[word] = translatedIndex >= 0 ? translations[translatedIndex] || "" : "";
-    });
-    return translationByWord;
-  }, [currentWords]);
 
   const startVoiceSequence = useCallback(function startVoiceSequence(): number {
     voiceSequenceRef.current += 1;
-    window.speechSynthesis?.cancel();
+    stopAudioPlayback();
     return voiceSequenceRef.current;
   }, []);
 
@@ -514,9 +738,68 @@ function StudyContent() {
     if (!isCurrentVoiceSequence(sequenceId)) {
       return false;
     }
-    await speakWithKokoro(text, voice, language, settings, options);
+    await speakWithKokoro(text, voice, language, settings, options, () => isCurrentVoiceSequence(sequenceId));
     return isCurrentVoiceSequence(sequenceId);
   }, [isCurrentVoiceSequence]);
+
+  const speakClearEnglishSentence = useCallback(async function speakClearEnglishSentence(
+    sequenceId: number,
+    englishText: string,
+    settings: ModelSettings,
+    includeNaturalRead = true,
+  ): Promise<boolean> {
+    const cleanText = englishText.trim();
+    if (!cleanText) {
+      return false;
+    }
+
+    if (includeNaturalRead) {
+      if (!(await speakInVoiceSequence(sequenceId, cleanText, settings.ttsEnglishVoice, "en-US", settings, NATURAL_ENGLISH_TTS_OPTIONS))) {
+        return false;
+      }
+      if (!(await waitInVoiceSequence(sequenceId, 900))) {
+        return false;
+      }
+    }
+
+    const chunkedText = buildChunkedEnglishSpeechText(cleanText);
+    if (!(await speakInVoiceSequence(sequenceId, chunkedText, settings.ttsEnglishVoice, "en-US", settings, SLOW_ENGLISH_TTS_OPTIONS))) {
+      return false;
+    }
+    if (!(await waitInVoiceSequence(sequenceId, 900))) {
+      return false;
+    }
+
+    const wordByWordText = buildWordByWordEnglishSpeechText(cleanText);
+    if (wordByWordText && wordByWordText !== chunkedText) {
+      return speakInVoiceSequence(sequenceId, wordByWordText, settings.ttsEnglishVoice, "en-US", settings, WORD_ENGLISH_TTS_OPTIONS);
+    }
+
+    return true;
+  }, [speakInVoiceSequence, waitInVoiceSequence]);
+
+  const speakFocusedEnglishWord = useCallback(async function speakFocusedEnglishWord(
+    sequenceId: number,
+    word: string,
+    settings: ModelSettings,
+  ): Promise<boolean> {
+    const speechText = buildFocusedWordSpeechText(word);
+    if (!speechText) {
+      return false;
+    }
+    return speakInVoiceSequence(sequenceId, speechText, settings.ttsEnglishVoice, "en-US", settings, WORD_ENGLISH_TTS_OPTIONS);
+  }, [speakInVoiceSequence]);
+
+  const speakClearEnglish = useCallback(async function speakClearEnglish(
+    sequenceId: number,
+    englishText: string,
+    settings: ModelSettings,
+    includeNaturalRead = true,
+  ): Promise<boolean> {
+    return tokenizeEnglish(englishText).length <= 1
+      ? speakFocusedEnglishWord(sequenceId, englishText, settings)
+      : speakClearEnglishSentence(sequenceId, englishText, settings, includeNaturalRead);
+  }, [speakClearEnglishSentence, speakFocusedEnglishWord]);
 
   const playCurrentItemIntro = useCallback(async function playCurrentItemIntro(item: LearningItem, sequenceId: number) {
     const settings = modelSettingsRef.current;
@@ -529,14 +812,8 @@ function StudyContent() {
     if (!(await waitInVoiceSequence(sequenceId, 1000))) {
       return;
     }
-    if (!(await speakInVoiceSequence(sequenceId, item.english_text, settings.ttsEnglishVoice, "en-US", settings))) {
-      return;
-    }
-    if (!(await waitInVoiceSequence(sequenceId, 2000))) {
-      return;
-    }
-    await speakInVoiceSequence(sequenceId, item.english_text, settings.ttsEnglishVoice, "en-US", settings);
-  }, [speakInVoiceSequence, waitInVoiceSequence]);
+    await speakClearEnglish(sequenceId, item.english_text, settings, true);
+  }, [speakClearEnglish, speakInVoiceSequence, waitInVoiceSequence]);
 
   const playChineseThenEnglish = useCallback(async function playChineseThenEnglish(chineseText: string, englishText: string, sequenceId = startVoiceSequence()) {
     const settings = modelSettingsRef.current;
@@ -546,8 +823,8 @@ function StudyContent() {
     if (!(await waitInVoiceSequence(sequenceId, 1000))) {
       return;
     }
-    await speakInVoiceSequence(sequenceId, englishText, settings.ttsEnglishVoice, "en-US", settings);
-  }, [speakInVoiceSequence, startVoiceSequence, waitInVoiceSequence]);
+    await speakClearEnglish(sequenceId, englishText, settings, true);
+  }, [speakClearEnglish, speakInVoiceSequence, startVoiceSequence, waitInVoiceSequence]);
 
   const focusInputAtEnd = useCallback(function focusInputAtEnd(input: HTMLInputElement | null) {
     if (!input) {
@@ -577,16 +854,21 @@ function StudyContent() {
   }, [activeWordIndex, currentWords, focusInputAtEnd, getRequiredWordIndexes, wordAnswers]);
 
   const handleSpeakEnglish = useCallback(function handleSpeakEnglish() {
-    if (!currentItem?.english_text) {
+    const textToSpeak = answerStateRef.current === "mistake-word-practice" ? currentMistakePracticeWord : currentItem?.english_text;
+    if (!textToSpeak) {
       return;
     }
     focusCurrentUnfinishedWord();
     const sequenceId = startVoiceSequence();
     const settings = modelSettingsRef.current;
-    void speakInVoiceSequence(sequenceId, currentItem.english_text, settings.ttsEnglishVoice, "en-US", settings, MANUAL_ENGLISH_TTS_OPTIONS).finally(() => {
+    void speakClearEnglish(sequenceId, textToSpeak, settings, false).finally(() => {
       window.setTimeout(focusCurrentUnfinishedWord, 0);
     });
-  }, [currentItem, focusCurrentUnfinishedWord, speakInVoiceSequence, startVoiceSequence]);
+  }, [currentItem, currentMistakePracticeWord, focusCurrentUnfinishedWord, speakClearEnglish, startVoiceSequence]);
+
+  function toggleStudyFullscreen() {
+    setIsStudyFullscreen((current) => !current);
+  }
 
   const flushStudyTime = useCallback(async function flushStudyTime(force = false) {
     if (isFlushingStudyTimeRef.current) {
@@ -669,7 +951,10 @@ function StudyContent() {
   useEffect(() => {
     setWordAnswers(currentWords.map(() => ""));
     setWordStatuses(currentWords.map(() => "idle"));
-    setWordTranslations(currentWords.map(() => ""));
+    setWordErrorCounts(currentWords.map(() => 0));
+    setWordConsecutiveCorrect(currentWords.map(() => 0));
+    clearWordPreview();
+    clearMistakePracticePreview();
     setMistakenWords([]);
     setMistakePracticeWords([]);
     setMistakePracticeIndex(0);
@@ -682,17 +967,14 @@ function StudyContent() {
     setStartedAt(Date.now());
     setActiveWordIndex(dynamicReviewWordIndexes[0] ?? 0);
     updateAnswerState("typing");
-    setIsTranslatingWords(false);
-    isTranslatingWordsRef.current = false;
     isCompletingSentenceRef.current = false;
-    areWordTranslationsReadyRef.current = false;
     setFeedbackMessage(null);
     window.setTimeout(() => inputRefs.current[dynamicReviewWordIndexes[0] ?? 0]?.focus(), 0);
     const sequenceId = startVoiceSequence();
     if (currentItem?.chinese_text && currentItem.english_text) {
       void playCurrentItemIntro(currentItem, sequenceId);
     }
-  }, [currentItem, currentWords, dynamicReviewWordIndexes, playCurrentItemIntro, setPendingMistakePractice, startVoiceSequence, updateAnswerState]);
+  }, [clearMistakePracticePreview, clearWordPreview, currentItem, currentWords, dynamicReviewWordIndexes, playCurrentItemIntro, setPendingMistakePractice, startVoiceSequence, updateAnswerState]);
 
   useEffect(() => {
     if (answerState === "mistake-word-practice") {
@@ -819,7 +1101,9 @@ function StudyContent() {
   function resetAnswer() {
     setWordAnswers(currentWords.map(() => ""));
     setWordStatuses(currentWords.map(() => "idle"));
-    setWordTranslations(currentWords.map(() => ""));
+    setWordErrorCounts(currentWords.map(() => 0));
+    clearWordPreview();
+    clearMistakePracticePreview();
     setMistakenWords([]);
     setMistakePracticeWords([]);
     setMistakePracticeIndex(0);
@@ -832,10 +1116,7 @@ function StudyContent() {
     setStartedAt(Date.now());
     setActiveWordIndex(dynamicReviewWordIndexes[0] ?? 0);
     updateAnswerState("typing");
-    setIsTranslatingWords(false);
-    isTranslatingWordsRef.current = false;
     isCompletingSentenceRef.current = false;
-    areWordTranslationsReadyRef.current = false;
     setFeedbackMessage(null);
     window.setTimeout(() => inputRefs.current[dynamicReviewWordIndexes[0] ?? 0]?.focus(), 0);
   }
@@ -922,6 +1203,7 @@ function StudyContent() {
       return;
     }
 
+    startVoiceSequence();
     setCurrentIndex((index) => {
       const nextIndex = (index + 1) % items.length;
       window.localStorage.setItem(getStudyProgressKey(courseId), String(nextIndex));
@@ -930,7 +1212,7 @@ function StudyContent() {
       }
       return nextIndex;
     });
-  }, [courseId, items.length, showCourseCompletion]);
+  }, [courseId, items.length, showCourseCompletion, startVoiceSequence]);
 
   function isGeneratedItem(item: LearningItem): boolean {
     return item.id.startsWith("generated-");
@@ -1066,8 +1348,8 @@ function StudyContent() {
       isCompletingSentenceRef.current = false;
       setFeedbackMessage(
         dynamicSentenceFeedback
-          ? `${dynamicSentenceFeedback} 本句有错词，先按空格查看每个单词的中文意思，再进入错词复习。`
-          : "本句有错词。先按空格查看每个单词的中文意思，再进入错词复习。",
+          ? `${dynamicSentenceFeedback} 本句有错词，按空格进入错词复习。`
+          : "本句有错词，按空格进入错词复习。",
       );
       await playChineseThenEnglish(currentItem.chinese_text, currentItem.english_text);
       return;
@@ -1075,18 +1357,21 @@ function StudyContent() {
 
     updateAnswerState("sentence-complete");
     isCompletingSentenceRef.current = false;
-    setFeedbackMessage(dynamicSentenceFeedback ? `${dynamicSentenceFeedback} 按空格查看每个单词的中文意思。` : "整句拼写正确。按空格查看每个单词的中文意思。");
+    setFeedbackMessage(dynamicSentenceFeedback ? `${dynamicSentenceFeedback} 按空格进入下一句。` : "整句拼写正确。按空格进入下一句。");
     await playChineseThenEnglish(currentItem.chinese_text, currentItem.english_text);
   }
 
   function updateWordAnswer(index: number, value: string) {
+    if (previewWordIndex === index) {
+      clearWordPreview();
+    }
     setWordAnswers((current) => {
       const nextAnswers = [...current];
       nextAnswers[index] = value.replace(/\s/g, "");
       return nextAnswers;
     });
     setFeedbackMessage(null);
-    if (wordStatuses[index] === "incorrect") {
+    if (wordStatuses[index] === "incorrect" || wordStatuses[index] === "skipped") {
       setWordStatuses((current) => {
         const nextStatuses = [...current];
         nextStatuses[index] = "idle";
@@ -1096,6 +1381,9 @@ function StudyContent() {
   }
 
   function resetIncorrectWord(index: number) {
+    if (previewWordIndex === index) {
+      clearWordPreview();
+    }
     setWordAnswers((current) => {
       const nextAnswers = [...current];
       nextAnswers[index] = "";
@@ -1110,7 +1398,7 @@ function StudyContent() {
     window.setTimeout(() => inputRefs.current[index]?.focus(), 0);
   }
 
-  async function handleIncorrectWord(expectedWord: string) {
+  async function translateWordForHint(expectedWord: string): Promise<string> {
     let translatedWord = "";
     const accessToken = getAccessToken();
     if (accessToken) {
@@ -1121,13 +1409,25 @@ function StudyContent() {
         translatedWord = "";
       }
     }
+    return translatedWord;
+  }
 
-    setFeedbackMessage(translatedWord ? `正确单词：${expectedWord}，中文：${translatedWord}` : `正确单词：${expectedWord}`);
+  async function handleFirstLetterMistake(expectedWord: string) {
+    const translatedWord = await translateWordForHint(expectedWord);
+    setFeedbackMessage(translatedWord ? `首字母不对，先听中文和英文读音。中文：${translatedWord}` : "首字母不对，先听英文读音再试一次。");
     await playChineseThenEnglish(translatedWord, expectedWord);
+  }
+
+  function handleSpellingMistake(index: number, expectedWord: string, typedWord: string, errorCount: number) {
+    setFeedbackMessage(buildProgressiveSpellingHint(expectedWord, typedWord, errorCount));
   }
 
   function checkWord(index: number) {
     if (answerStateRef.current !== "typing" || isCompletingSentenceRef.current) {
+      return;
+    }
+    if (previewWordIndex === index) {
+      setFeedbackMessage("先看清单词，等它自动隐藏后再凭记忆输入。");
       return;
     }
     if (isDynamicFillBlankItem && !dynamicReviewWordIndexes.includes(index)) {
@@ -1151,38 +1451,118 @@ function StudyContent() {
     }
 
     const isCorrect = typedValue === normalizeTypedWord(expectedWord);
-    setWordStatuses((current) => {
-      const nextStatuses = [...current];
-      nextStatuses[index] = isCorrect ? "correct" : "incorrect";
-      return nextStatuses;
-    });
+    const nextStatusesForAttempt = [...wordStatuses];
+    nextStatusesForAttempt[index] = isCorrect ? "correct" : "incorrect";
+    setWordStatuses(nextStatusesForAttempt);
 
     if (!isCorrect) {
       const actualWord = currentRawAnswer;
       const normalizedExpectedWord = normalizeEnglishKey(expectedWord);
+      const nextErrorCount = (wordErrorCounts[index] ?? 0) + 1;
+      setWordErrorCounts((current) => {
+        const nextCounts = [...current];
+        nextCounts[index] = nextErrorCount;
+        return nextCounts;
+      });
+      setWordConsecutiveCorrect((current) => {
+        const next = [...current];
+        next[index] = 0;
+        return next;
+      });
       setMistakenWords((current) => (current.includes(normalizedExpectedWord) ? current : [...current, normalizedExpectedWord]));
       const accessToken = getAccessToken();
       if (accessToken && currentItem && !isGeneratedItem(currentItem)) {
         void logWordMistake(currentItem.id, expectedWord, actualWord, accessToken).catch(() => undefined);
       }
-      setFeedbackMessage(`正在翻译并朗读：${expectedWord}`);
-      void handleIncorrectWord(expectedWord);
+      if (nextErrorCount === 3) {
+        void playChineseThenEnglish(currentItem?.chinese_text ?? "", expectedWord);
+        showWordPreview(index, expectedWord);
+        return;
+      }
+      if (nextErrorCount >= 8) {
+        const nextSkippedStatuses = [...nextStatusesForAttempt];
+        nextSkippedStatuses[index] = "skipped";
+        setWordStatuses(nextSkippedStatuses);
+        clearWordPreview();
+        setFeedbackMessage("这个词先加入错词复习，继续完成句子。稍后会用中文、发音和隐藏重拼再练。");
+        const nextIndex = isDynamicFillBlankItem ? dynamicReviewWordIndexes.find((wordIndex) => wordIndex > index) ?? currentWords.length : index + 1;
+        if (areRequiredWordAnswersComplete(wordAnswers, nextSkippedStatuses)) {
+          void completeCurrentSentence();
+          return;
+        }
+        if (nextIndex < currentWords.length) {
+          setActiveWordIndex(nextIndex);
+          window.setTimeout(() => inputRefs.current[nextIndex]?.focus(), 0);
+        }
+        return;
+      }
+      if (getFirstLetter(typedValue) !== getFirstLetter(expectedWord)) {
+        setFeedbackMessage("首字母不对，正在准备中文和英文读音...");
+        void handleFirstLetterMistake(expectedWord);
+      } else {
+        handleSpellingMistake(index, expectedWord, typedValue, nextErrorCount);
+      }
       return;
     }
 
     if (currentItem) {
       markCorrectWord(currentItem, expectedWord, index);
     }
+
+    const prevErrorCount = wordErrorCounts[index] ?? 0;
+
+    if (prevErrorCount >= 3) {
+      const nextConsecutive = (wordConsecutiveCorrect[index] ?? 0) + 1;
+      setWordConsecutiveCorrect((current) => {
+        const next = [...current];
+        next[index] = nextConsecutive;
+        return next;
+      });
+
+      if (nextConsecutive < 2) {
+        setFeedbackMessage("正确！请再拼写一次确认。");
+        if (inputRefs.current[index]) {
+          inputRefs.current[index].value = "";
+        }
+        setWordAnswers((current) => {
+          const next = [...current];
+          next[index] = "";
+          return next;
+        });
+        setWordStatuses((current) => {
+          const next = [...current];
+          next[index] = "idle";
+          return next;
+        });
+        window.setTimeout(() => inputRefs.current[index]?.focus(), 0);
+        return;
+      }
+
+      setWordConsecutiveCorrect((current) => {
+        const next = [...current];
+        next[index] = 0;
+        return next;
+      });
+    }
+
+    setWordErrorCounts((current) => {
+      const nextCounts = [...current];
+      nextCounts[index] = 0;
+      return nextCounts;
+    });
     const nextAnswers = [...wordAnswers];
     nextAnswers[index] = currentRawAnswer;
-    if (areRequiredWordAnswersCorrect(nextAnswers)) {
+    if (areRequiredWordAnswersComplete(nextAnswers, nextStatusesForAttempt)) {
       setWordStatuses((current) => {
         const nextStatuses = [...current];
         getRequiredWordIndexes().forEach((wordIndex) => {
-          nextStatuses[wordIndex] = "correct";
+          if (nextStatuses[wordIndex] !== "skipped") {
+            nextStatuses[wordIndex] = "correct";
+          }
         });
         return nextStatuses;
       });
+      clearWordPreview();
       void completeCurrentSentence();
       return;
     }
@@ -1225,6 +1605,10 @@ function StudyContent() {
     if (!expectedWord) {
       return;
     }
+    if (previewMistakePracticeWord) {
+      setFeedbackMessage("先看清单词，等它自动隐藏后再凭记忆输入。");
+      return;
+    }
 
     // Ignore empty submissions — don't count them as errors
     const normalizedAnswer = normalizeTypedWord(mistakePracticeAnswer);
@@ -1236,23 +1620,68 @@ function StudyContent() {
     const isCorrect = normalizedAnswer === normalizeTypedWord(expectedWord);
     if (!isCorrect) {
       const nextErrorCount = mistakePracticeErrorCount + 1;
-      if (nextErrorCount >= 3) {
-        setDeferredDynamicWords([normalizeEnglishKey(expectedWord)]);
+      setMistakePracticeErrorCount(nextErrorCount);
+      setMistakePracticeConsecutiveCorrect(0);
+      setMistakePracticeStatus("incorrect");
+      setMistakePracticeAnswer("");
+      if (nextErrorCount === 3) {
+        await playChineseThenEnglish(currentMistakePracticeTranslation, expectedWord);
+        showMistakePracticePreview(expectedWord);
+        return;
+      }
+
+      if (nextErrorCount >= 9) {
+        clearMistakePracticePreview();
+        setDeferredDynamicWords((current) => {
+          const normalizedWord = normalizeEnglishKey(expectedWord);
+          return normalizedWord && !current.includes(normalizedWord) ? [...current, normalizedWord] : current;
+        });
+        setFeedbackMessage("这个词已经看过并重新尝试过了，先放入后续复习句。继续下一个，稍后再回来练。");
+        const nextIndex = mistakePracticeIndex + 1;
+        if (nextIndex < mistakePracticeWords.length) {
+          const nextWord = mistakePracticeWords[nextIndex];
+          setMistakePracticeIndex(nextIndex);
+          setMistakePracticeAnswer("");
+          setMistakePracticeStatus("idle");
+          setMistakePracticeErrorCount(0);
+          const nextTranslation = mistakePracticeTranslations[nextWord];
+          if (nextTranslation) {
+            await playChineseThenEnglish(nextTranslation, nextWord);
+          }
+          return;
+        }
+
         setMistakePracticeWords([]);
         setMistakePracticeAnswer("");
         setMistakePracticeStatus("idle");
         setMistakePracticeErrorCount(0);
-        setFeedbackMessage("这个错词已连续 3 次错误，先进入下一句；下一句完成后会生成 5 到 7 个单词的新复习句。");
-        handleNextItem();
+        handleNextItem({ completedCurrentItem: true });
         return;
       }
 
-      setMistakePracticeErrorCount(nextErrorCount);
-      setMistakePracticeStatus("incorrect");
-      setMistakePracticeAnswer("");
-      setFeedbackMessage(`正确单词：${expectedWord}。请再拼一次，连续错误 ${nextErrorCount}/3。`);
-      await playChineseThenEnglish(currentMistakePracticeTranslation, expectedWord);
+      if (getFirstLetter(normalizedAnswer) !== getFirstLetter(expectedWord)) {
+        setFeedbackMessage(`首字母不对，先听中文和英文读音。已连续错误 ${nextErrorCount} 次。`);
+        await playChineseThenEnglish(currentMistakePracticeTranslation, expectedWord);
+        return;
+      }
+
+      setFeedbackMessage(`${buildProgressiveSpellingHint(expectedWord, normalizedAnswer, nextErrorCount)} 已连续错误 ${nextErrorCount} 次。`);
       return;
+    }
+
+    if (mistakePracticeErrorCount >= 3) {
+      const nextConsecutive = mistakePracticeConsecutiveCorrect + 1;
+      setMistakePracticeConsecutiveCorrect(nextConsecutive);
+
+      if (nextConsecutive < 2) {
+        setFeedbackMessage("正确！请再拼写一次确认。");
+        setMistakePracticeAnswer("");
+        setMistakePracticeStatus("idle");
+        window.setTimeout(() => mistakePracticeInputRef.current?.focus(), 0);
+        return;
+      }
+
+      setMistakePracticeConsecutiveCorrect(0);
     }
 
     const nextIndex = mistakePracticeIndex + 1;
@@ -1265,6 +1694,8 @@ function StudyContent() {
       setMistakePracticeAnswer("");
       setMistakePracticeStatus("idle");
       setMistakePracticeErrorCount(0);
+      setMistakePracticeConsecutiveCorrect(0);
+      clearMistakePracticePreview();
       setFeedbackMessage("正确。继续拼写下一个错词。");
       const nextTranslation = mistakePracticeTranslations[nextWord];
       if (nextTranslation) {
@@ -1277,6 +1708,8 @@ function StudyContent() {
     setMistakePracticeAnswer("");
     setMistakePracticeStatus("idle");
     setMistakePracticeErrorCount(0);
+    setMistakePracticeConsecutiveCorrect(0);
+    clearMistakePracticePreview();
     setFeedbackMessage("错词单独拼写完成，进入下一句。");
     handleNextItem({ completedCurrentItem: true });
   }
@@ -1289,58 +1722,6 @@ function StudyContent() {
       void checkMistakePracticeWord();
     }
   }
-
-  const revealWordTranslations = useCallback(async function revealWordTranslations() {
-    if (!currentItem || isTranslatingWordsRef.current || answerStateRef.current !== "sentence-complete") {
-      return;
-    }
-
-    const accessToken = getAccessToken();
-    if (!accessToken) {
-      setFeedbackMessage("请先登录后再调用 LLM 翻译单词。");
-      return;
-    }
-
-    areWordTranslationsReadyRef.current = false;
-    isTranslatingWordsRef.current = true;
-    setIsTranslatingWords(true);
-    setFeedbackMessage("正在调用 LLM 翻译每个单词...");
-    const translationCache = new Map<string, string>();
-    const translations = await Promise.all(
-      currentWords.map(async (word) => {
-        const cleanWord = cleanWordForTranslation(word);
-        const cacheKey = normalizeEnglishKey(cleanWord);
-        if (!cleanWord) {
-          return "";
-        }
-        if (translationCache.has(cacheKey)) {
-          return translationCache.get(cacheKey) ?? "";
-        }
-        try {
-          const response = await translateLearningText(cleanWord, accessToken, modelSettings);
-          translationCache.set(cacheKey, response.chinese_text);
-          return response.chinese_text;
-        } catch {
-          translationCache.set(cacheKey, "翻译失败");
-          return "翻译失败";
-        }
-      }),
-    );
-    setWordTranslations(translations);
-    const pendingWords = pendingMistakePracticeWordsRef.current;
-    if (pendingWords.length > 0) {
-      pendingMistakePracticeTranslationsRef.current = buildMistakePracticeTranslations(pendingWords, translations);
-    }
-    updateAnswerState("word-translations-shown");
-    setFeedbackMessage(pendingWords.length > 0 ? "已显示逐词中文。再次按空格进入错词复习。" : "已显示逐词中文。再次按空格进入下一句。");
-    setIsTranslatingWords(false);
-    isTranslatingWordsRef.current = false;
-    // Use setTimeout (macrotask) instead of rAF so React has flushed
-    // the wordTranslations render before space can advance to mistake practice.
-    window.setTimeout(() => {
-      areWordTranslationsReadyRef.current = true;
-    }, 0);
-  }, [buildMistakePracticeTranslations, currentItem, currentWords, modelSettings, updateAnswerState]);
 
   const beginPendingMistakePractice = useCallback(async function beginPendingMistakePractice() {
     const words = pendingMistakePracticeWordsRef.current;
@@ -1361,6 +1742,8 @@ function StudyContent() {
     setMistakePracticeAnswer("");
     setMistakePracticeStatus("idle");
     setMistakePracticeErrorCount(0);
+    setMistakePracticeConsecutiveCorrect(0);
+    clearMistakePracticePreview();
     updateAnswerState("mistake-word-practice");
     setFeedbackMessage("现在进入错词单独拼写。");
     const firstTranslation = practiceTranslations[words[0]];
@@ -1368,20 +1751,7 @@ function StudyContent() {
       await playChineseThenEnglish(firstTranslation, words[0]);
     }
     return true;
-  }, [playChineseThenEnglish, setPendingMistakePractice, translateMistakePracticeWords, updateAnswerState]);
-
-  function handleWordTranslationsContinue() {
-    if (isTranslatingWordsRef.current || !areWordTranslationsReadyRef.current) {
-      return;
-    }
-    areWordTranslationsReadyRef.current = false;
-    if (pendingMistakePracticeWordsRef.current.length > 0) {
-      void beginPendingMistakePractice();
-      return;
-    }
-    answerStateRef.current = "typing";
-    handleNextItem({ completedCurrentItem: true });
-  }
+  }, [clearMistakePracticePreview, playChineseThenEnglish, setPendingMistakePractice, translateMistakePracticeWords, updateAnswerState]);
 
   useEffect(() => {
     function handleWindowKeyDown(event: globalThis.KeyboardEvent) {
@@ -1408,17 +1778,9 @@ function StudyContent() {
       spaceCooldownRef.current = now;
 
       if (currentState === "sentence-complete") {
-        if (event.repeat || isTranslatingWordsRef.current) {
+        if (event.repeat) {
           return;
         }
-        void revealWordTranslations();
-        return;
-      }
-      if (currentState === "word-translations-shown") {
-        if (event.repeat || isTranslatingWordsRef.current || !areWordTranslationsReadyRef.current) {
-          return;
-        }
-        areWordTranslationsReadyRef.current = false;
         if (pendingMistakePracticeWordsRef.current.length > 0) {
           void beginPendingMistakePractice();
           return;
@@ -1430,75 +1792,105 @@ function StudyContent() {
 
     window.addEventListener("keydown", handleWindowKeyDown);
     return () => window.removeEventListener("keydown", handleWindowKeyDown);
-  }, [revealWordTranslations, handleNextItem, beginPendingMistakePractice]);
+  }, [handleNextItem, beginPendingMistakePractice]);
+
+  const wordInputSizeClass = isStudyFullscreen
+    ? "study-word-input study-word-input--immersive h-24 ipad:h-28 ipad-lg:h-32"
+    : "study-word-input h-20 ipad:h-24";
+  const wordDisplaySizeClass = isStudyFullscreen
+    ? "h-24 text-5xl ipad:h-28 ipad:text-6xl ipad-lg:h-32 ipad-lg:text-7xl"
+    : "h-20 text-4xl ipad:h-20 ipad:text-4xl ipad-lg:h-24 ipad-lg:text-5xl";
+  const actionButtonClass = isStudyFullscreen
+    ? "min-w-28 ipad:min-w-32 ipad:px-5 ipad:text-base ipad-lg:min-w-36 ipad-lg:text-lg"
+    : "min-w-32 ipad:min-w-32 ipad:text-sm ipad-lg:min-w-36 ipad-lg:text-base";
+  const displayChinesePrompt = isStudyFullscreen && answerState === "mistake-word-practice"
+    ? currentMistakePracticeTranslation || currentItem?.chinese_text || ""
+    : currentItem?.chinese_text || "";
 
   return (
-    <main className="flex min-h-screen flex-col bg-white">
+    <main className={isStudyFullscreen ? "flex min-h-[100dvh] flex-col overflow-y-auto bg-white text-slate-950" : "flex min-h-[100dvh] flex-col overflow-y-auto bg-slate-50 text-slate-950"}>
       {celebrationSummary ? <CelebrationModal nextCourse={nextCourse} summary={celebrationSummary} /> : null}
-      <header className="border-b bg-white px-5 py-4 ipad:px-7 ipad:py-5">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-4">
-            <div className="rounded-md border bg-slate-50 px-3 py-2 text-left">
-              <p className="text-xs text-muted-foreground">学习时长</p>
-              <p className="font-mono text-lg font-semibold text-slate-900 ipad:text-2xl">{formatStudyDuration(activeStudySeconds)}</p>
+      {!isStudyFullscreen ? (
+        <header className="shrink-0 border-b bg-white/95 px-4 py-2.5 shadow-sm ipad:px-5 ipad:py-2">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="rounded-md border bg-slate-50 px-3 py-2 text-left">
+                <p className="text-xs text-muted-foreground">学习时长</p>
+                <p className="font-mono text-lg font-semibold text-slate-900 ipad:text-xl">{formatStudyDuration(activeStudySeconds)}</p>
+              </div>
+              <Link className="text-sm font-medium text-primary hover:underline ipad:text-base" href="/learning">
+                返回开始学习
+              </Link>
+              <div>
+                <p className="text-lg font-semibold ipad:text-lg">课程学习</p>
+                <p className="text-sm text-muted-foreground ipad:text-sm">{items.length > 0 ? `第 ${currentIndex + 1} 题 / 共 ${items.length} 题` : "拼写练习"}</p>
+              </div>
             </div>
-            <Link className="text-sm font-medium text-primary hover:underline ipad:text-base" href="/learning">
-              返回开始学习
-            </Link>
-            <div>
-              <p className="text-lg font-semibold ipad:text-xl">课程学习</p>
-              <p className="text-sm text-muted-foreground ipad:text-base">{items.length > 0 ? `第 ${currentIndex + 1} 题 / 共 ${items.length} 题` : "拼写练习"}</p>
+            <div className="flex flex-wrap items-center justify-end gap-3 text-sm font-semibold text-slate-600 ipad:text-base">
+              <span>{device.isIPad ? "⌨ 空格判定单词 · 整句完成后空格查看逐词中文" : "单词输入完成按空格判定，整句完成后按空格查看逐词中文"}</span>
+              <Button className="h-9 px-3 text-sm ipad:h-9 ipad:px-3 ipad:text-sm" onClick={toggleStudyFullscreen} type="button" variant="outline">
+                沉浸模式
+              </Button>
             </div>
           </div>
-          <div className="text-base font-semibold text-slate-600 ipad:text-lg">
-            {device.isIPad ? "⌨ 空格判定单词 · 整句完成后空格查看逐词中文" : "单词输入完成按空格判定，整句完成后按空格查看逐词中文"}
+          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted ipad:h-2">
+            <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${progressPercent}%` }} />
           </div>
-        </div>
-        <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-muted ipad:h-2.5">
-          <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${progressPercent}%` }} />
-        </div>
-      </header>
+        </header>
+      ) : null}
 
-      <section className="flex flex-1 items-center justify-center px-6 py-12 ipad:px-10 ipad:py-16">
+      <section className={isStudyFullscreen ? "flex min-h-0 flex-1 items-center justify-center overflow-visible px-4 py-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] ipad:px-8 ipad:py-6 ipad-lg:px-10 ipad-lg:py-8" : "flex min-h-0 flex-1 items-start justify-center overflow-visible px-4 py-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] ipad:px-5 ipad:py-4 ipad-lg:px-6 ipad-lg:py-5"}>
         {isLoading ? <p className="text-lg font-bold text-muted-foreground ipad:text-xl">正在加载学习内容...</p> : null}
         {!isLoading && errorMessage ? <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 ipad:px-6 ipad:py-4 ipad:text-base">{errorMessage}</p> : null}
         {!isLoading && !errorMessage && !currentItem ? <p className="text-lg font-bold text-muted-foreground ipad:text-xl">当前课程还没有导入内容。</p> : null}
 
         {!isLoading && !errorMessage && currentItem ? (
-          <div className="w-full max-w-5xl space-y-10 text-center ipad:space-y-14">
-            <div className="flex justify-center gap-3 text-sm text-muted-foreground ipad:text-base">
-              <span className="rounded-full border px-3 py-1 ipad:px-4 ipad:py-1.5">{itemTypeLabels[currentItem.item_type]}</span>
-              <span className="rounded-full border px-3 py-1 ipad:px-4 ipad:py-1.5">{currentIndex + 1} / {items.length}</span>
-            </div>
+          <div className={isStudyFullscreen ? "w-full max-w-7xl text-center" : "w-full max-w-6xl rounded-lg border border-slate-200 bg-white px-5 py-5 text-center shadow-sm ipad:px-6 ipad:py-5 ipad-lg:px-8 ipad-lg:py-6"}>
+            {!isStudyFullscreen ? (
+              <div className="flex justify-center gap-3 text-sm font-medium text-slate-500 ipad:text-sm">
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1">{itemTypeLabels[currentItem.item_type]}</span>
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1">{currentIndex + 1} / {items.length}</span>
+              </div>
+            ) : null}
 
-            <div className="space-y-10 ipad:space-y-14">
-              <p className="text-4xl font-semibold tracking-tight text-slate-900 ipad:text-5xl ipad:leading-tight">{currentItem.chinese_text}</p>
+            <div className={isStudyFullscreen ? "space-y-10 ipad:space-y-12 ipad-lg:space-y-14" : "mt-5 space-y-5 ipad:mt-5 ipad:space-y-4 ipad-lg:mt-6 ipad-lg:space-y-5"}>
+              <p className={isStudyFullscreen ? "text-5xl font-semibold leading-tight text-slate-900 ipad:text-6xl ipad-lg:text-7xl" : "text-4xl font-semibold leading-tight text-slate-900 ipad:text-4xl ipad-lg:text-5xl"}>{displayChinesePrompt}</p>
               {answerState === "mistake-word-practice" ? (
-                <div className="mx-auto flex max-w-xl flex-col items-center gap-5 rounded-lg border bg-slate-50 px-6 py-7 ipad:max-w-2xl ipad:gap-7 ipad:px-10 ipad:py-10">
-                  <div className="space-y-2 ipad:space-y-3">
-                    <p className="text-base font-bold text-muted-foreground ipad:text-lg">错词单独拼写 {mistakePracticeIndex + 1} / {mistakePracticeWords.length}</p>
-                    <p className="text-sm font-bold text-muted-foreground ipad:text-base">根据中文拼写正确英文</p>
-                    <p className="text-3xl font-bold text-slate-900 ipad:text-4xl">{currentMistakePracticeTranslation || "中文提示准备中"}</p>
-                  </div>
+                <div className={isStudyFullscreen ? "mx-auto flex max-w-4xl flex-col items-center gap-6 ipad:gap-8" : "mx-auto flex max-w-xl flex-col items-center gap-4 rounded-lg border bg-slate-50 px-5 py-5 ipad:max-w-xl ipad:gap-4 ipad:px-6 ipad:py-5 ipad-lg:max-w-2xl ipad-lg:gap-5 ipad-lg:px-7 ipad-lg:py-6"}>
+                  {!isStudyFullscreen ? (
+                    <div className="space-y-1 ipad:space-y-2">
+                      <p className="text-base font-bold text-muted-foreground ipad:text-base ipad-lg:text-lg">错词单独拼写 {mistakePracticeIndex + 1} / {mistakePracticeWords.length}</p>
+                      <p className="text-sm font-bold text-muted-foreground ipad:text-sm ipad-lg:text-base">根据中文拼写正确英文</p>
+                      <p className="text-2xl font-bold text-slate-900 ipad:text-2xl ipad-lg:text-3xl">{currentMistakePracticeTranslation || "中文提示准备中"}</p>
+                    </div>
+                  ) : null}
                   <input
                     ref={mistakePracticeInputRef}
                     aria-label="错词单独拼写"
                     autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false}
-                    className={`h-16 w-full max-w-sm border-0 border-b-4 bg-transparent px-1 text-center text-4xl outline-none transition ipad:h-20 ipad:max-w-md ipad:text-5xl ${mistakePracticeStatus === "incorrect" ? "border-red-500 text-red-700" : "border-primary"}`}
+                    className={`${wordInputSizeClass} w-full max-w-md border-0 border-b-4 bg-transparent px-1 text-center font-semibold leading-none outline-none transition ipad:max-w-lg ipad-lg:max-w-xl ${mistakePracticeStatus === "incorrect" ? "border-red-500 text-red-700" : "border-emerald-500 text-emerald-700"}`}
+                    disabled={previewMistakePracticeWord}
+                    placeholder={previewMistakePracticeWord ? "先看后拼" : undefined}
                     value={mistakePracticeAnswer}
                     onChange={(event) => {
+                      if (previewMistakePracticeWord) {
+                        clearMistakePracticePreview();
+                      }
                       setMistakePracticeAnswer(event.target.value.replace(/\s/g, ""));
                       setMistakePracticeStatus("idle");
                       setFeedbackMessage(null);
                     }}
                     onKeyDown={handleMistakePracticeKeyDown}
                   />
-                  <p className="text-base font-bold text-muted-foreground ipad:text-lg">
-                    {device.isIPad ? "⌨ 空格/回车判定 · 连续 3 次错误后进入下一句" : "按空格或回车判定，连续 3 次错误后先进入下一句。"}
-                  </p>
+                  {previewMistakePracticeWord ? (
+                    <p className="rounded-md bg-amber-100 px-4 py-2 text-3xl font-bold text-amber-950 ipad:text-4xl ipad-lg:text-5xl">{currentMistakePracticeWord}</p>
+                  ) : null}
+                  {!isStudyFullscreen ? <p className="text-base font-bold text-muted-foreground ipad:text-base ipad-lg:text-lg">
+                    {device.isIPad ? "⌨ 空格/回车判定 · 不显示完整答案" : "按空格或回车判定，多次错误会逐级提示，但不直接显示完整答案。"}
+                  </p> : null}
                 </div>
               ) : (
-                <div className="flex flex-wrap items-end justify-center gap-x-4 gap-y-6 ipad:gap-x-6 ipad:gap-y-8">
+                <div className={isStudyFullscreen ? "flex flex-wrap items-end justify-center gap-x-5 gap-y-7 ipad:gap-x-7 ipad:gap-y-8 ipad-lg:gap-x-8 ipad-lg:gap-y-10" : "flex flex-wrap items-end justify-center gap-x-4 gap-y-5 ipad:gap-x-4 ipad:gap-y-5 ipad-lg:gap-x-5 ipad-lg:gap-y-6"}>
                   {currentWords.map((word, index) => {
                     const normalizedWord = normalizeEnglishKey(word);
                     const status = wordStatuses[index] ?? "idle";
@@ -1506,9 +1898,9 @@ function StudyContent() {
                     const shouldShowInput = !isDynamicFillBlankItem || isDynamicBlank;
                     const isActive = activeWordIndex === index && answerState === "typing" && shouldShowInput;
                     return (
-                      <div className="flex flex-col items-center gap-2 ipad:gap-3" key={`${word}-${index}`} style={{ minWidth: getWordInputWidth(word) }}>
-                        {answerState !== "typing" && shouldShowInput ? (
-                          <span className="rounded-full border px-3 py-0.5 text-xs text-muted-foreground ipad:px-4 ipad:text-sm">
+                      <div className="flex shrink-0 flex-col items-center gap-2" key={`${word}-${index}`} style={{ minWidth: getWordInputWidth(word) }}>
+                        {answerState !== "typing" && shouldShowInput && !isStudyFullscreen ? (
+                          <span className="rounded-full border px-2.5 py-0.5 text-xs text-muted-foreground ipad:px-3 ipad:text-xs">
                             {commonPartLabels[normalizedWord] ?? itemTypeLabels[currentItem.item_type]}
                           </span>
                         ) : null}
@@ -1519,9 +1911,9 @@ function StudyContent() {
                             }}
                             aria-label={isDynamicBlank ? `填空：${currentItem.chinese_text}` : `第 ${index + 1} 个单词`}
                             autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false}
-                            className={`h-16 border-0 border-b-4 bg-transparent px-1 text-center text-4xl outline-none transition ipad:h-20 ipad:text-5xl ${status === "correct" ? "border-emerald-500 text-emerald-700" : ""} ${status === "incorrect" ? "border-red-500 text-red-700" : ""} ${status === "idle" ? annotationColors[index % annotationColors.length] : ""} ${isActive ? "bg-primary/5" : ""}`}
-                            disabled={answerState !== "typing"}
-                            placeholder={isDynamicBlank ? "____" : undefined}
+                            className={`${wordInputSizeClass} shrink-0 border-0 border-b-4 bg-transparent px-1 text-center font-semibold leading-none outline-none transition ${status === "correct" ? "border-emerald-500 text-emerald-700" : ""} ${status === "incorrect" ? "border-red-500 text-red-700" : ""} ${status === "skipped" ? "border-amber-500 text-amber-700" : ""} ${status === "idle" ? annotationColors[index % annotationColors.length] : ""} ${isActive ? "bg-emerald-50" : ""}`}
+                            disabled={answerState !== "typing" || status === "skipped" || previewWordIndex === index}
+                            placeholder={previewWordIndex === index ? "先看后拼" : status === "skipped" ? "稍后练" : isDynamicBlank ? "____" : undefined}
                             style={{ width: getWordInputWidth(word) }}
                             value={wordAnswers[index] ?? ""}
                             onChange={(event) => updateWordAnswer(index, event.target.value)}
@@ -1529,50 +1921,67 @@ function StudyContent() {
                             onKeyDown={(event) => handleWordKeyDown(event, index)}
                           />
                         ) : (
-                          <span className="flex h-16 items-center text-4xl font-semibold text-slate-900 ipad:h-20 ipad:text-5xl">{word}</span>
+                          <span className={`flex items-center font-semibold leading-none text-slate-900 ${wordDisplaySizeClass}`}>{word}</span>
                         )}
-                        {answerState !== "typing" && shouldShowInput ? <span className="text-2xl font-medium text-slate-900 ipad:text-3xl">{word}</span> : null}
-                        {answerState === "word-translations-shown" ? (
-                          <span className="max-w-44 rounded-md bg-secondary px-3 py-1.5 text-lg font-bold text-slate-800 ipad:max-w-56 ipad:px-4 ipad:py-2 ipad:text-xl">
-                            {wordTranslations[index] || "翻译失败"}
-                          </span>
+                        {previewWordIndex === index ? (
+                          <span className="rounded-md bg-amber-100 px-3 py-1 text-3xl font-bold text-amber-950 ipad:text-4xl ipad-lg:text-5xl">{word}</span>
                         ) : null}
-                        {status === "incorrect" ? <span className="text-base font-bold text-red-600 ipad:text-lg">正确：{word}</span> : null}
+                        {answerState !== "typing" && shouldShowInput && !isStudyFullscreen ? <span className="text-2xl font-medium text-slate-900 ipad:text-2xl ipad-lg:text-3xl">{word}</span> : null}
+                        {status === "skipped" && !isStudyFullscreen ? <span className="text-base font-bold text-amber-700 ipad:text-base ipad-lg:text-lg">已加入错词复习</span> : null}
+                        {status === "incorrect" && !isStudyFullscreen ? <span className="text-base font-bold text-red-600 ipad:text-base ipad-lg:text-lg">请按提示再试一次</span> : null}
                       </div>
                     );
                   })}
                 </div>
               )}
-              {feedbackMessage ? <p className={answerState !== "typing" ? "text-lg font-bold text-emerald-600 ipad:text-xl" : "text-lg font-bold text-red-600 ipad:text-xl"}>{feedbackMessage}</p> : null}
-              <div className="flex flex-wrap justify-center gap-3 ipad:gap-4">
-                {answerState === "mistake-word-practice" ? (
-                  <>
-                    <Button onClick={() => void checkMistakePracticeWord()} type="button">判定错词</Button>
-                    <Button onClick={handleSpeakEnglish} type="button" variant="secondary">朗读英文</Button>
-                  </>
-                ) : (
-                  <>
-                    <Button disabled={answerState !== "typing"} onClick={() => checkWord(activeWordIndex)} type="button">
-                      {isDynamicFillBlankItem ? "判定填空" : "判定当前单词"}
+              {feedbackMessage ? <p className={isStudyFullscreen ? "text-xl font-bold text-emerald-700 ipad:text-2xl ipad-lg:text-3xl" : answerState !== "typing" ? "text-base font-bold text-emerald-600 ipad:text-base ipad-lg:text-lg" : "text-base font-bold text-red-600 ipad:text-base ipad-lg:text-lg"}>{feedbackMessage}</p> : null}
+              <div className={isStudyFullscreen ? "mx-auto flex w-full max-w-5xl flex-wrap items-center justify-center gap-4 px-0 py-0 ipad:gap-5 ipad-lg:gap-6" : "mx-auto flex w-full max-w-3xl flex-col items-center gap-4 rounded-lg border border-slate-200 bg-slate-50/90 px-4 py-4 ipad:max-w-3xl ipad:flex-col ipad:justify-center ipad:gap-4 ipad:px-5 ipad-lg:max-w-4xl ipad-lg:flex-row ipad-lg:gap-6 ipad-lg:px-6"}>
+                <div className="flex flex-wrap justify-center gap-3 ipad:gap-3 ipad-lg:gap-4">
+                  {answerState === "mistake-word-practice" ? (
+                    <>
+                      <Button className={actionButtonClass} onClick={() => void checkMistakePracticeWord()} type="button">判定错词</Button>
+                      <Button className={actionButtonClass} onClick={handleSpeakEnglish} type="button" variant="secondary">朗读英文</Button>
+                    </>
+                  ) : (
+                    <>
+                      <Button className={actionButtonClass} disabled={answerState !== "typing"} onClick={() => checkWord(activeWordIndex)} type="button">
+                        {isDynamicFillBlankItem ? "判定填空" : "判定单词"}
+                      </Button>
+                      <Button className={actionButtonClass} onClick={handleSpeakEnglish} type="button" variant="secondary">朗读英文</Button>
+                    </>
+                  )}
+                </div>
+                {!isStudyFullscreen ? <div className="h-px w-full bg-slate-200 ipad:h-px ipad:w-full ipad-lg:h-9 ipad-lg:w-px" /> : null}
+                <div className="flex flex-wrap justify-center gap-3 ipad:gap-3 ipad-lg:gap-4">
+                  {answerState === "sentence-complete" ? (
+                    <Button
+                      className={actionButtonClass}
+                      onClick={() => {
+                        if (pendingMistakePracticeWordsRef.current.length > 0) {
+                          void beginPendingMistakePractice();
+                          return;
+                        }
+                        answerStateRef.current = "typing";
+                        handleNextItem({ completedCurrentItem: true });
+                      }}
+                      type="button"
+                    >
+                      {pendingMistakePracticeWords.length > 0 ? "进入错词复习" : "下一句"}
                     </Button>
-                    <Button onClick={handleSpeakEnglish} type="button" variant="secondary">朗读英文</Button>
-                  </>
-                )}
+                  ) : null}
+                  <Button className={actionButtonClass} onClick={resetAnswer} type="button" variant="secondary">
+                    再来一次
+                  </Button>
+                  <Button className={actionButtonClass} onClick={() => handleNextItem()} type="button" variant="outline">
+                    跳过
+                  </Button>
+                  {isStudyFullscreen ? (
+                    <Button className={actionButtonClass} onClick={toggleStudyFullscreen} type="button" variant="outline">
+                      退出沉浸
+                    </Button>
+                  ) : null}
+                </div>
               </div>
-            </div>
-
-            <div className="flex flex-wrap justify-center gap-3 ipad:gap-4">
-              {answerState === "word-translations-shown" ? (
-                <Button className="ipad:text-lg ipad:px-6 ipad:py-3" onClick={handleWordTranslationsContinue} type="button">
-                  {pendingMistakePracticeWords.length > 0 ? "进入错词复习" : "下一句"}
-                </Button>
-              ) : null}
-              <Button className="ipad:text-lg ipad:px-6 ipad:py-3" onClick={resetAnswer} type="button" variant="secondary">
-                再来一次
-              </Button>
-              <Button className="ipad:text-lg ipad:px-6 ipad:py-3" onClick={() => handleNextItem()} type="button" variant="outline">
-                跳过
-              </Button>
             </div>
           </div>
         ) : null}
