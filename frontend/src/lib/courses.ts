@@ -31,6 +31,32 @@ export interface CoursePayload {
   description: string;
 }
 
+export interface PackageExportItem {
+  item_type: string;
+  english_text: string;
+  chinese_text: string;
+  phonetic: string | null;
+  difficulty_level: number;
+}
+
+export interface PackageExportCourse {
+  name: string;
+  description: string;
+  items: PackageExportItem[];
+}
+
+export interface PackageExportData {
+  version: number;
+  package: CoursePackagePayload;
+  courses: PackageExportCourse[];
+}
+
+export interface PackageImportResult {
+  imported_package_name: string;
+  courses_count: number;
+  items_count: number;
+}
+
 interface ApiErrorResponse {
   detail?: string;
 }
@@ -144,4 +170,42 @@ export async function createCourse(accessToken: string, payload: CoursePayload):
     throw new Error(await parseApiError(response));
   }
   return (await response.json()) as Course;
+}
+
+export async function exportCoursePackage(accessToken: string, packageId: string, packageName: string): Promise<void> {
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/courses/packages/${packageId}/export`,
+    {},
+    accessToken,
+  );
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+
+  const data = (await response.json()) as PackageExportData;
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${packageName.replace(/[/\\?%*:|"<> ]/g, "_")}.json`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(url);
+}
+
+export async function importCoursePackage(accessToken: string, jsonData: PackageExportData): Promise<PackageImportResult> {
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/courses/packages/import`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(jsonData),
+    },
+    accessToken,
+  );
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as PackageImportResult;
 }

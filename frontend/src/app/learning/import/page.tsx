@@ -6,7 +6,7 @@ import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { getAccessToken } from "@/lib/auth";
-import { Course, CoursePackage, createCourse, createCoursePackage, deleteCourse, deleteCoursePackage, listCoursePackages, listCourses } from "@/lib/courses";
+import { Course, CoursePackage, createCourse, createCoursePackage, deleteCourse, deleteCoursePackage, exportCoursePackage, importCoursePackage, listCoursePackages, listCourses, PackageExportData, PackageImportResult } from "@/lib/courses";
 import { LearningImportProgress, LearningImportResponse, LearningItem, listLearningItems, uploadLearningItems, validateImportFile } from "@/lib/learning";
 import { ModelSettings, getModelSettings, loadPersistedModelSettings } from "@/lib/model-settings";
 
@@ -49,6 +49,9 @@ export default function LearningImportPage() {
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [deletingPackageId, setDeletingPackageId] = useState<string | null>(null);
   const [deletingCourseId, setDeletingCourseId] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
+  const [isImportingPackage, setIsImportingPackage] = useState(false);
+  const [importPackageResult, setImportPackageResult] = useState<PackageImportResult | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [importProgress, setImportProgress] = useState<LearningImportProgress | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -260,6 +263,51 @@ export default function LearningImportPage() {
     }
   }
 
+  async function handleExportPackage() {
+    const accessToken = getAccessToken();
+    if (!accessToken || !selectedPackageId || !selectedPackage) {
+      setErrorMessage("请先选择课程包");
+      return;
+    }
+
+    setIsExporting(true);
+    setErrorMessage(null);
+    try {
+      await exportCoursePackage(accessToken, selectedPackageId, selectedPackage.name);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "导出课程包失败");
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
+  async function handleImportPackage(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    if (!file) return;
+
+    const accessToken = getAccessToken();
+    if (!accessToken) {
+      setErrorMessage("请先登录后再导入课程包");
+      return;
+    }
+
+    setIsImportingPackage(true);
+    setErrorMessage(null);
+    setImportPackageResult(null);
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text) as PackageExportData;
+      const result = await importCoursePackage(accessToken, data);
+      setImportPackageResult(result);
+      await loadPackages();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "导入课程包失败");
+    } finally {
+      setIsImportingPackage(false);
+      event.target.value = "";
+    }
+  }
+
   function handleConfirmDelete() {
     if (!deleteTarget) {
       return;
@@ -409,14 +457,41 @@ export default function LearningImportPage() {
                 {selectedPackage ? (
                   <div className="space-y-3 rounded-lg border bg-secondary/40 p-3">
                     <p className="text-sm text-muted-foreground">{selectedPackage.description || "暂无课程包说明"}</p>
-                    <Button
-                      disabled={deletingPackageId === selectedPackage.id}
-                      onClick={() => requestDeletePackage(selectedPackage.id)}
-                      type="button"
-                      variant="outline"
-                    >
-                      {deletingPackageId === selectedPackage.id ? "删除中..." : "删除已创建课程包"}
-                    </Button>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        disabled={isExporting}
+                        onClick={handleExportPackage}
+                        type="button"
+                        variant="secondary"
+                      >
+                        {isExporting ? "导出中..." : "导出课程包"}
+                      </Button>
+                      <label>
+                        <input
+                          accept=".json"
+                          className="hidden"
+                          disabled={isImportingPackage}
+                          onChange={handleImportPackage}
+                          type="file"
+                        />
+                        <Button asChild disabled={isImportingPackage} type="button" variant="secondary">
+                          <span>{isImportingPackage ? "导入中..." : "导入课程包"}</span>
+                        </Button>
+                      </label>
+                      <Button
+                        disabled={deletingPackageId === selectedPackage.id}
+                        onClick={() => requestDeletePackage(selectedPackage.id)}
+                        type="button"
+                        variant="outline"
+                      >
+                        {deletingPackageId === selectedPackage.id ? "删除中..." : "删除已创建课程包"}
+                      </Button>
+                    </div>
+                    {importPackageResult ? (
+                      <p className="text-sm text-green-700">
+                        已导入课程包「{importPackageResult.imported_package_name}」，{importPackageResult.courses_count} 个课程，{importPackageResult.items_count} 条学习内容。
+                      </p>
+                    ) : null}
                   </div>
                 ) : null}
               </div>

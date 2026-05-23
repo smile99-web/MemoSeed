@@ -31,3 +31,29 @@ class CourseRead(CourseCreate):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class PackageExportItem(BaseModel):
+    item_type: str
+    english_text: str
+    chinese_text: str
+    phonetic: str | None = None
+    difficulty_level: int = 1
+
+
+class PackageExportCourse(BaseModel):
+    name: str
+    description: str
+    items: list[PackageExportItem] = []
+
+
+class PackageExportData(BaseModel):
+    version: int = 1
+    package: CoursePackageCreate
+    courses: list[PackageExportCourse] = []
+
+
+class PackageImportResult(BaseModel):
+    imported_package_name: str
+    courses_count: int
+    items_count: int
