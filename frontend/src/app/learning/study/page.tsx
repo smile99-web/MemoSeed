@@ -24,7 +24,7 @@ const annotationColors = ["border-emerald-500", "border-sky-500", "border-violet
 const STUDY_IDLE_TIMEOUT_MS = 20_000;
 const STUDY_TIME_FLUSH_SECONDS = 10;
 const DUE_REVIEW_POLL_MS = 60_000;
-const WORD_PREVIEW_MS = 3000;
+const WORD_PREVIEW_MS = 5000;
 const NATURAL_ENGLISH_TTS_OPTIONS: TtsSynthesisOptions = {
   speechRate: -12,
 };
@@ -175,20 +175,6 @@ function getFrontHintChunkLengths(wordLength: number): number[] {
   return [firstChunkLength, wordLength - firstChunkLength];
 }
 
-function getBackHintChunkLengths(wordLength: number): number[] {
-  if (wordLength <= 3) {
-    return [wordLength];
-  }
-
-  const lastChunkLength = Math.min(3, wordLength - 1);
-  const remainingLength = wordLength - lastChunkLength;
-  if (remainingLength <= 3) {
-    return [remainingLength, lastChunkLength];
-  }
-
-  return [Math.ceil(remainingLength / 2), Math.floor(remainingLength / 2), lastChunkLength];
-}
-
 function buildFrontChunkHint(word: string): string {
   const normalizedWord = normalizeEnglishKey(word);
   const chunkLengths = getFrontHintChunkLengths(normalizedWord.length);
@@ -201,37 +187,32 @@ function buildFrontChunkHint(word: string): string {
   return `分段提示：按 ${formatChunkLengths(chunkLengths)} 个字母分段，一共 ${normalizedWord.length} 个字母。前面音节：${maskWordByIndexes(word, visibleIndexes)}`;
 }
 
-function buildBackChunkHint(word: string): string {
+function buildSecondChunkHint(word: string): string {
   const normalizedWord = normalizeEnglishKey(word);
-  const chunkLengths = getBackHintChunkLengths(normalizedWord.length);
-  const visibleLength = chunkLengths[chunkLengths.length - 1] ?? 0;
+  const chunkLengths = getFrontHintChunkLengths(normalizedWord.length);
+  const hiddenLength = chunkLengths[0] ?? 0;
   const visibleIndexes = new Set<number>();
-  for (let index = Math.max(normalizedWord.length - visibleLength, 0); index < normalizedWord.length; index += 1) {
+  for (let index = hiddenLength; index < normalizedWord.length; index += 1) {
     visibleIndexes.add(index);
   }
 
-  return `分段提示：按 ${formatChunkLengths(chunkLengths)} 个字母分段，一共 ${normalizedWord.length} 个字母。后面音节：${maskWordByIndexes(word, visibleIndexes)}`;
+  return `分段提示：按 ${formatChunkLengths(chunkLengths)} 个字母分段，一共 ${normalizedWord.length} 个字母。第二音节：${maskWordByIndexes(word, visibleIndexes)}`;
 }
 
 function buildProgressiveSpellingHint(expectedWord: string, typedWord: string, errorCount: number): string {
   const normalizedExpected = normalizeEnglishKey(expectedWord);
   const matchedPrefixLength = getMatchedPrefixLength(expectedWord, typedWord);
-  const nextLetterIndex = Math.max(matchedPrefixLength + 1, 2);
 
-  if (errorCount <= 1) {
-    return `前 ${Math.max(matchedPrefixLength, 1)} 个字母是对的，从第 ${nextLetterIndex} 个字母再想想。`;
-  }
-
-  if (errorCount === 2) {
+  if (errorCount === 1) {
     return `提示：${maskWordByIndexes(expectedWord, new Set([0]))}，一共 ${normalizedExpected.length} 个字母。`;
   }
 
-  if (errorCount === 3) {
+  if (errorCount === 2) {
     return buildFrontChunkHint(expectedWord);
   }
 
-  if (errorCount === 4) {
-    return buildBackChunkHint(expectedWord);
+  if (errorCount === 3) {
+    return buildSecondChunkHint(expectedWord);
   }
 
   const nextVisibleIndex = Math.min(Math.max(matchedPrefixLength, 1), Math.max(normalizedExpected.length - 1, 0));
@@ -574,6 +555,7 @@ function StudyContent() {
   const celebrationSummaryRef = useRef<CelebrationSummary | null>(null);
   const wordPreviewTimeoutRef = useRef<number | null>(null);
   const mistakePracticePreviewTimeoutRef = useRef<number | null>(null);
+  const isRespellRoundRef = useRef(false);
 
   const currentItem = items[currentIndex] ?? null;
   const currentWords = useMemo(() => tokenizeEnglish(currentItem?.english_text ?? ""), [currentItem]);
@@ -968,6 +950,7 @@ function StudyContent() {
     setActiveWordIndex(dynamicReviewWordIndexes[0] ?? 0);
     updateAnswerState("typing");
     isCompletingSentenceRef.current = false;
+    isRespellRoundRef.current = false;
     setFeedbackMessage(null);
     window.setTimeout(() => inputRefs.current[dynamicReviewWordIndexes[0] ?? 0]?.focus(), 0);
     const sequenceId = startVoiceSequence();
@@ -1343,6 +1326,14 @@ function StudyContent() {
     }
 
     if (uniqueMistakenWords.length > 0) {
+      if (isRespellRoundRef.current) {
+        isRespellRoundRef.current = false;
+        updateAnswerState("sentence-complete");
+        isCompletingSentenceRef.current = false;
+        setFeedbackMessage("整句重拼完成。按空格进入下一句。");
+        await playChineseThenEnglish(currentItem.chinese_text, currentItem.english_text);
+        return;
+      }
       setPendingMistakePractice(uniqueMistakenWords, {});
       updateAnswerState("sentence-complete");
       isCompletingSentenceRef.current = false;
@@ -1357,7 +1348,12 @@ function StudyContent() {
 
     updateAnswerState("sentence-complete");
     isCompletingSentenceRef.current = false;
-    setFeedbackMessage(dynamicSentenceFeedback ? `${dynamicSentenceFeedback} 按空格进入下一句。` : "整句拼写正确。按空格进入下一句。");
+    if (isRespellRoundRef.current) {
+      isRespellRoundRef.current = false;
+      setFeedbackMessage("整句重拼完全正确。按空格进入下一句。");
+    } else {
+      setFeedbackMessage(dynamicSentenceFeedback ? `${dynamicSentenceFeedback} 按空格进入下一句。` : "整句拼写正确。按空格进入下一句。");
+    }
     await playChineseThenEnglish(currentItem.chinese_text, currentItem.english_text);
   }
 
@@ -1474,26 +1470,9 @@ function StudyContent() {
       if (accessToken && currentItem && !isGeneratedItem(currentItem)) {
         void logWordMistake(currentItem.id, expectedWord, actualWord, accessToken).catch(() => undefined);
       }
-      if (nextErrorCount === 3) {
+      if (nextErrorCount === 4) {
         void playChineseThenEnglish(currentItem?.chinese_text ?? "", expectedWord);
         showWordPreview(index, expectedWord);
-        return;
-      }
-      if (nextErrorCount >= 8) {
-        const nextSkippedStatuses = [...nextStatusesForAttempt];
-        nextSkippedStatuses[index] = "skipped";
-        setWordStatuses(nextSkippedStatuses);
-        clearWordPreview();
-        setFeedbackMessage("这个词先加入错词复习，继续完成句子。稍后会用中文、发音和隐藏重拼再练。");
-        const nextIndex = isDynamicFillBlankItem ? dynamicReviewWordIndexes.find((wordIndex) => wordIndex > index) ?? currentWords.length : index + 1;
-        if (areRequiredWordAnswersComplete(wordAnswers, nextSkippedStatuses)) {
-          void completeCurrentSentence();
-          return;
-        }
-        if (nextIndex < currentWords.length) {
-          setActiveWordIndex(nextIndex);
-          window.setTimeout(() => inputRefs.current[nextIndex]?.focus(), 0);
-        }
         return;
       }
       if (getFirstLetter(typedValue) !== getFirstLetter(expectedWord)) {
@@ -1511,7 +1490,7 @@ function StudyContent() {
 
     const prevErrorCount = wordErrorCounts[index] ?? 0;
 
-    if (prevErrorCount >= 3) {
+    if (prevErrorCount >= 4) {
       const nextConsecutive = (wordConsecutiveCorrect[index] ?? 0) + 1;
       setWordConsecutiveCorrect((current) => {
         const next = [...current];
@@ -1519,8 +1498,8 @@ function StudyContent() {
         return next;
       });
 
-      if (nextConsecutive < 2) {
-        setFeedbackMessage("正确！请再拼写一次确认。");
+      if (nextConsecutive < 3) {
+        setFeedbackMessage(`已正确 ${nextConsecutive}/3 次，请再拼写确认。`);
         if (inputRefs.current[index]) {
           inputRefs.current[index].value = "";
         }
@@ -1624,38 +1603,9 @@ function StudyContent() {
       setMistakePracticeConsecutiveCorrect(0);
       setMistakePracticeStatus("incorrect");
       setMistakePracticeAnswer("");
-      if (nextErrorCount === 3) {
+      if (nextErrorCount === 4) {
         await playChineseThenEnglish(currentMistakePracticeTranslation, expectedWord);
         showMistakePracticePreview(expectedWord);
-        return;
-      }
-
-      if (nextErrorCount >= 9) {
-        clearMistakePracticePreview();
-        setDeferredDynamicWords((current) => {
-          const normalizedWord = normalizeEnglishKey(expectedWord);
-          return normalizedWord && !current.includes(normalizedWord) ? [...current, normalizedWord] : current;
-        });
-        setFeedbackMessage("这个词已经看过并重新尝试过了，先放入后续复习句。继续下一个，稍后再回来练。");
-        const nextIndex = mistakePracticeIndex + 1;
-        if (nextIndex < mistakePracticeWords.length) {
-          const nextWord = mistakePracticeWords[nextIndex];
-          setMistakePracticeIndex(nextIndex);
-          setMistakePracticeAnswer("");
-          setMistakePracticeStatus("idle");
-          setMistakePracticeErrorCount(0);
-          const nextTranslation = mistakePracticeTranslations[nextWord];
-          if (nextTranslation) {
-            await playChineseThenEnglish(nextTranslation, nextWord);
-          }
-          return;
-        }
-
-        setMistakePracticeWords([]);
-        setMistakePracticeAnswer("");
-        setMistakePracticeStatus("idle");
-        setMistakePracticeErrorCount(0);
-        handleNextItem({ completedCurrentItem: true });
         return;
       }
 
@@ -1669,12 +1619,12 @@ function StudyContent() {
       return;
     }
 
-    if (mistakePracticeErrorCount >= 3) {
+    if (mistakePracticeErrorCount >= 4) {
       const nextConsecutive = mistakePracticeConsecutiveCorrect + 1;
       setMistakePracticeConsecutiveCorrect(nextConsecutive);
 
       if (nextConsecutive < 2) {
-        setFeedbackMessage("正确！请再拼写一次确认。");
+        setFeedbackMessage(`已正确 ${nextConsecutive}/2 次，请再拼写确认。`);
         setMistakePracticeAnswer("");
         setMistakePracticeStatus("idle");
         window.setTimeout(() => mistakePracticeInputRef.current?.focus(), 0);
@@ -1710,8 +1660,23 @@ function StudyContent() {
     setMistakePracticeErrorCount(0);
     setMistakePracticeConsecutiveCorrect(0);
     clearMistakePracticePreview();
-    setFeedbackMessage("错词单独拼写完成，进入下一句。");
-    handleNextItem({ completedCurrentItem: true });
+    isRespellRoundRef.current = true;
+    setWordAnswers(currentWords.map(() => ""));
+    setWordStatuses(currentWords.map(() => "idle"));
+    setWordErrorCounts(currentWords.map(() => 0));
+    setWordConsecutiveCorrect(currentWords.map(() => 0));
+    clearWordPreview();
+    setMistakenWords([]);
+    setPendingMistakePractice([], {});
+    updateAnswerState("typing");
+    isCompletingSentenceRef.current = false;
+    setActiveWordIndex(dynamicReviewWordIndexes[0] ?? 0);
+    setFeedbackMessage("错词复习完成，现在请完整拼写整句。");
+    const respellSequenceId = startVoiceSequence();
+    if (currentItem?.chinese_text && currentItem.english_text) {
+      void playCurrentItemIntro(currentItem, respellSequenceId);
+    }
+    window.setTimeout(() => inputRefs.current[dynamicReviewWordIndexes[0] ?? 0]?.focus(), 0);
   }
 
   function handleMistakePracticeKeyDown(event: KeyboardEvent<HTMLInputElement>) {
