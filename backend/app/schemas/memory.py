@@ -40,8 +40,12 @@ class WordMasterySummary(BaseModel):
     status: str
     memory_strength: float
     forget_risk: float
+    priority_score: float
     review_count: int
     mistake_count: int
+    recall_correct_count: int = 0
+    hinted_correct_count: int = 0
+    preview_correct_count: int = 0
     interval_days: float
     next_review_at: datetime | None
 

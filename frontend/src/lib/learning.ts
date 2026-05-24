@@ -270,6 +270,7 @@ export async function logWordMistake(
   expectedWord: string,
   actualWord: string,
   accessToken: string,
+  errorType = "spelling",
 ): Promise<void> {
   const response = await fetchWithAuth(
     `${getApiBaseUrl()}/learning/word-mistakes`,
@@ -282,6 +283,39 @@ export async function logWordMistake(
         learning_item_id: learningItemId,
         expected_word: expectedWord,
         actual_word: actualWord,
+        error_type: errorType,
+      }),
+    },
+    accessToken,
+  );
+
+  if (!response.ok) {
+    throw new Error(await parseUploadError(response));
+  }
+}
+
+export async function logWordReview(
+  payload: {
+    learning_item_id: string;
+    word: string;
+    score: number;
+    review_mode: string;
+    response_text?: string;
+    duration_seconds?: number;
+    error_type?: string;
+  },
+  accessToken: string,
+): Promise<void> {
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/learning/word-reviews`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ...payload,
+        duration_seconds: payload.duration_seconds ?? 0,
       }),
     },
     accessToken,

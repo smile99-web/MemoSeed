@@ -9,7 +9,7 @@ import { useDevice } from "@/hooks/use-device";
 import { getAccessToken, getAuthUser } from "@/lib/auth";
 import { addCourseCompletion, formatCourseDuration } from "@/lib/course-progress";
 import { Course, listCoursePackages, listCourses } from "@/lib/courses";
-import { generateDynamicSentence, generateLearningEncouragement, LearningItem, listDueReviewItems, listLearningItems, logWordMistake, translateLearningText } from "@/lib/learning";
+import { generateDynamicSentence, generateLearningEncouragement, LearningItem, listDueReviewItems, listLearningItems, logWordMistake, logWordReview, translateLearningText } from "@/lib/learning";
 import { recordCourseCompletion, recordStudyTime, scheduleMemoryReview } from "@/lib/memory";
 import { ModelSettings, defaultModelSettings, getModelSettings, loadPersistedModelSettings } from "@/lib/model-settings";
 import { playAudioBlob, stopAudioPlayback, synthesizeCosyVoiceSpeech, synthesizeKokoroSpeech, synthesizeVolcengineSpeech, TtsSynthesisOptions } from "@/lib/tts";
@@ -26,13 +26,13 @@ const STUDY_TIME_FLUSH_SECONDS = 10;
 const DUE_REVIEW_POLL_MS = 60_000;
 const WORD_PREVIEW_MS = 5000;
 const NATURAL_ENGLISH_TTS_OPTIONS: TtsSynthesisOptions = {
-  speechRate: -12,
+  speechRate: 0,
 };
 const SLOW_ENGLISH_TTS_OPTIONS: TtsSynthesisOptions = {
-  speechRate: -32,
+  speechRate: 0,
 };
 const WORD_ENGLISH_TTS_OPTIONS: TtsSynthesisOptions = {
-  speechRate: -38,
+  speechRate: 0,
 };
 const commonPartLabels: Record<string, string> = {
   i: "代词",
@@ -154,6 +154,69 @@ function getMatchedPrefixLength(expectedWord: string, typedWord: string): number
   return matchedPrefixLength;
 }
 
+function countSharedLetters(expectedWord: string, typedWord: string): number {
+  const expectedLetters = new Map<string, number>();
+  normalizeEnglishKey(expectedWord)
+    .split("")
+    .forEach((letter) => {
+      expectedLetters.set(letter, (expectedLetters.get(letter) ?? 0) + 1);
+    });
+  return normalizeEnglishKey(typedWord)
+    .split("")
+    .reduce((count, letter) => {
+      const availableCount = expectedLetters.get(letter) ?? 0;
+      if (availableCount <= 0) {
+        return count;
+      }
+      expectedLetters.set(letter, availableCount - 1);
+      return count + 1;
+    }, 0);
+}
+
+function isAdjacentLetterSwap(expectedWord: string, typedWord: string): boolean {
+  const normalizedExpected = normalizeEnglishKey(expectedWord);
+  const normalizedTyped = normalizeEnglishKey(typedWord);
+  if (normalizedExpected.length !== normalizedTyped.length || normalizedExpected.length < 2) {
+    return false;
+  }
+  const differentIndexes = normalizedExpected
+    .split("")
+    .map((letter, index) => (letter === normalizedTyped[index] ? -1 : index))
+    .filter((index) => index >= 0);
+  return (
+    differentIndexes.length === 2
+    && differentIndexes[1] === differentIndexes[0] + 1
+    && normalizedExpected[differentIndexes[0]] === normalizedTyped[differentIndexes[1]]
+    && normalizedExpected[differentIndexes[1]] === normalizedTyped[differentIndexes[0]]
+  );
+}
+
+function classifySpellingError(expectedWord: string, typedWord: string): string {
+  const normalizedExpected = normalizeEnglishKey(expectedWord);
+  const normalizedTyped = normalizeEnglishKey(typedWord);
+  const sharedLetterRatio = normalizedExpected.length === 0 ? 0 : countSharedLetters(normalizedExpected, normalizedTyped) / normalizedExpected.length;
+  if (normalizedTyped.length >= 2 && sharedLetterRatio < 0.35) {
+    return "unknown";
+  }
+  if (getFirstLetter(normalizedExpected) !== getFirstLetter(normalizedTyped)) {
+    return "first-letter";
+  }
+  if (isAdjacentLetterSwap(normalizedExpected, normalizedTyped)) {
+    return "sequence";
+  }
+  if (normalizedExpected.length !== normalizedTyped.length) {
+    return normalizedTyped.length < normalizedExpected.length ? "missing-letter" : "extra-letter";
+  }
+  const matchedPrefixLength = getMatchedPrefixLength(normalizedExpected, normalizedTyped);
+  if (matchedPrefixLength >= Math.max(1, normalizedExpected.length - 2)) {
+    return "ending";
+  }
+  if (matchedPrefixLength <= Math.max(1, Math.floor(normalizedExpected.length / 2))) {
+    return "middle";
+  }
+  return "sequence";
+}
+
 function maskWordByIndexes(word: string, visibleIndexes: Set<number>): string {
   const normalizedWord = normalizeEnglishKey(word);
   return normalizedWord
@@ -199,6 +262,30 @@ function buildSecondChunkHint(word: string): string {
   return `分段提示：按 ${formatChunkLengths(chunkLengths)} 个字母分段，一共 ${normalizedWord.length} 个字母。第二音节：${maskWordByIndexes(word, visibleIndexes)}`;
 }
 
+function buildEndingHint(word: string): string {
+  const normalizedWord = normalizeEnglishKey(word);
+  const visibleIndexes = new Set<number>();
+  const startIndex = Math.max(normalizedWord.length - 2, 0);
+  for (let index = startIndex; index < normalizedWord.length; index += 1) {
+    visibleIndexes.add(index);
+  }
+  return `词尾提示：注意最后 ${normalizedWord.length - startIndex} 个字母：${maskWordByIndexes(word, visibleIndexes)}`;
+}
+
+function buildTypedSpellingHint(expectedWord: string, typedWord: string, errorCount: number, errorType: string): string {
+  const normalizedExpected = normalizeEnglishKey(expectedWord);
+  if (errorType === "ending") {
+    return buildEndingHint(expectedWord);
+  }
+  if (errorType === "sequence") {
+    return `顺序提示：字母可能站错位置，先按分段慢慢拼。${buildFrontChunkHint(expectedWord)}`;
+  }
+  if (errorType === "missing-letter" || errorType === "extra-letter") {
+    return `长度提示：这个单词一共 ${normalizedExpected.length} 个字母。${buildFrontChunkHint(expectedWord)}`;
+  }
+  return buildProgressiveSpellingHint(expectedWord, typedWord, errorCount);
+}
+
 function buildProgressiveSpellingHint(expectedWord: string, typedWord: string, errorCount: number): string {
   const normalizedExpected = normalizeEnglishKey(expectedWord);
   const matchedPrefixLength = getMatchedPrefixLength(expectedWord, typedWord);
@@ -234,7 +321,7 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-function speakWithBrowser(text: string, language: string, playbackRate = 0.85): Promise<void> {
+function speakWithBrowser(text: string, language: string, playbackRate = 1): Promise<void> {
   if (!text.trim() || !("speechSynthesis" in window)) {
     return Promise.resolve();
   }
@@ -277,7 +364,7 @@ async function speakWithKokoro(
       return;
     }
     console.warn("课程学习 TTS 播放失败，已回退到浏览器语音。", error);
-    await speakWithBrowser(text, language, options.speed ?? 0.85);
+    await speakWithBrowser(text, language, options.speed ?? 1);
   }
 }
 
@@ -1211,6 +1298,41 @@ function StudyContent() {
     return 2;
   }
 
+  function recordWordMemoryReview(expectedWord: string, score: number, reviewMode: string, responseText = "", errorType?: string) {
+    const accessToken = getAccessToken();
+    if (!accessToken || !currentItem || isGeneratedItem(currentItem)) {
+      return;
+    }
+    void logWordReview(
+      {
+        learning_item_id: currentItem.id,
+        word: expectedWord,
+        score,
+        review_mode: reviewMode,
+        response_text: responseText,
+        error_type: errorType,
+        duration_seconds: 0,
+      },
+      accessToken,
+    ).catch(() => undefined);
+  }
+
+  function recordSuccessfulWordSpelling(expectedWord: string, typedWord: string, errorCount: number, usedPreview: boolean, isStandalonePractice: boolean) {
+    if (usedPreview) {
+      recordWordMemoryReview(expectedWord, 3, "word-preview", typedWord);
+      return;
+    }
+    if (errorCount > 0) {
+      recordWordMemoryReview(expectedWord, 4, "word-hinted", typedWord);
+      return;
+    }
+    if (!isStandalonePractice) {
+      recordWordMemoryReview(expectedWord, 4, "word-context", typedWord);
+      return;
+    }
+    recordWordMemoryReview(expectedWord, 5, "word-recall", typedWord);
+  }
+
   function getUniqueMistakenWords() {
     return Array.from(new Set(mistakenWords.map(normalizeEnglishKey).filter(Boolean)));
   }
@@ -1414,8 +1536,8 @@ function StudyContent() {
     await playChineseThenEnglish(translatedWord, expectedWord);
   }
 
-  function handleSpellingMistake(index: number, expectedWord: string, typedWord: string, errorCount: number) {
-    setFeedbackMessage(buildProgressiveSpellingHint(expectedWord, typedWord, errorCount));
+  function handleSpellingMistake(index: number, expectedWord: string, typedWord: string, errorCount: number, errorType: string) {
+    setFeedbackMessage(buildTypedSpellingHint(expectedWord, typedWord, errorCount, errorType));
   }
 
   function checkWord(index: number) {
@@ -1453,6 +1575,7 @@ function StudyContent() {
 
     if (!isCorrect) {
       const actualWord = currentRawAnswer;
+      const errorType = classifySpellingError(expectedWord, actualWord);
       const normalizedExpectedWord = normalizeEnglishKey(expectedWord);
       const nextErrorCount = (wordErrorCounts[index] ?? 0) + 1;
       setWordErrorCounts((current) => {
@@ -1468,9 +1591,9 @@ function StudyContent() {
       setMistakenWords((current) => (current.includes(normalizedExpectedWord) ? current : [...current, normalizedExpectedWord]));
       const accessToken = getAccessToken();
       if (accessToken && currentItem && !isGeneratedItem(currentItem)) {
-        void logWordMistake(currentItem.id, expectedWord, actualWord, accessToken).catch(() => undefined);
+        void logWordMistake(currentItem.id, expectedWord, actualWord, accessToken, errorType).catch(() => undefined);
       }
-      if (nextErrorCount === 4) {
+      if (nextErrorCount === 4 || (errorType === "unknown" && nextErrorCount >= 2)) {
         void playChineseThenEnglish(currentItem?.chinese_text ?? "", expectedWord);
         showWordPreview(index, expectedWord);
         return;
@@ -1479,7 +1602,7 @@ function StudyContent() {
         setFeedbackMessage("首字母不对，正在准备中文和英文读音...");
         void handleFirstLetterMistake(expectedWord);
       } else {
-        handleSpellingMistake(index, expectedWord, typedValue, nextErrorCount);
+        handleSpellingMistake(index, expectedWord, typedValue, nextErrorCount, errorType);
       }
       return;
     }
@@ -1523,6 +1646,8 @@ function StudyContent() {
         return next;
       });
     }
+
+    recordSuccessfulWordSpelling(expectedWord, currentRawAnswer, prevErrorCount, prevErrorCount >= 4, currentItem?.item_type === "word");
 
     setWordErrorCounts((current) => {
       const nextCounts = [...current];
@@ -1599,11 +1724,16 @@ function StudyContent() {
     const isCorrect = normalizedAnswer === normalizeTypedWord(expectedWord);
     if (!isCorrect) {
       const nextErrorCount = mistakePracticeErrorCount + 1;
+      const errorType = classifySpellingError(expectedWord, mistakePracticeAnswer);
       setMistakePracticeErrorCount(nextErrorCount);
       setMistakePracticeConsecutiveCorrect(0);
       setMistakePracticeStatus("incorrect");
       setMistakePracticeAnswer("");
-      if (nextErrorCount === 4) {
+      const accessToken = getAccessToken();
+      if (accessToken && currentItem && !isGeneratedItem(currentItem)) {
+        void logWordMistake(currentItem.id, expectedWord, mistakePracticeAnswer, accessToken, errorType).catch(() => undefined);
+      }
+      if (nextErrorCount === 4 || (errorType === "unknown" && nextErrorCount >= 2)) {
         await playChineseThenEnglish(currentMistakePracticeTranslation, expectedWord);
         showMistakePracticePreview(expectedWord);
         return;
@@ -1615,7 +1745,7 @@ function StudyContent() {
         return;
       }
 
-      setFeedbackMessage(`${buildProgressiveSpellingHint(expectedWord, normalizedAnswer, nextErrorCount)} 已连续错误 ${nextErrorCount} 次。`);
+      setFeedbackMessage(`${buildTypedSpellingHint(expectedWord, normalizedAnswer, nextErrorCount, errorType)} 已连续错误 ${nextErrorCount} 次。`);
       return;
     }
 
@@ -1633,6 +1763,8 @@ function StudyContent() {
 
       setMistakePracticeConsecutiveCorrect(0);
     }
+
+    recordSuccessfulWordSpelling(expectedWord, mistakePracticeAnswer, mistakePracticeErrorCount, mistakePracticeErrorCount >= 4, true);
 
     const nextIndex = mistakePracticeIndex + 1;
     if (currentItem) {

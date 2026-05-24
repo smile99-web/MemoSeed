@@ -20,8 +20,12 @@ export interface WordMasterySummary {
   status: "mastered" | "learning" | "weak";
   memory_strength: number;
   forget_risk: number;
+  priority_score: number;
   review_count: number;
   mistake_count: number;
+  recall_correct_count: number;
+  hinted_correct_count: number;
+  preview_correct_count: number;
   interval_days: number;
   next_review_at: string | null;
 }

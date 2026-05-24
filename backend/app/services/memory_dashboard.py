@@ -21,6 +21,7 @@ from app.utils import average, extract_mistake_words, normalize_word, parse_date
 
 
 LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
+WORD_MEMORY_SOURCE = "word-memory"
 
 
 @dataclass
@@ -30,8 +31,35 @@ class WordStats:
     risks: list[float]
     intervals: list[int]
     next_reviews: list[datetime]
+    direct_strengths: list[float]
+    direct_risks: list[float]
+    direct_intervals: list[int]
+    direct_next_reviews: list[datetime]
     review_count: int = 0
     mistake_count: int = 0
+    recall_correct_count: int = 0
+    hinted_correct_count: int = 0
+    preview_correct_count: int = 0
+    consecutive_correct_count: int = 0
+    consecutive_error_count: int = 0
+    last_reviewed_at: datetime | None = None
+
+
+def get_word_stats(word_stats: dict[str, WordStats], word: str) -> WordStats:
+    return word_stats.setdefault(
+        word,
+        WordStats(
+            word=word,
+            strengths=[],
+            risks=[],
+            intervals=[],
+            next_reviews=[],
+            direct_strengths=[],
+            direct_risks=[],
+            direct_intervals=[],
+            direct_next_reviews=[],
+        ),
+    )
 
 
 def build_memory_dashboard(db: Session, user_id: UUID) -> MemoryDashboardResponse:
@@ -47,18 +75,47 @@ def build_memory_dashboard(db: Session, user_id: UUID) -> MemoryDashboardRespons
         current_forget_risk = calculate_current_forget_risk(memory_state, now)
         current_memory_strength = round(1 - current_forget_risk, 2)
         item_words = set(tokenize_words(learning_item.english_text))
+        is_word_memory_item = learning_item.item_type == "word" and learning_item.source == WORD_MEMORY_SOURCE
         for word in item_words:
-            stats = word_stats.setdefault(word, WordStats(word=word, strengths=[], risks=[], intervals=[], next_reviews=[]))
+            stats = get_word_stats(word_stats, word)
             stats.strengths.append(current_memory_strength)
             stats.risks.append(current_forget_risk)
             stats.intervals.append(memory_state.interval_days)
             stats.next_reviews.append(memory_state.next_review_at)
+            if is_word_memory_item:
+                stats.direct_strengths.append(current_memory_strength)
+                stats.direct_risks.append(current_forget_risk)
+                stats.direct_intervals.append(memory_state.interval_days)
+                stats.direct_next_reviews.append(memory_state.next_review_at)
 
-    review_rows = db.execute(select(ReviewLog.learning_item_id, ReviewLog.is_correct).where(ReviewLog.user_id == user_id)).all()
     item_word_map = {learning_item.id: set(tokenize_words(learning_item.english_text)) for learning_item, _ in item_rows}
-    for learning_item_id, _is_correct in review_rows:
+    direct_word_item_ids = {
+        learning_item.id
+        for learning_item, _ in item_rows
+        if learning_item.item_type == "word" and learning_item.source == WORD_MEMORY_SOURCE
+    }
+    review_rows = db.execute(
+        select(ReviewLog.learning_item_id, ReviewLog.review_mode, ReviewLog.is_correct, ReviewLog.reviewed_at)
+        .where(ReviewLog.user_id == user_id, ReviewLog.learning_item_id.in_(direct_word_item_ids))
+        .order_by(ReviewLog.reviewed_at.asc())
+    ).all()
+    for learning_item_id, review_mode, is_correct, reviewed_at in review_rows:
         for word in item_word_map.get(learning_item_id, set()):
-            word_stats.setdefault(word, WordStats(word=word, strengths=[], risks=[], intervals=[], next_reviews=[])).review_count += 1
+            stats = get_word_stats(word_stats, word)
+            stats.review_count += 1
+            stats.last_reviewed_at = reviewed_at
+            if not is_correct:
+                stats.consecutive_error_count += 1
+                stats.consecutive_correct_count = 0
+                continue
+            stats.consecutive_correct_count += 1
+            stats.consecutive_error_count = 0
+            if review_mode.startswith("word-recall"):
+                stats.recall_correct_count += 1
+            elif review_mode.startswith("word-hinted"):
+                stats.hinted_correct_count += 1
+            elif review_mode.startswith("word-preview"):
+                stats.preview_correct_count += 1
 
     mistake_rows = db.execute(
         select(MistakeLog.learning_item_id, MistakeLog.mistake_type, MistakeLog.expected_answer, MistakeLog.actual_answer).where(
@@ -71,9 +128,9 @@ def build_memory_dashboard(db: Session, user_id: UUID) -> MemoryDashboardRespons
         if len(mistake_words) == 0 and mistake_type == "word-spelling":
             mistake_words = list(item_word_map.get(learning_item_id, set()))
         for word in mistake_words:
-            word_stats.setdefault(word, WordStats(word=word, strengths=[], risks=[], intervals=[], next_reviews=[])).mistake_count += 1
+            get_word_stats(word_stats, word).mistake_count += 1
 
-    summaries = [summarize_word(stats) for stats in word_stats.values()]
+    summaries = [summarize_word(stats, now) for stats in word_stats.values()]
     mastered_words = len([summary for summary in summaries if summary.status == "mastered"])
     weak_words = len([summary for summary in summaries if summary.status == "weak"])
     learning_words = max(len(summaries) - mastered_words - weak_words, 0)
@@ -120,7 +177,7 @@ def build_memory_dashboard(db: Session, user_id: UUID) -> MemoryDashboardRespons
         next_review_at=next_review_at,
         study_time=study_time,
         review_buckets=build_review_buckets(memory_states, now),
-        weakest_words=sorted(summaries, key=lambda summary: (summary.status != "weak", -summary.mistake_count, summary.memory_strength, -summary.forget_risk)),
+        weakest_words=sorted(summaries, key=lambda summary: (-summary.priority_score, summary.memory_strength, -summary.forget_risk)),
         strongest_words=sorted(summaries, key=lambda summary: (-summary.memory_strength, summary.mistake_count, summary.forget_risk)),
     )
 
@@ -147,14 +204,19 @@ def build_study_time_summary(db: Session, user_id: UUID) -> StudyTimeSummary:
     )
 
 
-def summarize_word(stats: WordStats) -> WordMasterySummary:
-    strength = max(stats.strengths) if stats.strengths else 0.0
-    risk = max(stats.risks) if stats.risks else 1.0
-    interval = average(stats.intervals)
-    next_review_at = min(stats.next_reviews) if stats.next_reviews else None
-    if strength >= 0.75 and stats.review_count >= 3 and stats.mistake_count == 0:
+def summarize_word(stats: WordStats, now: datetime) -> WordMasterySummary:
+    strengths = stats.direct_strengths or stats.strengths
+    risks = stats.direct_risks or stats.risks
+    intervals = stats.direct_intervals or stats.intervals
+    next_reviews = stats.direct_next_reviews or stats.next_reviews
+    strength = min(strengths) if strengths else 0.0
+    risk = max(risks) if risks else 1.0
+    interval = average(intervals)
+    next_review_at = min(next_reviews) if next_reviews else None
+    priority_score = calculate_word_priority(stats, strength, risk, next_review_at, now)
+    if strength >= 0.75 and stats.recall_correct_count >= 2 and stats.mistake_count == 0:
         status = "mastered"
-    elif stats.mistake_count > 0:
+    elif stats.mistake_count > 0 or priority_score >= 0.65:
         status = "weak"
     else:
         status = "learning"
@@ -164,11 +226,47 @@ def summarize_word(stats: WordStats) -> WordMasterySummary:
         status=status,
         memory_strength=round(strength, 2),
         forget_risk=round(risk, 2),
+        priority_score=priority_score,
         review_count=stats.review_count,
         mistake_count=stats.mistake_count,
+        recall_correct_count=stats.recall_correct_count,
+        hinted_correct_count=stats.hinted_correct_count,
+        preview_correct_count=stats.preview_correct_count,
         interval_days=round(interval, 1),
         next_review_at=next_review_at,
     )
+
+
+def calculate_word_priority(stats: WordStats, strength: float, risk: float, next_review_at: datetime | None, now: datetime) -> float:
+    overdue_score = 0.0
+    if next_review_at is not None:
+        overdue_hours = max((now - next_review_at).total_seconds() / 3600, 0.0)
+        overdue_score = min(overdue_hours / 24, 1.0)
+    mistake_score = min(stats.mistake_count / 5, 1.0)
+    consecutive_error_score = min(stats.consecutive_error_count / 3, 1.0)
+    low_strength_score = 1 - strength
+    hint_dependency_score = 1.0 if stats.preview_correct_count > 0 and stats.recall_correct_count == 0 else 0.0
+    recent_practice_penalty = 0.0
+    if stats.last_reviewed_at is not None:
+        minutes_since_review = max((now - stats.last_reviewed_at).total_seconds() / 60, 0.0)
+        if minutes_since_review < 30:
+            recent_practice_penalty = 0.18
+        elif minutes_since_review < 120:
+            recent_practice_penalty = 0.1
+        elif minutes_since_review < 24 * 60:
+            recent_practice_penalty = 0.04
+    if stats.consecutive_error_count > 0:
+        recent_practice_penalty *= 0.35
+    priority = (
+        risk * 0.34
+        + overdue_score * 0.2
+        + mistake_score * 0.2
+        + consecutive_error_score * 0.14
+        + low_strength_score * 0.06
+        + hint_dependency_score * 0.06
+        - recent_practice_penalty
+    )
+    return round(min(max(priority, 0.0), 1.0), 2)
 
 
 def build_review_buckets(memory_states: list[MemoryState], now: datetime) -> list[ReviewBucket]:

@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
@@ -75,6 +75,7 @@ function WordTable({ title, words }: { title: string; words: WordMasterySummary[
                 <tr>
                   <th className="px-3 py-2">单词</th>
                   <th className="px-3 py-2">状态</th>
+                  <th className="px-3 py-2">优先级</th>
                   <th className="px-3 py-2">强度</th>
                   <th className="px-3 py-2">风险</th>
                   <th className="px-3 py-2">复习</th>
@@ -87,6 +88,7 @@ function WordTable({ title, words }: { title: string; words: WordMasterySummary[
                   <tr className="border-t" key={`${title}-${word.word}`}>
                     <td className="px-3 py-2 font-medium">{word.word}</td>
                     <td className="px-3 py-2">{statusLabels[word.status]}</td>
+                    <td className="px-3 py-2">{formatPercent(word.priority_score)}</td>
                     <td className="px-3 py-2">{formatPercent(word.memory_strength)}</td>
                     <td className="px-3 py-2">{formatPercent(word.forget_risk)}</td>
                     <td className="px-3 py-2">{word.review_count}</td>

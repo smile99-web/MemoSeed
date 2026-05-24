@@ -28,15 +28,59 @@ from app.schemas.learning import (
     LearningTranslationResponse,
     WordMistakeLogRequest,
     WordMistakeLogResponse,
+    WordReviewRequest,
+    WordReviewResponse,
 )
 from app.services.dynamic_sentence import generate_dynamic_review_sentence
 from app.services.learning_import import SUPPORTED_IMPORT_EXTENSIONS, import_learning_items, parse_txt_import, parse_xlsx_import
 from app.services.llm_translation import DEFAULT_LLM_TRANSLATION_SETTINGS, LlmTranslationSettings, generate_learning_text, translate_english_to_chinese
-from app.services.memory_scheduler import calculate_review_priority
+from app.services.memory_scheduler import calculate_review_priority, schedule_memory_review
 from app.services.secure_model_settings import get_private_model_settings
-from app.utils import extract_mistake_words, string_setting
+from app.utils import extract_mistake_words, normalize_word, string_setting
 
 router = APIRouter()
+
+WORD_MEMORY_SOURCE = "word-memory"
+
+
+def normalize_word_error_type(value: str | None) -> str:
+    normalized = "".join(char for char in (value or "spelling").strip().lower() if char.isalnum() or char == "-")
+    return normalized[:24] or "spelling"
+
+
+def get_or_create_word_memory_item(
+    db: Session,
+    user_id: UUID,
+    word: str,
+    source_item: LearningItem | None = None,
+) -> LearningItem:
+    normalized_word = normalize_word(word)
+    if not normalized_word:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Word is required")
+
+    existing_item = db.scalar(
+        select(LearningItem).where(
+            LearningItem.user_id == user_id,
+            LearningItem.item_type == "word",
+            LearningItem.source == WORD_MEMORY_SOURCE,
+            LearningItem.english_text == normalized_word,
+        )
+    )
+    if existing_item is not None:
+        return existing_item
+
+    learning_item = LearningItem(
+        user_id=user_id,
+        course_id=None,
+        item_type="word",
+        english_text=normalized_word,
+        chinese_text=source_item.chinese_text if source_item is not None else normalized_word,
+        difficulty_level=source_item.difficulty_level if source_item is not None else 1,
+        source=WORD_MEMORY_SOURCE,
+    )
+    db.add(learning_item)
+    db.flush()
+    return learning_item
 
 
 def build_llm_translation_settings(
@@ -245,17 +289,44 @@ def create_word_mistake_log(
     if learning_item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning item not found")
 
-    mistake_log = MistakeLog(
+    word_item = get_or_create_word_memory_item(db, current_user.id, payload.expected_word, learning_item)
+    error_type = normalize_word_error_type(payload.error_type)
+    schedule_memory_review(
+        db=db,
         user_id=current_user.id,
-        learning_item_id=learning_item.id,
-        mistake_type="word-spelling",
-        expected_answer=payload.expected_word.strip(),
-        actual_answer=payload.actual_word.strip(),
-        is_resolved=False,
+        learning_item_id=word_item.id,
+        score=1,
+        review_mode=f"word-spelling-{error_type}",
+        response_text=payload.actual_word.strip(),
+        duration_seconds=0,
     )
-    db.add(mistake_log)
-    db.commit()
     return WordMistakeLogResponse(logged_count=1)
+
+
+@router.post("/word-reviews", response_model=WordReviewResponse, status_code=status.HTTP_201_CREATED)
+def create_word_review(
+    payload: WordReviewRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> WordReviewResponse:
+    learning_item = db.scalar(select(LearningItem).where(LearningItem.id == payload.learning_item_id, LearningItem.user_id == current_user.id))
+    if learning_item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning item not found")
+
+    word_item = get_or_create_word_memory_item(db, current_user.id, payload.word, learning_item)
+    review_mode = payload.review_mode.strip()
+    if payload.error_type:
+        review_mode = f"{review_mode}-{normalize_word_error_type(payload.error_type)}"[:32]
+    schedule_memory_review(
+        db=db,
+        user_id=current_user.id,
+        learning_item_id=word_item.id,
+        score=payload.score,
+        review_mode=review_mode,
+        response_text=(payload.response_text or "").strip(),
+        duration_seconds=payload.duration_seconds,
+    )
+    return WordReviewResponse(learning_item_id=word_item.id, word=word_item.english_text)
 
 
 @router.post("/dynamic-sentences", response_model=DynamicSentenceResponse)

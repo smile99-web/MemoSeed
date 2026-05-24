@@ -18,7 +18,7 @@ def tokenize_words(value: str) -> list[str]:
 
 
 def extract_mistake_words(mistake_type: str, expected_answer: str, actual_answer: str) -> list[str]:
-    if mistake_type == "word-spelling":
+    if mistake_type.startswith("word-spelling"):
         return tokenize_words(expected_answer)
     if "错词：" in actual_answer:
         _, words_text = actual_answer.split("错词：", 1)

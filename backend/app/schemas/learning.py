@@ -57,10 +57,26 @@ class WordMistakeLogRequest(BaseModel):
     learning_item_id: UUID
     expected_word: str = Field(min_length=1)
     actual_word: str = ""
+    error_type: str = Field(default="spelling", max_length=32)
 
 
 class WordMistakeLogResponse(BaseModel):
     logged_count: int
+
+
+class WordReviewRequest(BaseModel):
+    learning_item_id: UUID
+    word: str = Field(min_length=1)
+    score: int = Field(ge=0, le=5)
+    review_mode: str = Field(min_length=1, max_length=32)
+    response_text: str | None = None
+    duration_seconds: int = Field(default=0, ge=0)
+    error_type: str | None = Field(default=None, max_length=32)
+
+
+class WordReviewResponse(BaseModel):
+    learning_item_id: UUID
+    word: str
 
 
 class DynamicSentenceRequest(BaseModel):
