@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 class ReviewLogCreate(BaseModel):
     learning_item_id: UUID
     review_mode: str = Field(min_length=1, max_length=32)
+    error_type: str | None = Field(default=None, max_length=32)
     score: int = Field(ge=0, le=5)
     is_correct: bool | None = None
     response_text: str | None = None
@@ -18,6 +19,7 @@ class ReviewLogRead(BaseModel):
     user_id: UUID
     learning_item_id: UUID
     review_mode: str
+    error_type: str | None
     score: int
     is_correct: bool
     response_text: str | None
@@ -32,6 +34,7 @@ class MistakeLogRead(BaseModel):
     user_id: UUID
     learning_item_id: UUID
     mistake_type: str
+    error_type: str | None
     expected_answer: str
     actual_answer: str
     is_resolved: bool

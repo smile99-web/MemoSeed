@@ -11,6 +11,8 @@ from app.models.review_log import ReviewLog
 from app.models.study_time_log import StudyTimeLog
 from app.models.user import User
 from app.models.user_model_settings import UserModelSettings
+from app.models.word_memory_state import WordMemoryState
+from app.models.word_review_task import WordReviewTask
 
 __all__ = [
     "AiDailyReport",
@@ -26,4 +28,6 @@ __all__ = [
     "StudyTimeLog",
     "User",
     "UserModelSettings",
+    "WordMemoryState",
+    "WordReviewTask",
 ]

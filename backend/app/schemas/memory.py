@@ -15,6 +15,12 @@ class MemoryStateRead(BaseModel):
     forget_risk: float
     repetition_count: int
     lapse_count: int
+    consecutive_correct_count: int = 0
+    consecutive_error_count: int = 0
+    recall_correct_count: int = 0
+    hinted_correct_count: int = 0
+    preview_correct_count: int = 0
+    context_correct_count: int = 0
     last_reviewed_at: datetime | None
     next_review_at: datetime
 
@@ -38,14 +44,24 @@ class MemoryScheduleResponse(BaseModel):
 class WordMasterySummary(BaseModel):
     word: str
     status: str
+    status_label: str
     memory_strength: float
     forget_risk: float
     priority_score: float
     review_count: int
     mistake_count: int
+    consecutive_correct_count: int = 0
+    consecutive_error_count: int = 0
     recall_correct_count: int = 0
     hinted_correct_count: int = 0
     preview_correct_count: int = 0
+    context_correct_count: int = 0
+    hidden_recall_correct_count: int = 0
+    no_hint_correct_date_count: int = 0
+    dominant_error_type: str | None = None
+    review_reason: str
+    recommended_task: str
+    scheduled_task_count: int = 0
     interval_days: float
     next_review_at: datetime | None
 

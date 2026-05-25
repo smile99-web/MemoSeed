@@ -11,6 +11,13 @@ export interface LearningItem {
   phonetic: string | null;
   difficulty_level: number;
   source: string | null;
+  source_item_id?: string;
+  review_task_id?: string;
+  review_task_type?: string;
+  review_prompt?: string | null;
+  review_choices?: string[];
+  review_answer?: string | null;
+  focus_words?: string[];
   course_id: string | null;
   created_at: string;
   updated_at: string;
@@ -297,6 +304,7 @@ export async function logWordMistake(
 export async function logWordReview(
   payload: {
     learning_item_id: string;
+    review_task_id?: string;
     word: string;
     score: number;
     review_mode: string;

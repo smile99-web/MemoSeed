@@ -72,6 +72,12 @@ CREATE TABLE IF NOT EXISTS memory_states (
     forget_risk DOUBLE PRECISION NOT NULL DEFAULT 1.0 CHECK (forget_risk >= 0.0 AND forget_risk <= 1.0),
     repetition_count INTEGER NOT NULL DEFAULT 0 CHECK (repetition_count >= 0),
     lapse_count INTEGER NOT NULL DEFAULT 0 CHECK (lapse_count >= 0),
+    consecutive_correct_count INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_correct_count >= 0),
+    consecutive_error_count INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_error_count >= 0),
+    recall_correct_count INTEGER NOT NULL DEFAULT 0 CHECK (recall_correct_count >= 0),
+    hinted_correct_count INTEGER NOT NULL DEFAULT 0 CHECK (hinted_correct_count >= 0),
+    preview_correct_count INTEGER NOT NULL DEFAULT 0 CHECK (preview_correct_count >= 0),
+    context_correct_count INTEGER NOT NULL DEFAULT 0 CHECK (context_correct_count >= 0),
     last_reviewed_at TIMESTAMPTZ,
     next_review_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -83,6 +89,7 @@ CREATE TABLE IF NOT EXISTS review_logs (
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     learning_item_id UUID NOT NULL REFERENCES learning_items(id) ON DELETE CASCADE,
     review_mode VARCHAR(32) NOT NULL,
+    error_type VARCHAR(32),
     score INTEGER NOT NULL CHECK (score BETWEEN 0 AND 5),
     is_correct BOOLEAN NOT NULL,
     response_text TEXT,
@@ -95,11 +102,61 @@ CREATE TABLE IF NOT EXISTS mistake_logs (
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     learning_item_id UUID NOT NULL REFERENCES learning_items(id) ON DELETE CASCADE,
     mistake_type VARCHAR(64) NOT NULL,
+    error_type VARCHAR(32),
     expected_answer TEXT NOT NULL,
     actual_answer TEXT NOT NULL,
     is_resolved BOOLEAN NOT NULL DEFAULT FALSE,
     occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     resolved_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS word_memory_states (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    word VARCHAR(120) NOT NULL,
+    learning_item_id UUID REFERENCES learning_items(id) ON DELETE SET NULL,
+    memory_state_id UUID REFERENCES memory_states(id) ON DELETE SET NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'teaching',
+    memory_strength DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    forget_risk DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    priority_score DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    consecutive_correct_count INTEGER NOT NULL DEFAULT 0,
+    consecutive_error_count INTEGER NOT NULL DEFAULT 0,
+    recall_correct_count INTEGER NOT NULL DEFAULT 0,
+    hinted_correct_count INTEGER NOT NULL DEFAULT 0,
+    preview_correct_count INTEGER NOT NULL DEFAULT 0,
+    context_correct_count INTEGER NOT NULL DEFAULT 0,
+    hidden_recall_correct_count INTEGER NOT NULL DEFAULT 0,
+    no_hint_correct_date_count INTEGER NOT NULL DEFAULT 0,
+    last_no_hint_correct_date DATE,
+    last_answer_seen_at TIMESTAMPTZ,
+    error_type_counts JSONB NOT NULL DEFAULT '{}'::jsonb,
+    task_type_counts JSONB NOT NULL DEFAULT '{}'::jsonb,
+    next_micro_review_at TIMESTAMPTZ,
+    micro_review_stage INTEGER NOT NULL DEFAULT 0,
+    last_reviewed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, word)
+);
+
+CREATE TABLE IF NOT EXISTS word_review_tasks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    word_memory_state_id UUID REFERENCES word_memory_states(id) ON DELETE CASCADE,
+    learning_item_id UUID REFERENCES learning_items(id) ON DELETE SET NULL,
+    word VARCHAR(120) NOT NULL,
+    task_type VARCHAR(40) NOT NULL,
+    prompt_text TEXT NOT NULL,
+    expected_answer TEXT NOT NULL,
+    choices JSONB NOT NULL DEFAULT '[]'::jsonb,
+    priority_score DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    status VARCHAR(24) NOT NULL DEFAULT 'pending',
+    source VARCHAR(120) NOT NULL DEFAULT 'word-memory',
+    due_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS daily_plans (
@@ -169,6 +226,13 @@ CREATE INDEX IF NOT EXISTS idx_review_logs_reviewed_at ON review_logs(reviewed_a
 CREATE INDEX IF NOT EXISTS idx_mistake_logs_user_id ON mistake_logs(user_id);
 CREATE INDEX IF NOT EXISTS idx_mistake_logs_learning_item_id ON mistake_logs(learning_item_id);
 CREATE INDEX IF NOT EXISTS idx_mistake_logs_occurred_at ON mistake_logs(occurred_at);
+CREATE INDEX IF NOT EXISTS idx_word_memory_states_user_id ON word_memory_states(user_id);
+CREATE INDEX IF NOT EXISTS idx_word_memory_states_word ON word_memory_states(word);
+CREATE INDEX IF NOT EXISTS idx_word_memory_states_next_micro_review_at ON word_memory_states(next_micro_review_at);
+CREATE INDEX IF NOT EXISTS idx_word_review_tasks_user_id ON word_review_tasks(user_id);
+CREATE INDEX IF NOT EXISTS idx_word_review_tasks_due_at ON word_review_tasks(due_at);
+CREATE INDEX IF NOT EXISTS idx_word_review_tasks_status ON word_review_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_word_review_tasks_word ON word_review_tasks(word);
 CREATE INDEX IF NOT EXISTS idx_daily_plans_user_date ON daily_plans(user_id, plan_date);
 CREATE INDEX IF NOT EXISTS idx_ai_daily_reports_user_date ON ai_daily_reports(user_id, report_date);
 CREATE INDEX IF NOT EXISTS idx_study_time_logs_user_id ON study_time_logs(user_id);

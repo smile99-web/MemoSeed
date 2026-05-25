@@ -16,6 +16,7 @@ from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
 from app.models.mistake_log import MistakeLog
 from app.models.user import User
+from app.models.word_review_task import WordReviewTask
 from app.schemas.learning import (
     DynamicSentenceRequest,
     DynamicSentenceResponse,
@@ -36,11 +37,50 @@ from app.services.learning_import import SUPPORTED_IMPORT_EXTENSIONS, import_lea
 from app.services.llm_translation import DEFAULT_LLM_TRANSLATION_SETTINGS, LlmTranslationSettings, generate_learning_text, translate_english_to_chinese
 from app.services.memory_scheduler import calculate_review_priority, schedule_memory_review
 from app.services.secure_model_settings import get_private_model_settings
+from app.services.word_memory import complete_word_review_task, schedule_micro_review_tasks_for_mistake, sync_word_memory_from_review
 from app.utils import extract_mistake_words, normalize_word, string_setting
 
 router = APIRouter()
 
 WORD_MEMORY_SOURCE = "word-memory"
+
+
+def build_micro_task_learning_item(task: WordReviewTask, source_item: LearningItem | None, current_user: User) -> LearningItemRead:
+    if task.task_type == "cloze_sentence":
+        english_text = f"I can use {task.word} today."
+        source = f"AI 动态复习：{task.word}"
+        item_type = "sentence"
+    else:
+        english_text = task.word
+        source = f"微型任务：{task.task_type}：{task.word}"
+        item_type = "word"
+
+    raw_choices = [str(choice) for choice in task.choices]
+    review_answer = raw_choices[0] if raw_choices else task.expected_answer
+    if len(raw_choices) > 1:
+        shift = len(task.word) % len(raw_choices)
+        raw_choices = raw_choices[shift:] + raw_choices[:shift]
+
+    return LearningItemRead(
+        id=task.id,
+        user_id=current_user.id,
+        course_id=source_item.course_id if source_item is not None else None,
+        item_type=item_type,
+        english_text=english_text,
+        chinese_text=task.prompt_text,
+        phonetic=None,
+        difficulty_level=source_item.difficulty_level if source_item is not None else 3,
+        source=source,
+        review_task_id=task.id,
+        review_task_type=task.task_type,
+        review_prompt=task.prompt_text,
+        review_choices=raw_choices,
+        review_answer=review_answer,
+        focus_words=[task.word],
+        source_item_id=source_item.id if source_item is not None else task.learning_item_id,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+    )
 
 
 def normalize_word_error_type(value: str | None) -> str:
@@ -67,6 +107,8 @@ def get_or_create_word_memory_item(
         )
     )
     if existing_item is not None:
+        if source_item is not None and existing_item.chinese_text == source_item.chinese_text:
+            existing_item.chinese_text = normalized_word
         return existing_item
 
     learning_item = LearningItem(
@@ -74,7 +116,7 @@ def get_or_create_word_memory_item(
         course_id=None,
         item_type="word",
         english_text=normalized_word,
-        chinese_text=source_item.chinese_text if source_item is not None else normalized_word,
+        chinese_text=normalized_word,
         difficulty_level=source_item.difficulty_level if source_item is not None else 1,
         source=WORD_MEMORY_SOURCE,
     )
@@ -152,6 +194,19 @@ def list_due_review_items(
     for item, _memory_state in due_rows:
         item_by_id.setdefault(item.id, item)
 
+    task_rows = db.execute(
+        select(WordReviewTask, LearningItem)
+        .outerjoin(LearningItem, LearningItem.id == WordReviewTask.learning_item_id)
+        .where(
+            WordReviewTask.user_id == current_user.id,
+            WordReviewTask.status == "pending",
+            WordReviewTask.due_at <= now,
+        )
+        .order_by(WordReviewTask.priority_score.desc(), WordReviewTask.due_at.asc())
+        .limit(capped_limit)
+    ).all()
+    task_review_items = [build_micro_task_learning_item(task, source_item, current_user) for task, source_item in task_rows]
+
     mistake_statement = (
         select(MistakeLog, LearningItem)
         .join(LearningItem, LearningItem.id == MistakeLog.learning_item_id)
@@ -170,15 +225,15 @@ def list_due_review_items(
             item_by_id.setdefault(item.id, item)
             add_focus_words(item.id, extract_mistake_words(mistake.mistake_type, mistake.expected_answer, mistake.actual_answer))
 
-    review_items: list[LearningItemRead] = []
+    review_items: list[LearningItemRead] = task_review_items[:]
     for item in item_by_id.values():
+        if len(review_items) >= capped_limit:
+            break
         item_read = LearningItemRead.model_validate(item)
         focus_words = focus_words_by_item_id.get(item.id, [])
         if focus_words:
             item_read = item_read.model_copy(update={"source": f"AI 动态复习：{', '.join(focus_words)}"})
         review_items.append(item_read)
-        if len(review_items) >= capped_limit:
-            break
 
     return review_items
 
@@ -291,15 +346,19 @@ def create_word_mistake_log(
 
     word_item = get_or_create_word_memory_item(db, current_user.id, payload.expected_word, learning_item)
     error_type = normalize_word_error_type(payload.error_type)
-    schedule_memory_review(
+    result = schedule_memory_review(
         db=db,
         user_id=current_user.id,
         learning_item_id=word_item.id,
         score=1,
-        review_mode=f"word-spelling-{error_type}",
+        review_mode="word-spelling",
         response_text=payload.actual_word.strip(),
         duration_seconds=0,
+        error_type=error_type,
     )
+    word_state = sync_word_memory_from_review(db, current_user.id, word_item.english_text, result.memory_state, "word-spelling", False, error_type)
+    schedule_micro_review_tasks_for_mistake(db, current_user.id, word_state, learning_item.chinese_text, learning_item.id, error_type)
+    db.commit()
     return WordMistakeLogResponse(logged_count=1)
 
 
@@ -314,10 +373,9 @@ def create_word_review(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning item not found")
 
     word_item = get_or_create_word_memory_item(db, current_user.id, payload.word, learning_item)
-    review_mode = payload.review_mode.strip()
-    if payload.error_type:
-        review_mode = f"{review_mode}-{normalize_word_error_type(payload.error_type)}"[:32]
-    schedule_memory_review(
+    review_mode = payload.review_mode.strip()[:32]
+    error_type = normalize_word_error_type(payload.error_type) if payload.error_type else None
+    result = schedule_memory_review(
         db=db,
         user_id=current_user.id,
         learning_item_id=word_item.id,
@@ -325,7 +383,13 @@ def create_word_review(
         review_mode=review_mode,
         response_text=(payload.response_text or "").strip(),
         duration_seconds=payload.duration_seconds,
+        error_type=error_type,
     )
+    word_state = sync_word_memory_from_review(db, current_user.id, word_item.english_text, result.memory_state, review_mode, result.review_log.is_correct, error_type)
+    complete_word_review_task(db, current_user.id, payload.review_task_id, result.review_log.is_correct)
+    if not result.review_log.is_correct:
+        schedule_micro_review_tasks_for_mistake(db, current_user.id, word_state, learning_item.chinese_text, learning_item.id, error_type or "spelling")
+    db.commit()
     return WordReviewResponse(learning_item_id=word_item.id, word=word_item.english_text)
 
 

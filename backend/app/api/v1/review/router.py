@@ -60,6 +60,7 @@ def create_review_log(
         review_mode=payload.review_mode,
         response_text=payload.response_text,
         duration_seconds=payload.duration_seconds,
+        error_type=payload.error_type,
     )
 
     return MemoryScheduleResponse(

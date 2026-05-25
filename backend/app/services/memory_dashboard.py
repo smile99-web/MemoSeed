@@ -14,6 +14,8 @@ from app.models.mistake_log import MistakeLog
 from app.models.review_log import ReviewLog
 from app.models.study_time_log import StudyTimeLog
 from app.models.user_model_settings import UserModelSettings
+from app.models.word_memory_state import WordMemoryState
+from app.models.word_review_task import WordReviewTask
 from app.schemas.memory import MemoryDashboardResponse, ReviewBucket, StudyTimeSummary, WordMasterySummary
 from app.services.fsrs_fitting import MIN_FSRS_TRAINING_REVIEWS
 from app.services.memory_scheduler import FSRS_WEIGHTS_SETTING_KEY, calculate_current_forget_risk
@@ -40,9 +42,34 @@ class WordStats:
     recall_correct_count: int = 0
     hinted_correct_count: int = 0
     preview_correct_count: int = 0
+    context_correct_count: int = 0
+    hidden_recall_correct_count: int = 0
+    no_hint_correct_date_count: int = 0
     consecutive_correct_count: int = 0
     consecutive_error_count: int = 0
     last_reviewed_at: datetime | None = None
+    error_type_counts: dict[str, int] | None = None
+    scheduled_task_count: int = 0
+
+
+MASTERY_STATUS_LABELS = {
+    "difficult": "困难词",
+    "teaching": "教学中",
+    "consolidating": "巩固中",
+    "near_mastered": "接近掌握",
+    "mastered": "已掌握",
+}
+
+ERROR_TYPE_LABELS = {
+    "first-letter": "首字母错误",
+    "middle": "中间结构错误",
+    "ending": "词尾错误",
+    "sequence": "字母顺序错误",
+    "missing-letter": "漏字母",
+    "extra-letter": "多字母",
+    "unknown": "完全不会",
+    "spelling": "拼写错误",
+}
 
 
 def get_word_stats(word_stats: dict[str, WordStats], word: str) -> WordStats:
@@ -88,6 +115,37 @@ def build_memory_dashboard(db: Session, user_id: UUID) -> MemoryDashboardRespons
                 stats.direct_intervals.append(memory_state.interval_days)
                 stats.direct_next_reviews.append(memory_state.next_review_at)
 
+    word_state_rows = db.scalars(select(WordMemoryState).where(WordMemoryState.user_id == user_id)).all()
+    for word_state in word_state_rows:
+        stats = get_word_stats(word_stats, word_state.word)
+        stats.direct_strengths.append(word_state.memory_strength)
+        stats.direct_risks.append(word_state.forget_risk)
+        if word_state.next_micro_review_at is not None:
+            stats.direct_next_reviews.append(word_state.next_micro_review_at)
+            stats.next_reviews.append(word_state.next_micro_review_at)
+        stats.consecutive_correct_count = max(stats.consecutive_correct_count, word_state.consecutive_correct_count)
+        stats.consecutive_error_count = max(stats.consecutive_error_count, word_state.consecutive_error_count)
+        stats.recall_correct_count = max(stats.recall_correct_count, word_state.recall_correct_count)
+        stats.hinted_correct_count = max(stats.hinted_correct_count, word_state.hinted_correct_count)
+        stats.preview_correct_count = max(stats.preview_correct_count, word_state.preview_correct_count)
+        stats.context_correct_count = max(stats.context_correct_count, word_state.context_correct_count)
+        stats.hidden_recall_correct_count = max(stats.hidden_recall_correct_count, word_state.hidden_recall_correct_count)
+        stats.no_hint_correct_date_count = max(stats.no_hint_correct_date_count, word_state.no_hint_correct_date_count)
+        stats.last_reviewed_at = word_state.last_reviewed_at or stats.last_reviewed_at
+        stats.error_type_counts = stats.error_type_counts or {}
+        for key, value in (word_state.error_type_counts or {}).items():
+            stats.error_type_counts[str(key)] = stats.error_type_counts.get(str(key), 0) + int(value or 0)
+
+    pending_task_counts = dict(
+        db.execute(
+            select(WordReviewTask.word, func.count(WordReviewTask.id))
+            .where(WordReviewTask.user_id == user_id, WordReviewTask.status == "pending")
+            .group_by(WordReviewTask.word)
+        ).all()
+    )
+    for word, count in pending_task_counts.items():
+        get_word_stats(word_stats, word).scheduled_task_count = int(count or 0)
+
     item_word_map = {learning_item.id: set(tokenize_words(learning_item.english_text)) for learning_item, _ in item_rows}
     direct_word_item_ids = {
         learning_item.id
@@ -95,13 +153,16 @@ def build_memory_dashboard(db: Session, user_id: UUID) -> MemoryDashboardRespons
         if learning_item.item_type == "word" and learning_item.source == WORD_MEMORY_SOURCE
     }
     review_rows = db.execute(
-        select(ReviewLog.learning_item_id, ReviewLog.review_mode, ReviewLog.is_correct, ReviewLog.reviewed_at)
+        select(ReviewLog.learning_item_id, ReviewLog.review_mode, ReviewLog.error_type, ReviewLog.is_correct, ReviewLog.reviewed_at)
         .where(ReviewLog.user_id == user_id, ReviewLog.learning_item_id.in_(direct_word_item_ids))
         .order_by(ReviewLog.reviewed_at.asc())
     ).all()
-    for learning_item_id, review_mode, is_correct, reviewed_at in review_rows:
+    for learning_item_id, review_mode, error_type, is_correct, reviewed_at in review_rows:
         for word in item_word_map.get(learning_item_id, set()):
             stats = get_word_stats(word_stats, word)
+            stats.error_type_counts = stats.error_type_counts or {}
+            if error_type:
+                stats.error_type_counts[error_type] = stats.error_type_counts.get(error_type, 0) + 1
             stats.review_count += 1
             stats.last_reviewed_at = reviewed_at
             if not is_correct:
@@ -116,23 +177,29 @@ def build_memory_dashboard(db: Session, user_id: UUID) -> MemoryDashboardRespons
                 stats.hinted_correct_count += 1
             elif review_mode.startswith("word-preview"):
                 stats.preview_correct_count += 1
+            elif review_mode.startswith("word-context"):
+                stats.context_correct_count += 1
 
     mistake_rows = db.execute(
-        select(MistakeLog.learning_item_id, MistakeLog.mistake_type, MistakeLog.expected_answer, MistakeLog.actual_answer).where(
+        select(MistakeLog.learning_item_id, MistakeLog.mistake_type, MistakeLog.error_type, MistakeLog.expected_answer, MistakeLog.actual_answer).where(
             MistakeLog.user_id == user_id,
             MistakeLog.is_resolved.is_(False),
         )
     ).all()
-    for learning_item_id, mistake_type, expected_answer, actual_answer in mistake_rows:
+    for learning_item_id, mistake_type, error_type, expected_answer, actual_answer in mistake_rows:
         mistake_words = extract_mistake_words(mistake_type, expected_answer, actual_answer)
         if len(mistake_words) == 0 and mistake_type == "word-spelling":
             mistake_words = list(item_word_map.get(learning_item_id, set()))
         for word in mistake_words:
-            get_word_stats(word_stats, word).mistake_count += 1
+            stats = get_word_stats(word_stats, word)
+            stats.mistake_count += 1
+            stats.error_type_counts = stats.error_type_counts or {}
+            if error_type:
+                stats.error_type_counts[error_type] = stats.error_type_counts.get(error_type, 0) + 2
 
     summaries = [summarize_word(stats, now) for stats in word_stats.values()]
     mastered_words = len([summary for summary in summaries if summary.status == "mastered"])
-    weak_words = len([summary for summary in summaries if summary.status == "weak"])
+    weak_words = len([summary for summary in summaries if summary.status in {"difficult", "teaching"}])
     learning_words = max(len(summaries) - mastered_words - weak_words, 0)
 
     memory_states = [memory_state for _, memory_state in item_rows if memory_state is not None]
@@ -214,27 +281,93 @@ def summarize_word(stats: WordStats, now: datetime) -> WordMasterySummary:
     interval = average(intervals)
     next_review_at = min(next_reviews) if next_reviews else None
     priority_score = calculate_word_priority(stats, strength, risk, next_review_at, now)
-    if strength >= 0.75 and stats.recall_correct_count >= 2 and stats.mistake_count == 0:
+    dominant_error_type = get_dominant_error_type(stats)
+    if strength >= 0.82 and stats.recall_correct_count >= 3 and stats.no_hint_correct_date_count >= 3 and stats.consecutive_correct_count >= 3 and stats.mistake_count == 0:
         status = "mastered"
-    elif stats.mistake_count > 0 or priority_score >= 0.65:
-        status = "weak"
+    elif strength >= 0.72 and stats.recall_correct_count >= 2 and stats.no_hint_correct_date_count >= 2 and stats.consecutive_error_count == 0:
+        status = "near_mastered"
+    elif stats.consecutive_error_count >= 3 or priority_score >= 0.78:
+        status = "difficult"
+    elif stats.mistake_count > 0 or (stats.preview_correct_count > 0 and stats.recall_correct_count == 0):
+        status = "teaching"
     else:
-        status = "learning"
+        status = "consolidating"
 
     return WordMasterySummary(
         word=stats.word,
         status=status,
+        status_label=MASTERY_STATUS_LABELS[status],
         memory_strength=round(strength, 2),
         forget_risk=round(risk, 2),
         priority_score=priority_score,
         review_count=stats.review_count,
         mistake_count=stats.mistake_count,
+        consecutive_correct_count=stats.consecutive_correct_count,
+        consecutive_error_count=stats.consecutive_error_count,
         recall_correct_count=stats.recall_correct_count,
         hinted_correct_count=stats.hinted_correct_count,
         preview_correct_count=stats.preview_correct_count,
+        context_correct_count=stats.context_correct_count,
+        hidden_recall_correct_count=stats.hidden_recall_correct_count,
+        no_hint_correct_date_count=stats.no_hint_correct_date_count,
+        dominant_error_type=dominant_error_type,
+        review_reason=build_review_reason(stats, risk, next_review_at, now, dominant_error_type),
+        recommended_task=build_recommended_task(stats, dominant_error_type),
+        scheduled_task_count=stats.scheduled_task_count,
         interval_days=round(interval, 1),
         next_review_at=next_review_at,
     )
+
+
+def get_dominant_error_type(stats: WordStats) -> str | None:
+    if not stats.error_type_counts:
+        return None
+    return max(stats.error_type_counts.items(), key=lambda item: item[1])[0]
+
+
+def build_review_reason(stats: WordStats, risk: float, next_review_at: datetime | None, now: datetime, error_type: str | None) -> str:
+    reasons: list[str] = []
+    if stats.consecutive_error_count >= 2:
+        reasons.append(f"连续错 {stats.consecutive_error_count} 次")
+    elif stats.mistake_count > 0:
+        reasons.append(f"还有 {stats.mistake_count} 次未解决错词记录")
+    if error_type:
+        reasons.append(ERROR_TYPE_LABELS.get(error_type, "拼写错误") + "较多")
+    if next_review_at is not None and next_review_at <= now:
+        overdue_hours = max((now - next_review_at).total_seconds() / 3600, 0.0)
+        if overdue_hours >= 1:
+            reasons.append(f"已超期 {round(overdue_hours, 1)} 小时")
+        else:
+            reasons.append("已经到复习时间")
+    elif risk >= 0.75:
+        reasons.append(f"遗忘风险 {round(risk * 100)}%")
+    if stats.preview_correct_count > 0 and stats.recall_correct_count == 0:
+        reasons.append("看答案后拼对，还没有无提示拼对")
+    if stats.no_hint_correct_date_count > 0 and stats.no_hint_correct_date_count < 3:
+        reasons.append(f"已有 {stats.no_hint_correct_date_count}/3 个不同日期无提示拼对")
+    if stats.scheduled_task_count > 0:
+        reasons.append(f"已安排 {stats.scheduled_task_count} 个专项任务")
+    if not reasons:
+        if stats.consecutive_correct_count >= 3:
+            return "连续无提示拼对，当前比较稳定。"
+        return "需要继续巩固，等待更多无提示拼写记录。"
+    return "，".join(reasons) + "。"
+
+
+def build_recommended_task(stats: WordStats, error_type: str | None) -> str:
+    if error_type == "first-letter":
+        return "看中文拼英文，并先听中文和英文发音"
+    if error_type in {"middle", "sequence"}:
+        return "按音节分段拼写"
+    if error_type in {"ending", "missing-letter", "extra-letter"}:
+        return "缺字母/词尾填空"
+    if error_type == "unknown" or stats.consecutive_error_count >= 3:
+        return "看 3 秒后隐藏，再凭记忆重拼"
+    if stats.recall_correct_count == 0 and stats.hinted_correct_count + stats.preview_correct_count > 0:
+        return "无提示看中文拼英文"
+    if stats.context_correct_count > stats.recall_correct_count:
+        return "脱离句子单独拼写"
+    return "放到短句里填空复习"
 
 
 def calculate_word_priority(stats: WordStats, strength: float, risk: float, next_review_at: datetime | None, now: datetime) -> float:

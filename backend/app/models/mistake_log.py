@@ -19,6 +19,7 @@ class MistakeLog(Base):
     user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     learning_item_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("learning_items.id", ondelete="CASCADE"), nullable=False, index=True)
     mistake_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    error_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     expected_answer: Mapped[str] = mapped_column(Text, nullable=False)
     actual_answer: Mapped[str] = mapped_column(Text, nullable=False)
     is_resolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
