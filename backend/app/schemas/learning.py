@@ -21,6 +21,13 @@ class LearningItemCreate(LearningItemBase):
 class LearningItemRead(LearningItemBase):
     id: UUID
     user_id: UUID
+    review_task_id: UUID | None = None
+    review_task_type: str | None = None
+    review_prompt: str | None = None
+    review_choices: list[str] = Field(default_factory=list)
+    review_answer: str | None = None
+    focus_words: list[str] = Field(default_factory=list)
+    source_item_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -66,6 +73,7 @@ class WordMistakeLogResponse(BaseModel):
 
 class WordReviewRequest(BaseModel):
     learning_item_id: UUID
+    review_task_id: UUID | None = None
     word: str = Field(min_length=1)
     score: int = Field(ge=0, le=5)
     review_mode: str = Field(min_length=1, max_length=32)

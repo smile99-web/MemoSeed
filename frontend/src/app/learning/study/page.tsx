@@ -401,6 +401,9 @@ function getFallbackEncouragement(courseName: string): { chineseText: string; en
 }
 
 function getDynamicReviewWords(item: LearningItem | null): string[] {
+  if (item?.focus_words && item.focus_words.length > 0) {
+    return item.focus_words.map(normalizeEnglishKey).filter(Boolean);
+  }
   if (!item?.source?.startsWith("AI 动态复习：")) {
     return [];
   }
@@ -609,6 +612,7 @@ function StudyContent() {
   const [wordConsecutiveCorrect, setWordConsecutiveCorrect] = useState<number[]>([]);
   const [mistakePracticeConsecutiveCorrect, setMistakePracticeConsecutiveCorrect] = useState(0);
   const [mistakePracticeTranslations, setMistakePracticeTranslations] = useState<Record<string, string>>({});
+  const [reviewTaskWordTranslation, setReviewTaskWordTranslation] = useState("");
   const [pendingMistakePracticeWords, setPendingMistakePracticeWords] = useState<string[]>([]);
   const [deferredDynamicWords, setDeferredDynamicWords] = useState<string[]>([]);
   const [hasFinalizedCurrentItem, setHasFinalizedCurrentItem] = useState(false);
@@ -654,6 +658,10 @@ function StudyContent() {
   const isDynamicFillBlankItem = dynamicReviewWordIndexes.length > 0;
   const currentMistakePracticeWord = mistakePracticeWords[mistakePracticeIndex] ?? "";
   const currentMistakePracticeTranslation = mistakePracticeTranslations[currentMistakePracticeWord] ?? "";
+  const isChoiceReviewTask = currentItem?.review_task_type === "english_to_chinese" || currentItem?.review_task_type === "match_translation";
+  const isSingleWordReviewTask = Boolean(currentItem?.review_task_type && currentItem.review_task_type !== "cloze_sentence");
+  const currentFocusedReviewWord = dynamicReviewWords[0] ?? (isSingleWordReviewTask || currentItem?.item_type === "word" ? currentWords[0] : "");
+  const isFocusedWordReview = Boolean(currentFocusedReviewWord);
   const progressPercent = items.length > 0 ? ((currentIndex + 1) / items.length) * 100 : 0;
   const packageId = packageIdFromUrl || resolvedPackageId;
   const nextCourse = useMemo<NextCourseTarget | null>(() => {
@@ -875,13 +883,34 @@ function StudyContent() {
     if (!(await waitInVoiceSequence(sequenceId, 1000))) {
       return;
     }
-    if (!(await speakInVoiceSequence(sequenceId, item.chinese_text, settings.ttsChineseVoice, "zh-CN", settings))) {
+    let chineseText = item.chinese_text;
+    let englishText = item.english_text;
+    const focusedWords = getDynamicReviewWords(item);
+    const focusedWord = focusedWords[0] ?? (item.review_task_type || item.item_type === "word" ? tokenizeEnglish(item.english_text)[0] : "");
+    if (focusedWord) {
+      try {
+        const accessToken = getAccessToken();
+        if (accessToken) {
+          const response = await translateLearningText(focusedWord, accessToken, modelSettingsRef.current);
+          chineseText = response.chinese_text;
+          setReviewTaskWordTranslation(response.chinese_text);
+          englishText = focusedWord;
+        } else {
+          chineseText = "中文释义准备中";
+          englishText = focusedWord;
+        }
+      } catch {
+        chineseText = "中文释义准备中";
+        englishText = focusedWord;
+      }
+    }
+    if (!(await speakInVoiceSequence(sequenceId, chineseText, settings.ttsChineseVoice, "zh-CN", settings))) {
       return;
     }
     if (!(await waitInVoiceSequence(sequenceId, 1000))) {
       return;
     }
-    await speakClearEnglish(sequenceId, item.english_text, settings, true);
+    await speakClearEnglish(sequenceId, englishText, settings, true);
   }, [speakClearEnglish, speakInVoiceSequence, waitInVoiceSequence]);
 
   const playChineseThenEnglish = useCallback(async function playChineseThenEnglish(chineseText: string, englishText: string, sequenceId = startVoiceSequence()) {
@@ -1031,6 +1060,7 @@ function StudyContent() {
     setMistakePracticeStatus("idle");
     setMistakePracticeErrorCount(0);
     setMistakePracticeTranslations({});
+    setReviewTaskWordTranslation("");
     setPendingMistakePractice([], {});
     setHasFinalizedCurrentItem(false);
     setStartedAt(Date.now());
@@ -1044,7 +1074,10 @@ function StudyContent() {
     if (currentItem?.chinese_text && currentItem.english_text) {
       void playCurrentItemIntro(currentItem, sequenceId);
     }
-  }, [clearMistakePracticePreview, clearWordPreview, currentItem, currentWords, dynamicReviewWordIndexes, playCurrentItemIntro, setPendingMistakePractice, startVoiceSequence, updateAnswerState]);
+    if (currentItem?.review_task_type === "hidden_recall" && currentWords[0]) {
+      window.setTimeout(() => showWordPreview(0, currentWords[0]), 1200);
+    }
+  }, [clearMistakePracticePreview, clearWordPreview, currentItem, currentWords, dynamicReviewWordIndexes, playCurrentItemIntro, setPendingMistakePractice, showWordPreview, startVoiceSequence, updateAnswerState]);
 
   useEffect(() => {
     if (answerState === "mistake-word-practice") {
@@ -1285,7 +1318,11 @@ function StudyContent() {
   }, [courseId, items.length, showCourseCompletion, startVoiceSequence]);
 
   function isGeneratedItem(item: LearningItem): boolean {
-    return item.id.startsWith("generated-");
+    return item.id.startsWith("generated-") || Boolean(item.review_task_id);
+  }
+
+  function getSourceLearningItemId(item: LearningItem): string | null {
+    return item.source_item_id ?? (item.id.startsWith("generated-") ? null : item.id);
   }
 
   function calculateSentenceScore(errorCount: number): number {
@@ -1300,12 +1337,17 @@ function StudyContent() {
 
   function recordWordMemoryReview(expectedWord: string, score: number, reviewMode: string, responseText = "", errorType?: string) {
     const accessToken = getAccessToken();
-    if (!accessToken || !currentItem || isGeneratedItem(currentItem)) {
+    if (!accessToken || !currentItem) {
+      return;
+    }
+    const learningItemId = getSourceLearningItemId(currentItem);
+    if (!learningItemId) {
       return;
     }
     void logWordReview(
       {
-        learning_item_id: currentItem.id,
+        learning_item_id: learningItemId,
+        review_task_id: currentItem.review_task_id,
         word: expectedWord,
         score,
         review_mode: reviewMode,
@@ -1327,7 +1369,7 @@ function StudyContent() {
       return;
     }
     if (!isStandalonePractice) {
-      recordWordMemoryReview(expectedWord, 4, "word-context", typedWord);
+      recordWordMemoryReview(expectedWord, 3, "word-context", typedWord);
       return;
     }
     recordWordMemoryReview(expectedWord, 5, "word-recall", typedWord);
@@ -1365,7 +1407,7 @@ function StudyContent() {
     setHasFinalizedCurrentItem(true);
     const accessToken = getAccessToken();
     const uniqueMistakenWords = getUniqueMistakenWords();
-    if (accessToken && !isGeneratedItem(currentItem)) {
+    if (accessToken && !currentItem.review_task_id && !isGeneratedItem(currentItem)) {
       try {
         await scheduleMemoryReview(accessToken, {
           learning_item_id: currentItem.id,
@@ -1414,6 +1456,7 @@ function StudyContent() {
         phonetic: null,
         difficulty_level: Math.min(Math.max(currentItem.difficulty_level, 1), 5),
         source: `AI 动态复习：${uniqueMistakenWords.join(", ")}`,
+        source_item_id: currentItem.id,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
@@ -1453,7 +1496,7 @@ function StudyContent() {
         updateAnswerState("sentence-complete");
         isCompletingSentenceRef.current = false;
         setFeedbackMessage("整句重拼完成。按空格进入下一句。");
-        await playChineseThenEnglish(currentItem.chinese_text, currentItem.english_text);
+        await playCurrentReviewCompletionAudio();
         return;
       }
       setPendingMistakePractice(uniqueMistakenWords, {});
@@ -1464,7 +1507,7 @@ function StudyContent() {
           ? `${dynamicSentenceFeedback} 本句有错词，按空格进入错词复习。`
           : "本句有错词，按空格进入错词复习。",
       );
-      await playChineseThenEnglish(currentItem.chinese_text, currentItem.english_text);
+      await playCurrentReviewCompletionAudio();
       return;
     }
 
@@ -1475,6 +1518,17 @@ function StudyContent() {
       setFeedbackMessage("整句重拼完全正确。按空格进入下一句。");
     } else {
       setFeedbackMessage(dynamicSentenceFeedback ? `${dynamicSentenceFeedback} 按空格进入下一句。` : "整句拼写正确。按空格进入下一句。");
+    }
+    await playCurrentReviewCompletionAudio();
+  }
+
+  async function playCurrentReviewCompletionAudio() {
+    if (!currentItem) {
+      return;
+    }
+    if (isFocusedWordReview && currentFocusedReviewWord) {
+      await playChineseThenEnglish(reviewTaskWordTranslation || "中文释义准备中", currentFocusedReviewWord);
+      return;
     }
     await playChineseThenEnglish(currentItem.chinese_text, currentItem.english_text);
   }
@@ -1590,10 +1644,11 @@ function StudyContent() {
       });
       setMistakenWords((current) => (current.includes(normalizedExpectedWord) ? current : [...current, normalizedExpectedWord]));
       const accessToken = getAccessToken();
-      if (accessToken && currentItem && !isGeneratedItem(currentItem)) {
-        void logWordMistake(currentItem.id, expectedWord, actualWord, accessToken, errorType).catch(() => undefined);
+      const learningItemId = currentItem ? getSourceLearningItemId(currentItem) : null;
+      if (accessToken && learningItemId) {
+        void logWordMistake(learningItemId, expectedWord, actualWord, accessToken, errorType).catch(() => undefined);
       }
-      if (nextErrorCount === 4 || (errorType === "unknown" && nextErrorCount >= 2)) {
+      if (nextErrorCount === 3 || (errorType === "unknown" && nextErrorCount >= 2)) {
         void playChineseThenEnglish(currentItem?.chinese_text ?? "", expectedWord);
         showWordPreview(index, expectedWord);
         return;
@@ -1613,7 +1668,7 @@ function StudyContent() {
 
     const prevErrorCount = wordErrorCounts[index] ?? 0;
 
-    if (prevErrorCount >= 4) {
+    if (prevErrorCount >= 3) {
       const nextConsecutive = (wordConsecutiveCorrect[index] ?? 0) + 1;
       setWordConsecutiveCorrect((current) => {
         const next = [...current];
@@ -1647,7 +1702,7 @@ function StudyContent() {
       });
     }
 
-    recordSuccessfulWordSpelling(expectedWord, currentRawAnswer, prevErrorCount, prevErrorCount >= 4, currentItem?.item_type === "word");
+    recordSuccessfulWordSpelling(expectedWord, currentRawAnswer, prevErrorCount, prevErrorCount >= 3, currentItem?.item_type === "word");
 
     setWordErrorCounts((current) => {
       const nextCounts = [...current];
@@ -1730,10 +1785,11 @@ function StudyContent() {
       setMistakePracticeStatus("incorrect");
       setMistakePracticeAnswer("");
       const accessToken = getAccessToken();
-      if (accessToken && currentItem && !isGeneratedItem(currentItem)) {
-        void logWordMistake(currentItem.id, expectedWord, mistakePracticeAnswer, accessToken, errorType).catch(() => undefined);
+      const learningItemId = currentItem ? getSourceLearningItemId(currentItem) : null;
+      if (accessToken && learningItemId) {
+        void logWordMistake(learningItemId, expectedWord, mistakePracticeAnswer, accessToken, errorType).catch(() => undefined);
       }
-      if (nextErrorCount === 4 || (errorType === "unknown" && nextErrorCount >= 2)) {
+      if (nextErrorCount === 3 || (errorType === "unknown" && nextErrorCount >= 2)) {
         await playChineseThenEnglish(currentMistakePracticeTranslation, expectedWord);
         showMistakePracticePreview(expectedWord);
         return;
@@ -1749,7 +1805,7 @@ function StudyContent() {
       return;
     }
 
-    if (mistakePracticeErrorCount >= 4) {
+    if (mistakePracticeErrorCount >= 3) {
       const nextConsecutive = mistakePracticeConsecutiveCorrect + 1;
       setMistakePracticeConsecutiveCorrect(nextConsecutive);
 
@@ -1764,7 +1820,7 @@ function StudyContent() {
       setMistakePracticeConsecutiveCorrect(0);
     }
 
-    recordSuccessfulWordSpelling(expectedWord, mistakePracticeAnswer, mistakePracticeErrorCount, mistakePracticeErrorCount >= 4, true);
+    recordSuccessfulWordSpelling(expectedWord, mistakePracticeAnswer, mistakePracticeErrorCount, mistakePracticeErrorCount >= 3, true);
 
     const nextIndex = mistakePracticeIndex + 1;
     if (currentItem) {
@@ -1809,6 +1865,40 @@ function StudyContent() {
       void playCurrentItemIntro(currentItem, respellSequenceId);
     }
     window.setTimeout(() => inputRefs.current[dynamicReviewWordIndexes[0] ?? 0]?.focus(), 0);
+  }
+
+  async function submitChoiceReviewTask(choice: string, isCorrect: boolean) {
+    if (!currentItem || !isChoiceReviewTask) {
+      return;
+    }
+    const accessToken = getAccessToken();
+    const learningItemId = getSourceLearningItemId(currentItem);
+    const word = currentWords[0] ?? "";
+    if (accessToken && learningItemId && word) {
+      try {
+        await logWordReview(
+          {
+            learning_item_id: learningItemId,
+            review_task_id: currentItem.review_task_id,
+            word,
+            score: isCorrect ? 4 : 1,
+            review_mode: `word-${currentItem.review_task_type}`,
+            response_text: choice,
+            error_type: isCorrect ? undefined : "meaning",
+            duration_seconds: 0,
+          },
+          accessToken,
+        );
+      } catch {
+        // Choice task telemetry should not stop the learning flow.
+      }
+    }
+    if (!isCorrect) {
+      setFeedbackMessage("这个选项不对，已加入错词专项复习。");
+      return;
+    }
+    updateAnswerState("sentence-complete");
+    setFeedbackMessage("选择正确。按空格进入下一步。");
   }
 
   function handleMistakePracticeKeyDown(event: KeyboardEvent<HTMLInputElement>) {
@@ -1902,7 +1992,9 @@ function StudyContent() {
     : "min-w-32 ipad:min-w-32 ipad:text-sm ipad-lg:min-w-36 ipad-lg:text-base";
   const displayChinesePrompt = isStudyFullscreen && answerState === "mistake-word-practice"
     ? currentMistakePracticeTranslation || currentItem?.chinese_text || ""
-    : currentItem?.chinese_text || "";
+    : isFocusedWordReview
+      ? reviewTaskWordTranslation || "中文释义准备中"
+      : currentItem?.chinese_text || "";
 
   return (
     <main className={isStudyFullscreen ? "flex min-h-[100dvh] flex-col overflow-y-auto bg-white text-slate-950" : "flex min-h-[100dvh] flex-col overflow-y-auto bg-slate-50 text-slate-950"}>
@@ -1952,7 +2044,25 @@ function StudyContent() {
 
             <div className={isStudyFullscreen ? "space-y-10 ipad:space-y-12 ipad-lg:space-y-14" : "mt-5 space-y-5 ipad:mt-5 ipad:space-y-4 ipad-lg:mt-6 ipad-lg:space-y-5"}>
               <p className={isStudyFullscreen ? "text-5xl font-semibold leading-tight text-slate-900 ipad:text-6xl ipad-lg:text-7xl" : "text-4xl font-semibold leading-tight text-slate-900 ipad:text-4xl ipad-lg:text-5xl"}>{displayChinesePrompt}</p>
-              {answerState === "mistake-word-practice" ? (
+              {isChoiceReviewTask ? (
+                <div className={isStudyFullscreen ? "mx-auto flex max-w-4xl flex-col items-center gap-6 ipad:gap-8" : "mx-auto flex max-w-xl flex-col items-center gap-4 rounded-lg border bg-slate-50 px-5 py-5 ipad:max-w-xl ipad:gap-4 ipad:px-6 ipad:py-5 ipad-lg:max-w-2xl ipad-lg:gap-5 ipad-lg:px-7 ipad-lg:py-6"}>
+                  <p className="text-4xl font-bold text-slate-900 ipad:text-5xl ipad-lg:text-6xl">{currentWords[0]}</p>
+                  <div className="grid w-full max-w-xl gap-3">
+                    {(reviewTaskWordTranslation ? [reviewTaskWordTranslation, "不是这个意思", "还需要再练"] : currentItem.review_choices && currentItem.review_choices.length > 0 ? currentItem.review_choices : ["中文释义准备中"]).map((choice, index) => (
+                      <Button
+                        className="justify-center px-4 py-5 text-base font-bold ipad:text-lg"
+                        disabled={answerState !== "typing" || choice === "中文释义准备中"}
+                        key={`${choice}-${index}`}
+                        onClick={() => void submitChoiceReviewTask(choice, choice === currentItem.review_answer || Boolean(reviewTaskWordTranslation && choice === reviewTaskWordTranslation))}
+                        type="button"
+                        variant="outline"
+                      >
+                        {choice}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              ) : answerState === "mistake-word-practice" ? (
                 <div className={isStudyFullscreen ? "mx-auto flex max-w-4xl flex-col items-center gap-6 ipad:gap-8" : "mx-auto flex max-w-xl flex-col items-center gap-4 rounded-lg border bg-slate-50 px-5 py-5 ipad:max-w-xl ipad:gap-4 ipad:px-6 ipad:py-5 ipad-lg:max-w-2xl ipad-lg:gap-5 ipad-lg:px-7 ipad-lg:py-6"}>
                   {!isStudyFullscreen ? (
                     <div className="space-y-1 ipad:space-y-2">
@@ -2041,7 +2151,7 @@ function StudyContent() {
                     </>
                   ) : (
                     <>
-                      <Button className={actionButtonClass} disabled={answerState !== "typing"} onClick={() => checkWord(activeWordIndex)} type="button">
+                      <Button className={actionButtonClass} disabled={answerState !== "typing" || isChoiceReviewTask} onClick={() => checkWord(activeWordIndex)} type="button">
                         {isDynamicFillBlankItem ? "判定填空" : "判定单词"}
                       </Button>
                       <Button className={actionButtonClass} onClick={handleSpeakEnglish} type="button" variant="secondary">朗读英文</Button>

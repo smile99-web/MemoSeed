@@ -20,6 +20,8 @@ from app.models.review_log import ReviewLog
 from app.models.study_time_log import StudyTimeLog
 from app.models.user import User
 from app.models.user_model_settings import UserModelSettings
+from app.models.word_memory_state import WordMemoryState
+from app.models.word_review_task import WordReviewTask
 from app.schemas.common import MessageResponse
 from app.services.secure_model_settings import encrypt_model_settings, public_model_settings
 
@@ -68,6 +70,12 @@ def export_user_data(
         ),
         "review_logs": serialize_models(db.scalars(select(ReviewLog).where(ReviewLog.user_id == current_user.id).order_by(ReviewLog.reviewed_at.asc())).all()),
         "mistake_logs": serialize_models(db.scalars(select(MistakeLog).where(MistakeLog.user_id == current_user.id).order_by(MistakeLog.occurred_at.asc())).all()),
+        "word_memory_states": serialize_models(
+            db.scalars(select(WordMemoryState).where(WordMemoryState.user_id == current_user.id).order_by(WordMemoryState.created_at.asc())).all()
+        ),
+        "word_review_tasks": serialize_models(
+            db.scalars(select(WordReviewTask).where(WordReviewTask.user_id == current_user.id).order_by(WordReviewTask.due_at.asc())).all()
+        ),
         "study_time_logs": serialize_models(
             db.scalars(select(StudyTimeLog).where(StudyTimeLog.user_id == current_user.id).order_by(StudyTimeLog.recorded_at.asc())).all()
         ),
@@ -94,6 +102,8 @@ def import_user_data(
         "course_packages": {},
         "courses": {},
         "learning_items": {},
+        "memory_states": {},
+        "word_memory_states": {},
     }
     summary = {
         "course_packages": 0,
@@ -102,6 +112,8 @@ def import_user_data(
         "memory_states": 0,
         "review_logs": 0,
         "mistake_logs": 0,
+        "word_memory_states": 0,
+        "word_review_tasks": 0,
         "study_time_logs": 0,
         "course_completion_logs": 0,
         "daily_plans": 0,
@@ -171,10 +183,18 @@ def import_user_data(
             forget_risk=as_float(row.get("forget_risk"), 1.0),
             repetition_count=as_int(row.get("repetition_count"), 0),
             lapse_count=as_int(row.get("lapse_count"), 0),
+            consecutive_correct_count=as_int(row.get("consecutive_correct_count"), 0),
+            consecutive_error_count=as_int(row.get("consecutive_error_count"), 0),
+            recall_correct_count=as_int(row.get("recall_correct_count"), 0),
+            hinted_correct_count=as_int(row.get("hinted_correct_count"), 0),
+            preview_correct_count=as_int(row.get("preview_correct_count"), 0),
+            context_correct_count=as_int(row.get("context_correct_count"), 0),
             last_reviewed_at=parse_datetime(row.get("last_reviewed_at")),
             next_review_at=parse_datetime(row.get("next_review_at")) or datetime.now(UTC),
         )
         db.add(memory_state)
+        db.flush()
+        id_maps["memory_states"][str(row.get("id"))] = memory_state.id
         summary["memory_states"] += 1
 
     for row in as_rows(payload.get("review_logs")):
@@ -186,6 +206,7 @@ def import_user_data(
                 user_id=current_user.id,
                 learning_item_id=learning_item_id,
                 review_mode=str(row.get("review_mode") or "import"),
+                error_type=str(row.get("error_type")) if row.get("error_type") is not None else None,
                 score=as_int(row.get("score"), 0),
                 is_correct=as_bool(row.get("is_correct")),
                 response_text=str(row.get("response_text")) if row.get("response_text") is not None else None,
@@ -204,6 +225,7 @@ def import_user_data(
                 user_id=current_user.id,
                 learning_item_id=learning_item_id,
                 mistake_type=str(row.get("mistake_type") or "import"),
+                error_type=str(row.get("error_type")) if row.get("error_type") is not None else None,
                 expected_answer=str(row.get("expected_answer") or ""),
                 actual_answer=str(row.get("actual_answer") or ""),
                 is_resolved=as_bool(row.get("is_resolved")),
@@ -212,6 +234,63 @@ def import_user_data(
             )
         )
         summary["mistake_logs"] += 1
+
+    for row in as_rows(payload.get("word_memory_states")):
+        word = str(row.get("word") or "").strip().lower()
+        if not word:
+            continue
+        word_state = WordMemoryState(
+            user_id=current_user.id,
+            word=word,
+            learning_item_id=id_maps["learning_items"].get(str(row.get("learning_item_id"))) if row.get("learning_item_id") else None,
+            memory_state_id=id_maps["memory_states"].get(str(row.get("memory_state_id"))) if row.get("memory_state_id") else None,
+            status=str(row.get("status") or "teaching"),
+            memory_strength=as_float(row.get("memory_strength"), 0.0),
+            forget_risk=as_float(row.get("forget_risk"), 1.0),
+            priority_score=as_float(row.get("priority_score"), 1.0),
+            consecutive_correct_count=as_int(row.get("consecutive_correct_count"), 0),
+            consecutive_error_count=as_int(row.get("consecutive_error_count"), 0),
+            recall_correct_count=as_int(row.get("recall_correct_count"), 0),
+            hinted_correct_count=as_int(row.get("hinted_correct_count"), 0),
+            preview_correct_count=as_int(row.get("preview_correct_count"), 0),
+            context_correct_count=as_int(row.get("context_correct_count"), 0),
+            hidden_recall_correct_count=as_int(row.get("hidden_recall_correct_count"), 0),
+            no_hint_correct_date_count=as_int(row.get("no_hint_correct_date_count"), 0),
+            last_no_hint_correct_date=parse_date(row.get("last_no_hint_correct_date")),
+            last_answer_seen_at=parse_datetime(row.get("last_answer_seen_at")),
+            error_type_counts=as_dict(row.get("error_type_counts")),
+            task_type_counts=as_dict(row.get("task_type_counts")),
+            next_micro_review_at=parse_datetime(row.get("next_micro_review_at")),
+            micro_review_stage=as_int(row.get("micro_review_stage"), 0),
+            last_reviewed_at=parse_datetime(row.get("last_reviewed_at")),
+        )
+        db.add(word_state)
+        db.flush()
+        id_maps["word_memory_states"][str(row.get("id"))] = word_state.id
+        summary["word_memory_states"] += 1
+
+    for row in as_rows(payload.get("word_review_tasks")):
+        word = str(row.get("word") or "").strip().lower()
+        if not word:
+            continue
+        db.add(
+            WordReviewTask(
+                user_id=current_user.id,
+                word_memory_state_id=id_maps["word_memory_states"].get(str(row.get("word_memory_state_id"))) if row.get("word_memory_state_id") else None,
+                learning_item_id=id_maps["learning_items"].get(str(row.get("learning_item_id"))) if row.get("learning_item_id") else None,
+                word=word,
+                task_type=str(row.get("task_type") or "chinese_to_english"),
+                prompt_text=str(row.get("prompt_text") or word),
+                expected_answer=str(row.get("expected_answer") or word),
+                choices=row.get("choices") if isinstance(row.get("choices"), list) else [],
+                priority_score=as_float(row.get("priority_score"), 1.0),
+                status=str(row.get("status") or "pending"),
+                source=str(row.get("source") or "import"),
+                due_at=parse_datetime(row.get("due_at")) or datetime.now(UTC),
+                completed_at=parse_datetime(row.get("completed_at")),
+            )
+        )
+        summary["word_review_tasks"] += 1
 
     for row in as_rows(payload.get("study_time_logs")):
         db.add(

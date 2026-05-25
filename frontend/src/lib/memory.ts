@@ -17,15 +17,25 @@ export interface ReviewScorePayload {
 
 export interface WordMasterySummary {
   word: string;
-  status: "mastered" | "learning" | "weak";
+  status: "difficult" | "teaching" | "consolidating" | "near_mastered" | "mastered";
+  status_label: string;
   memory_strength: number;
   forget_risk: number;
   priority_score: number;
   review_count: number;
   mistake_count: number;
+  consecutive_correct_count: number;
+  consecutive_error_count: number;
   recall_correct_count: number;
   hinted_correct_count: number;
   preview_correct_count: number;
+  context_correct_count: number;
+  hidden_recall_correct_count: number;
+  no_hint_correct_date_count: number;
+  dominant_error_type: string | null;
+  review_reason: string;
+  recommended_task: string;
+  scheduled_task_count: number;
   interval_days: number;
   next_review_at: string | null;
 }

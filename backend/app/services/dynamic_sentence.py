@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -23,6 +24,7 @@ class DynamicSentenceResult:
 COMMON_FILLER_WORDS = ["I", "can", "see", "the", "and", "like", "my", "this", "is", "a"]
 MIN_DYNAMIC_SENTENCE_WORDS = 5
 MAX_DYNAMIC_SENTENCE_WORDS = 7
+WORD_MEMORY_SOURCE = "word-memory"
 
 
 def unique_preserve_order(words: list[str]) -> list[str]:
@@ -46,7 +48,13 @@ def build_mastery_word_pools(db: Session, user_id: UUID, course_id: UUID | None)
     weak_words: list[str] = []
     for learning_item, memory_state in db.execute(statement).all():
         item_words = tokenize_words(learning_item.english_text)
-        if memory_state is not None and memory_state.memory_strength >= 0.72 and memory_state.lapse_count == 0:
+        is_direct_word = learning_item.item_type == "word" and learning_item.source == WORD_MEMORY_SOURCE
+        if is_direct_word and memory_state is not None:
+            if memory_state.memory_strength >= 0.72 and memory_state.lapse_count <= 1:
+                candidate_known_words.extend(item_words)
+            else:
+                weak_words.extend(item_words)
+        elif memory_state is not None and memory_state.memory_strength >= 0.65 and memory_state.lapse_count <= 1:
             candidate_known_words.extend(item_words)
         else:
             candidate_known_words.extend(item_words)

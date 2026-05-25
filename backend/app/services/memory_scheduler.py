@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import ceil, exp
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -13,7 +14,7 @@ from app.models.memory_state import MemoryState
 from app.models.mistake_log import MistakeLog
 from app.models.review_log import ReviewLog
 from app.models.user_model_settings import UserModelSettings
-from app.utils import clamp
+from app.utils import clamp, normalize_word, tokenize_words
 
 FSRS_AGAIN = 1
 FSRS_HARD = 2
@@ -22,7 +23,7 @@ FSRS_EASY = 4
 FSRS_DECAY = -0.5
 FSRS_FACTOR = 19 / 81
 FSRS_TARGET_RETENTION = 0.9
-MIN_FSRS_DIFFICULTY = 1.0
+MIN_FSRS_DIFFICULTY = 1.3
 MAX_FSRS_DIFFICULTY = 10.0
 DEFAULT_FSRS_DIFFICULTY = 5.0
 MIN_STABILITY_DAYS = 5 / 1440
@@ -52,6 +53,43 @@ FSRS_WEIGHTS = (
     0.6621,
 )
 FSRS_WEIGHTS_SETTING_KEY = "fsrsWeights"
+LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
+WORD_MEMORY_SOURCE = "word-memory"
+EASY_FUNCTION_WORDS = {
+    "a",
+    "an",
+    "am",
+    "are",
+    "be",
+    "can",
+    "do",
+    "go",
+    "he",
+    "i",
+    "in",
+    "is",
+    "it",
+    "me",
+    "my",
+    "of",
+    "on",
+    "she",
+    "the",
+    "to",
+    "we",
+    "you",
+}
+HARD_ABSTRACT_WORDS = {
+    "because",
+    "beautiful",
+    "different",
+    "important",
+    "interesting",
+    "remember",
+    "student",
+    "teacher",
+    "together",
+}
 
 FIRST_SUCCESS_DELAYS = {
     FSRS_HARD: timedelta(minutes=10),
@@ -154,7 +192,19 @@ def calculate_review_priority(memory_state: MemoryState, now: datetime) -> float
     overdue_hours = max((now - memory_state.next_review_at).total_seconds() / 3600, 0.0)
     overdue_boost = min(overdue_hours / 24, 1.0) * 0.25
     lapse_boost = min(memory_state.lapse_count * 0.04, 0.2)
-    return round(clamp(current_risk + overdue_boost + lapse_boost, 0.0, 1.0), 4)
+    error_boost = min(memory_state.consecutive_error_count * 0.08, 0.24)
+    recent_practice_penalty = 0.0
+    if memory_state.last_reviewed_at is not None:
+        minutes_since_review = max((now - memory_state.last_reviewed_at).total_seconds() / 60, 0.0)
+        if minutes_since_review < 3:
+            recent_practice_penalty = 0.22
+        elif minutes_since_review < 30:
+            recent_practice_penalty = 0.12
+        elif minutes_since_review < 120:
+            recent_practice_penalty = 0.06
+    if memory_state.consecutive_error_count > 0:
+        recent_practice_penalty *= 0.35
+    return round(clamp(current_risk + overdue_boost + lapse_boost + error_boost - recent_practice_penalty, 0.0, 1.0), 4)
 
 
 def next_fsrs_difficulty(current_difficulty: float, rating: int, weights: tuple[float, ...] = FSRS_WEIGHTS) -> float:
@@ -195,12 +245,42 @@ def calculate_fsrs_interval(stability_days: float) -> timedelta:
     return timedelta(days=constrain_stability(interval_days))
 
 
-def calculate_failure_delay(score: int, lapse_count: int) -> timedelta:
-    if score <= 1 or lapse_count >= 3:
-        return timedelta(minutes=5)
+def calculate_failure_delay(score: int, lapse_count: int, now: datetime) -> timedelta:
+    if lapse_count <= 1:
+        return timedelta(minutes=3)
     if lapse_count == 2:
-        return timedelta(minutes=20)
-    return timedelta(minutes=30)
+        return timedelta(minutes=10)
+    if lapse_count == 3:
+        return timedelta(minutes=30 if score <= 1 else 20)
+
+    local_now = now.astimezone(LOCAL_TIMEZONE)
+    end_of_day = local_now.replace(hour=20, minute=0, second=0, microsecond=0)
+    if end_of_day <= local_now:
+        end_of_day = local_now.replace(hour=21, minute=30, second=0, microsecond=0)
+    delay = end_of_day.astimezone(UTC) - now
+    return max(delay, timedelta(minutes=45))
+
+
+def estimate_item_difficulty_adjustment(learning_item: LearningItem, rating: int) -> float:
+    words = tokenize_words(learning_item.english_text)
+    adjustment = (learning_item.difficulty_level - 3) * 0.35
+    if learning_item.item_type == "sentence":
+        adjustment += 0.9
+    elif learning_item.item_type == "phrase":
+        adjustment += 0.45
+    elif learning_item.item_type == "word":
+        word = normalize_word(words[0]) if words else ""
+        if word in EASY_FUNCTION_WORDS or len(word) <= 3:
+            adjustment -= 1.0
+        if len(word) >= 8:
+            adjustment += 0.8
+        elif len(word) >= 6:
+            adjustment += 0.35
+        if word in HARD_ABSTRACT_WORDS:
+            adjustment += 0.75
+    if rating == FSRS_AGAIN:
+        adjustment += 0.5
+    return adjustment
 
 
 def adjust_delay_for_item_type(delay: timedelta, item_type: str) -> timedelta:
@@ -212,6 +292,43 @@ def adjust_delay_for_item_type(delay: timedelta, item_type: str) -> timedelta:
     if item_type == "phrase":
         return max(timedelta(days=1), delay * 0.85)
     return delay
+
+
+def adjust_delay_for_learning_item(delay: timedelta, learning_item: LearningItem, memory_state: MemoryState) -> timedelta:
+    delay = adjust_delay_for_item_type(delay, learning_item.item_type)
+    if delay < timedelta(days=1):
+        return delay
+
+    words = tokenize_words(learning_item.english_text)
+    if learning_item.item_type == "word":
+        word = normalize_word(words[0]) if words else ""
+        if word in EASY_FUNCTION_WORDS and memory_state.lapse_count == 0:
+            delay *= 1.25
+        if len(word) >= 8 or word in HARD_ABSTRACT_WORDS or memory_state.lapse_count >= 2:
+            delay *= 0.75
+    if learning_item.difficulty_level >= 4:
+        delay *= 0.85
+    elif learning_item.difficulty_level <= 2 and memory_state.lapse_count == 0:
+        delay *= 1.1
+    return max(timedelta(days=1), delay)
+
+
+def update_memory_counters(memory_state: MemoryState, is_correct: bool, review_mode: str) -> None:
+    if is_correct:
+        memory_state.consecutive_correct_count += 1
+        memory_state.consecutive_error_count = 0
+        if review_mode.startswith("word-recall"):
+            memory_state.recall_correct_count += 1
+        elif review_mode.startswith("word-hinted"):
+            memory_state.hinted_correct_count += 1
+        elif review_mode.startswith("word-preview"):
+            memory_state.preview_correct_count += 1
+        elif review_mode.startswith("word-context"):
+            memory_state.context_correct_count += 1
+        return
+
+    memory_state.consecutive_error_count += 1
+    memory_state.consecutive_correct_count = 0
 
 
 def calculate_interval_days(delay: timedelta) -> int:
@@ -248,6 +365,7 @@ def schedule_memory_review(
     review_mode: str,
     response_text: str | None,
     duration_seconds: int,
+    error_type: str | None = None,
 ) -> MemoryScheduleResult:
     if score < 0 or score > 5:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Score must be between 0 and 5")
@@ -266,6 +384,7 @@ def schedule_memory_review(
     previous_retrievability = calculate_fsrs_retrievability(elapsed_days_since_last_review(memory_state, now), previous_stability_days)
     current_difficulty = constrain_difficulty(memory_state.ease_factor or DEFAULT_FSRS_DIFFICULTY)
     next_difficulty = next_fsrs_difficulty(current_difficulty, rating, fsrs_weights)
+    next_difficulty = constrain_difficulty(next_difficulty + estimate_item_difficulty_adjustment(learning_item, rating) * (0.4 if previous_repetition_count == 0 else 0.15))
 
     if is_correct:
         memory_state.repetition_count += 1
@@ -282,6 +401,7 @@ def schedule_memory_review(
     else:
         memory_state.repetition_count = 0
         memory_state.lapse_count += 1
+    update_memory_counters(memory_state, is_correct, review_mode)
 
     if previous_repetition_count == 0:
         next_stability_days = initial_fsrs_stability(rating, fsrs_weights)
@@ -292,13 +412,13 @@ def schedule_memory_review(
 
     memory_state.ease_factor = next_difficulty
     if not is_correct:
-        review_delay = calculate_failure_delay(score, memory_state.lapse_count)
+        review_delay = calculate_failure_delay(score, memory_state.lapse_count, now)
     elif previous_repetition_count == 0:
         review_delay = FIRST_SUCCESS_DELAYS.get(rating, timedelta(days=1))
     else:
         review_delay = calculate_fsrs_interval(next_stability_days)
 
-    review_delay = adjust_delay_for_item_type(review_delay, learning_item.item_type)
+    review_delay = adjust_delay_for_learning_item(review_delay, learning_item, memory_state)
     memory_state.interval_days = calculate_interval_days(review_delay)
     if is_correct:
         next_retrievability_at_due = calculate_fsrs_retrievability(review_delay.total_seconds() / 86400, next_stability_days)
@@ -314,6 +434,7 @@ def schedule_memory_review(
         user_id=user_id,
         learning_item_id=learning_item.id,
         review_mode=review_mode,
+        error_type=error_type,
         score=score,
         is_correct=is_correct,
         response_text=response_text,
@@ -327,6 +448,7 @@ def schedule_memory_review(
             user_id=user_id,
             learning_item_id=learning_item.id,
             mistake_type=review_mode,
+            error_type=error_type,
             expected_answer=learning_item.english_text,
             actual_answer=response_text or "",
             is_resolved=False,

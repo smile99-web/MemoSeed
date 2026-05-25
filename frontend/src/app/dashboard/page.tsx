@@ -10,9 +10,11 @@ import { getAccessToken } from "@/lib/auth";
 import { fitFsrsParameters, getMemoryDashboard, MemoryDashboard, WordMasterySummary } from "@/lib/memory";
 
 const statusLabels: Record<WordMasterySummary["status"], string> = {
+  difficult: "困难词",
+  teaching: "教学中",
+  consolidating: "巩固中",
+  near_mastered: "接近掌握",
   mastered: "已掌握",
-  learning: "学习中",
-  weak: "未掌握",
 };
 
 function formatPercent(value: number): string {
@@ -63,7 +65,7 @@ function WordTable({ title, words }: { title: string; words: WordMasterySummary[
     <Card>
       <CardHeader>
         <CardTitle className="ipad:text-xl">{title}</CardTitle>
-        <CardDescription className="ipad:text-base">显示已进入复习记录的单词，按记忆强度、错误次数和遗忘风险排序。</CardDescription>
+        <CardDescription className="ipad:text-base">显示已进入单词级复习记录的单词，按综合优先级、错误类型和遗忘风险排序。</CardDescription>
       </CardHeader>
       <CardContent>
         {words.length === 0 ? (
@@ -78,8 +80,10 @@ function WordTable({ title, words }: { title: string; words: WordMasterySummary[
                   <th className="px-3 py-2">优先级</th>
                   <th className="px-3 py-2">强度</th>
                   <th className="px-3 py-2">风险</th>
-                  <th className="px-3 py-2">复习</th>
+                  <th className="px-3 py-2">连续</th>
                   <th className="px-3 py-2">错次</th>
+                  <th className="px-3 py-2">推荐任务</th>
+                  <th className="px-3 py-2">为什么复习</th>
                   <th className="px-3 py-2">下次复习</th>
                 </tr>
               </thead>
@@ -87,12 +91,14 @@ function WordTable({ title, words }: { title: string; words: WordMasterySummary[
                 {words.map((word) => (
                   <tr className="border-t" key={`${title}-${word.word}`}>
                     <td className="px-3 py-2 font-medium">{word.word}</td>
-                    <td className="px-3 py-2">{statusLabels[word.status]}</td>
+                    <td className="px-3 py-2">{word.status_label || statusLabels[word.status]}</td>
                     <td className="px-3 py-2">{formatPercent(word.priority_score)}</td>
                     <td className="px-3 py-2">{formatPercent(word.memory_strength)}</td>
                     <td className="px-3 py-2">{formatPercent(word.forget_risk)}</td>
-                    <td className="px-3 py-2">{word.review_count}</td>
+                    <td className="px-3 py-2">对 {word.consecutive_correct_count} / 错 {word.consecutive_error_count}</td>
                     <td className="px-3 py-2">{word.mistake_count}</td>
+                    <td className="px-3 py-2">{word.recommended_task}{word.scheduled_task_count > 0 ? `（${word.scheduled_task_count} 个）` : ""}</td>
+                    <td className="px-3 py-2 max-w-[14rem] text-muted-foreground">{word.review_reason}</td>
                     <td className="px-3 py-2">{formatDateTime(word.next_review_at)}</td>
                   </tr>
                 ))}
@@ -260,7 +266,7 @@ export default function DashboardPage() {
           <>
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
               <StatCard label="已掌握单词" value={dashboard.mastered_words} hint={`共 ${dashboard.total_words} 个单词，已掌握 ${dashboard.mastered_words} 个`} />
-              <StatCard label="未掌握单词" value={dashboard.weak_words} hint={`${dashboard.learning_words} 个仍在学习中`} />
+              <StatCard label="困难/教学中单词" value={dashboard.weak_words} hint={`${dashboard.learning_words} 个正在巩固或接近掌握`} />
               <StatCard label="复习准确率" value={formatPercent(dashboard.accuracy_rate)} hint={`${dashboard.correct_reviews} / ${dashboard.total_reviews} 次复习正确`} />
               <StatCard label="下次复习" value={formatDateTime(dashboard.next_review_at)} hint={`${dashboard.due_now_count} 项已到期，${dashboard.overdue_count} 项超时`} />
             </div>
