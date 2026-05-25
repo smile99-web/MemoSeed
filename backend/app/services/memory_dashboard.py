@@ -62,6 +62,7 @@ MASTERY_STATUS_LABELS = {
 
 ERROR_TYPE_LABELS = {
     "first-letter": "首字母错误",
+    "meaning": "词义理解错误",
     "middle": "中间结构错误",
     "ending": "词尾错误",
     "sequence": "字母顺序错误",
@@ -356,13 +357,15 @@ def build_review_reason(stats: WordStats, risk: float, next_review_at: datetime 
 
 def build_recommended_task(stats: WordStats, error_type: str | None) -> str:
     if error_type == "first-letter":
-        return "看中文拼英文，并先听中文和英文发音"
+        return "先确认词义，再听首音拼首字母"
+    if error_type == "meaning":
+        return "英文选中文，再看中文拼英文"
     if error_type in {"middle", "sequence"}:
-        return "按音节分段拼写"
+        return "按音节分段，再做缺字母题"
     if error_type in {"ending", "missing-letter", "extra-letter"}:
-        return "缺字母/词尾填空"
+        return "重点练词尾和字母数量"
     if error_type == "unknown" or stats.consecutive_error_count >= 3:
-        return "看 3 秒后隐藏，再凭记忆重拼"
+        return "看 5 秒后隐藏，再凭记忆重拼"
     if stats.recall_correct_count == 0 and stats.hinted_correct_count + stats.preview_correct_count > 0:
         return "无提示看中文拼英文"
     if stats.context_correct_count > stats.recall_correct_count:

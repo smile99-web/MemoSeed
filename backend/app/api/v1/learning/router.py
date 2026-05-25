@@ -203,9 +203,28 @@ def list_due_review_items(
             WordReviewTask.due_at <= now,
         )
         .order_by(WordReviewTask.priority_score.desc(), WordReviewTask.due_at.asc())
-        .limit(capped_limit)
+        .limit(capped_limit * 3)
     ).all()
-    task_review_items = [build_micro_task_learning_item(task, source_item, current_user) for task, source_item in task_rows]
+    task_review_items: list[LearningItemRead] = []
+    queued_task_words: set[str] = set()
+    deferred_task_rows: list[tuple[WordReviewTask, LearningItem | None]] = []
+    for task, source_item in task_rows:
+        if task.word in queued_task_words:
+            deferred_task_rows.append((task, source_item))
+            continue
+        if source_item is not None and not can_include(source_item):
+            continue
+        task_review_items.append(build_micro_task_learning_item(task, source_item, current_user))
+        queued_task_words.add(task.word)
+        if len(task_review_items) >= capped_limit:
+            break
+    if len(task_review_items) < capped_limit:
+        for task, source_item in deferred_task_rows:
+            if source_item is not None and not can_include(source_item):
+                continue
+            task_review_items.append(build_micro_task_learning_item(task, source_item, current_user))
+            if len(task_review_items) >= capped_limit:
+                break
 
     mistake_statement = (
         select(MistakeLog, LearningItem)

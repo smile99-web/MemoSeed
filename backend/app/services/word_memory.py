@@ -24,6 +24,28 @@ TASK_TYPE_LABELS = {
     "recall_word": "无提示拼写",
 }
 
+ERROR_TYPE_TASK_STRATEGIES = {
+    "first-letter": ["english_to_chinese", "chinese_to_english", "listen_spell", "cloze_sentence"],
+    "meaning": ["english_to_chinese", "match_translation", "chinese_to_english", "cloze_sentence"],
+    "middle": ["missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
+    "sequence": ["missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
+    "ending": ["missing_letter", "cloze_sentence", "hidden_recall", "recall_word"],
+    "missing-letter": ["missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
+    "extra-letter": ["missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
+    "unknown": ["hidden_recall", "chinese_to_english", "listen_spell", "missing_letter", "cloze_sentence"],
+}
+
+TEACHING_TIPS = {
+    "first-letter": "先确认中文意思，再听首音，最后拼首字母。",
+    "meaning": "先把中文意思和英文单词配上，再进入拼写。",
+    "middle": "按音节或字母块拆开，中间部分慢慢拼。",
+    "sequence": "先看清字母顺序，再用缺字母题固定视觉记忆。",
+    "ending": "重点看词尾，注意后缀、时态或单复数。",
+    "missing-letter": "先数清字母个数，再补缺失位置。",
+    "extra-letter": "先数清字母个数，去掉多余字母。",
+    "unknown": "先看 5 秒建立印象，再隐藏重拼。",
+}
+
 
 def get_or_create_word_memory_state(
     db: Session,
@@ -138,12 +160,12 @@ def schedule_micro_review_tasks_for_mistake(
 ) -> None:
     now = now or datetime.now(UTC)
     cancel_future_pending_tasks(db, user_id, word_state.word)
-    plan = build_micro_review_plan(now, word_state.consecutive_error_count, error_type)
+    plan = build_micro_review_plan(now, word_state, error_type)
     word_state.micro_review_stage += 1
     word_state.next_micro_review_at = plan[0][1] if plan else word_state.next_micro_review_at
 
     task_counts = dict(word_state.task_type_counts or {})
-    for task_type, due_at in plan:
+    for task_type, due_at, priority_multiplier in plan:
         task_counts[task_type] = int(task_counts.get(task_type, 0)) + 1
         db.add(
             WordReviewTask(
@@ -155,9 +177,9 @@ def schedule_micro_review_tasks_for_mistake(
                 prompt_text=build_task_prompt(task_type, word_state.word, prompt_text),
                 expected_answer=word_state.word,
                 choices=build_task_choices(task_type, word_state.word, prompt_text),
-                priority_score=word_state.priority_score,
+                priority_score=round(min(max(word_state.priority_score * priority_multiplier, 0.05), 1.0), 2),
                 status="pending",
-                source=f"word-memory:{error_type}",
+                source=f"word-memory:{error_type}:{TEACHING_TIPS.get(error_type, '专项复习')}",
                 due_at=due_at,
             )
         )
@@ -176,26 +198,56 @@ def cancel_future_pending_tasks(db: Session, user_id: UUID, word: str) -> None:
         task.status = "superseded"
 
 
-def build_micro_review_plan(now: datetime, consecutive_error_count: int, error_type: str) -> list[tuple[str, datetime]]:
+def build_micro_review_plan(now: datetime, word_state: WordMemoryState, error_type: str) -> list[tuple[str, datetime, float]]:
     local_now = now.astimezone(LOCAL_TIMEZONE)
     end_of_day = local_now.replace(hour=20, minute=0, second=0, microsecond=0)
     if end_of_day <= local_now:
         end_of_day = local_now + timedelta(hours=2)
     end_of_day = end_of_day.astimezone(UTC)
 
-    first_task = "hidden_recall" if error_type == "unknown" or consecutive_error_count >= 3 else "chinese_to_english"
-    second_task = "missing_letter" if error_type in {"middle", "ending", "sequence", "missing-letter", "extra-letter"} else "listen_spell"
-    return [
-        (first_task, now),
-        (second_task, now + timedelta(minutes=3)),
-        ("listen_spell", now + timedelta(minutes=10)),
-        ("english_to_chinese", now + timedelta(minutes=20)),
-        ("match_translation", now + timedelta(minutes=30)),
-        ("cloze_sentence", end_of_day),
-        ("chinese_to_english", now + timedelta(days=1)),
-        ("cloze_sentence", now + timedelta(days=3)),
-        ("recall_word", now + timedelta(days=7)),
+    task_sequence = choose_task_sequence(word_state, error_type)
+    same_day_offsets = [
+        timedelta(0),
+        timedelta(minutes=3),
+        timedelta(minutes=10),
+        timedelta(minutes=20),
+        timedelta(minutes=30),
+        end_of_day - now,
     ]
+    long_term_tasks = ["chinese_to_english", "cloze_sentence", "recall_word"]
+    long_term_offsets = [timedelta(days=1), timedelta(days=3), timedelta(days=7)]
+    if word_state.consecutive_error_count >= 4:
+        long_term_tasks.insert(0, "hidden_recall")
+        long_term_offsets.insert(0, timedelta(hours=2))
+
+    plan: list[tuple[str, datetime, float]] = []
+    for index, task_type in enumerate(task_sequence[: len(same_day_offsets)]):
+        delay = max(same_day_offsets[index], timedelta(0))
+        plan.append((task_type, now + delay, max(1.0 - index * 0.08, 0.62)))
+    for index, task_type in enumerate(long_term_tasks):
+        plan.append((task_type, now + long_term_offsets[index], max(0.72 - index * 0.08, 0.5)))
+    return plan
+
+
+def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[str]:
+    base_sequence = ERROR_TYPE_TASK_STRATEGIES.get(error_type, ["chinese_to_english", "listen_spell", "missing_letter", "cloze_sentence"])
+    if word_state.consecutive_error_count >= 3 and "hidden_recall" not in base_sequence[:2]:
+        base_sequence = ["hidden_recall", *base_sequence]
+    if word_state.preview_correct_count > word_state.recall_correct_count and "recall_word" not in base_sequence:
+        base_sequence = [*base_sequence, "recall_word"]
+
+    task_counts = {str(key): int(value or 0) for key, value in (word_state.task_type_counts or {}).items()}
+    deduped_sequence: list[str] = []
+    for task_type in base_sequence:
+        if task_type not in deduped_sequence:
+            deduped_sequence.append(task_type)
+    fallback_tasks = ["chinese_to_english", "listen_spell", "missing_letter", "english_to_chinese", "cloze_sentence", "recall_word"]
+    for task_type in fallback_tasks:
+        if task_type not in deduped_sequence:
+            deduped_sequence.append(task_type)
+
+    first_task = min(deduped_sequence[:4], key=lambda task_type: task_counts.get(task_type, 0))
+    return [first_task, *[task_type for task_type in deduped_sequence if task_type != first_task]]
 
 
 def build_task_prompt(task_type: str, word: str, fallback_prompt: str) -> str:
@@ -206,7 +258,7 @@ def build_task_prompt(task_type: str, word: str, fallback_prompt: str) -> str:
     if task_type == "match_translation":
         return f"把 {word} 和正确中文配对"
     if task_type == "missing_letter":
-        return f"补全缺失字母：{mask_middle_letters(word)}"
+        return f"补全缺失字母：{mask_learning_letters(word)}"
     if task_type == "cloze_sentence":
         return fallback_prompt or f"在短句中填入 {word}"
     if task_type == "hidden_recall":
@@ -227,6 +279,14 @@ def mask_middle_letters(word: str) -> str:
     if len(word) <= 2:
         return "_ " * len(word)
     return " ".join([word[0], *("_" for _ in word[1:-1]), word[-1]])
+
+
+def mask_learning_letters(word: str) -> str:
+    if len(word) <= 2:
+        return "_ " * len(word)
+    if len(word) <= 5:
+        return " ".join([word[0], *("_" for _ in word[1:])])
+    return " ".join([word[0], "_", "_", *list(word[3:-2]), "_", word[-1]])
 
 
 def complete_word_review_task(db: Session, user_id: UUID, task_id: UUID | None, is_correct: bool) -> None:

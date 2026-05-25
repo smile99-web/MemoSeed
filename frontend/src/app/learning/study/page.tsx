@@ -225,6 +225,47 @@ function maskWordByIndexes(word: string, visibleIndexes: Set<number>): string {
     .join(" ");
 }
 
+function buildReviewTaskInstruction(taskType: string | undefined, word: string): string {
+  const normalizedWord = normalizeEnglishKey(word);
+  if (!taskType || !normalizedWord) {
+    return "";
+  }
+  if (taskType === "listen_spell") {
+    return "听英文发音后拼写。";
+  }
+  if (taskType === "missing_letter") {
+    const visibleIndexes = new Set<number>([0, Math.max(normalizedWord.length - 1, 0)]);
+    return `补全缺失字母：${maskWordByIndexes(normalizedWord, visibleIndexes)}`;
+  }
+  if (taskType === "hidden_recall") {
+    return "看 5 秒后会隐藏，再凭记忆重拼。";
+  }
+  if (taskType === "recall_word") {
+    return "不看答案，直接凭记忆拼写。";
+  }
+  if (taskType === "cloze_sentence") {
+    return "只填写错过的单词。";
+  }
+  if (taskType === "chinese_to_english") {
+    return "根据中文意思拼写英文。";
+  }
+  return "";
+}
+
+function getReviewTaskModeLabel(taskType: string | undefined): string {
+  const labels: Record<string, string> = {
+    chinese_to_english: "看中文拼英文",
+    listen_spell: "听英文拼英文",
+    english_to_chinese: "英文选中文",
+    match_translation: "中英文配对",
+    missing_letter: "缺字母填空",
+    cloze_sentence: "短句填空",
+    hidden_recall: "隐藏重拼",
+    recall_word: "无提示拼写",
+  };
+  return taskType ? labels[taskType] ?? "专项复习" : "";
+}
+
 function formatChunkLengths(lengths: number[]): string {
   return lengths.join(" + ");
 }
@@ -274,6 +315,12 @@ function buildEndingHint(word: string): string {
 
 function buildTypedSpellingHint(expectedWord: string, typedWord: string, errorCount: number, errorType: string): string {
   const normalizedExpected = normalizeEnglishKey(expectedWord);
+  if (errorType === "unknown") {
+    return `先看 5 秒建立印象，再遮住重拼。这个单词一共 ${normalizedExpected.length} 个字母。`;
+  }
+  if (errorType === "first-letter") {
+    return `先确认中文意思，再听首音。首字母是 ${normalizedExpected[0] ?? ""}。`;
+  }
   if (errorType === "ending") {
     return buildEndingHint(expectedWord);
   }
@@ -662,6 +709,8 @@ function StudyContent() {
   const isSingleWordReviewTask = Boolean(currentItem?.review_task_type && currentItem.review_task_type !== "cloze_sentence");
   const currentFocusedReviewWord = dynamicReviewWords[0] ?? (isSingleWordReviewTask || currentItem?.item_type === "word" ? currentWords[0] : "");
   const isFocusedWordReview = Boolean(currentFocusedReviewWord);
+  const reviewTaskInstruction = buildReviewTaskInstruction(currentItem?.review_task_type, currentFocusedReviewWord);
+  const reviewTaskModeLabel = getReviewTaskModeLabel(currentItem?.review_task_type);
   const progressPercent = items.length > 0 ? ((currentIndex + 1) / items.length) * 100 : 0;
   const packageId = packageIdFromUrl || resolvedPackageId;
   const nextCourse = useMemo<NextCourseTarget | null>(() => {
@@ -2044,6 +2093,12 @@ function StudyContent() {
 
             <div className={isStudyFullscreen ? "space-y-10 ipad:space-y-12 ipad-lg:space-y-14" : "mt-5 space-y-5 ipad:mt-5 ipad:space-y-4 ipad-lg:mt-6 ipad-lg:space-y-5"}>
               <p className={isStudyFullscreen ? "text-5xl font-semibold leading-tight text-slate-900 ipad:text-6xl ipad-lg:text-7xl" : "text-4xl font-semibold leading-tight text-slate-900 ipad:text-4xl ipad-lg:text-5xl"}>{displayChinesePrompt}</p>
+              {reviewTaskModeLabel || reviewTaskInstruction ? (
+                <div className="mx-auto max-w-2xl space-y-2">
+                  {reviewTaskModeLabel ? <p className="text-base font-bold text-emerald-700 ipad:text-lg">{reviewTaskModeLabel}</p> : null}
+                  {reviewTaskInstruction ? <p className="text-xl font-bold text-slate-700 ipad:text-2xl">{reviewTaskInstruction}</p> : null}
+                </div>
+              ) : null}
               {isChoiceReviewTask ? (
                 <div className={isStudyFullscreen ? "mx-auto flex max-w-4xl flex-col items-center gap-6 ipad:gap-8" : "mx-auto flex max-w-xl flex-col items-center gap-4 rounded-lg border bg-slate-50 px-5 py-5 ipad:max-w-xl ipad:gap-4 ipad:px-6 ipad:py-5 ipad-lg:max-w-2xl ipad-lg:gap-5 ipad-lg:px-7 ipad-lg:py-6"}>
                   <p className="text-4xl font-bold text-slate-900 ipad:text-5xl ipad-lg:text-6xl">{currentWords[0]}</p>
