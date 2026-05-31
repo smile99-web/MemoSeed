@@ -1,11 +1,5 @@
-import { refreshAccessToken } from "@/lib/auth";
+import { fetchWithAuth, parseApiError } from "@/lib/api";
 import { getApiBaseUrl } from "@/lib/api-base-url";
-
-let refreshTokenPromise: Promise<string | null> | null = null;
-
-interface ApiErrorResponse {
-  detail?: string;
-}
 
 export interface ReviewScorePayload {
   learning_item_id: string;
@@ -38,6 +32,25 @@ export interface WordMasterySummary {
   scheduled_task_count: number;
   interval_days: number;
   next_review_at: string | null;
+}
+
+export interface WordHistoryEvent {
+  timestamp: string;
+  event_type: "review" | "mistake";
+  score: number | null;
+  is_correct: boolean | null;
+  error_type: string | null;
+  memory_strength: number | null;
+  detail: string | null;
+}
+
+export interface WordHistoryResponse {
+  word: string;
+  events: WordHistoryEvent[];
+  current_strength: number;
+  current_risk: number;
+  review_count: number;
+  mistake_count: number;
 }
 
 export interface ReviewBucket {
@@ -95,41 +108,6 @@ export interface FsrsFitResponse {
   training_pair_count: number;
   accuracy_rate: number;
   weights: number[];
-}
-
-async function getFreshAccessToken(): Promise<string | null> {
-  refreshTokenPromise ??= refreshAccessToken().finally(() => {
-    refreshTokenPromise = null;
-  });
-  return refreshTokenPromise;
-}
-
-async function parseApiError(response: Response): Promise<string> {
-  try {
-    const body = (await response.json()) as ApiErrorResponse;
-    return body.detail ?? `请求失败：${response.status}`;
-  } catch {
-    return `请求失败：${response.status}`;
-  }
-}
-
-async function fetchWithAuth(input: RequestInfo | URL, init: RequestInit, accessToken: string): Promise<Response> {
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${accessToken}`);
-
-  let response = await fetch(input, { ...init, headers });
-  if (response.status !== 401) {
-    return response;
-  }
-
-  const refreshedAccessToken = await getFreshAccessToken();
-  if (!refreshedAccessToken) {
-    return response;
-  }
-
-  headers.set("Authorization", `Bearer ${refreshedAccessToken}`);
-  response = await fetch(input, { ...init, headers });
-  return response;
 }
 
 export async function scheduleMemoryReview(accessToken: string, payload: ReviewScorePayload): Promise<void> {
@@ -222,4 +200,167 @@ export async function listCourseProgressStats(accessToken: string, packageId?: s
     throw new Error(await parseApiError(response));
   }
   return (await response.json()) as CourseProgressStats[];
+}
+
+export interface StrugglingWordItem {
+  word: string;
+  priority_score: number;
+  memory_strength: number;
+  mistake_count: number;
+  error_type: string | null;
+  recommendation: string;
+}
+
+export interface DailyReport {
+  report_date: string;
+  review_count: number;
+  correct_count: number;
+  accuracy_rate: number;
+  study_duration_minutes: number;
+  words_practiced: number;
+  mistake_count: number;
+  streak_days: number;
+  struggling_words: StrugglingWordItem[];
+  summary: string;
+  next_day_strategy: Record<string, unknown>;
+}
+
+export interface TodayPlanItem {
+  task_type: string;
+  task_description: string;
+  estimated_minutes: number;
+  item_count: number;
+}
+
+export interface TodayPlan {
+  plan_date: string;
+  total_minutes: number;
+  due_review_count: number;
+  new_words_ready: number;
+  unresolved_mistake_count: number;
+  items: TodayPlanItem[];
+  time_budget: Record<string, number>;
+}
+
+export interface RetentionBin {
+  elapsed_days_label: string;
+  elapsed_days: number;
+  total_reviews: number;
+  correct_reviews: number;
+  recall_rate: number;
+}
+
+export interface RetentionCurve {
+  bins: RetentionBin[];
+  course_id: string | null;
+}
+
+export interface ErrorBreakdownItem {
+  error_type: string;
+  error_label: string;
+  this_week_count: number;
+  last_week_count: number;
+  trend: string;
+}
+
+export interface ErrorBreakdown {
+  items: ErrorBreakdownItem[];
+  total_this_week: number;
+  total_last_week: number;
+}
+
+export interface StudyStreak {
+  current_streak_days: number;
+  longest_streak_days: number;
+  streak_start_date: string | null;
+  total_study_days: number;
+  today_studied: boolean;
+}
+
+export async function getDailyReport(accessToken: string, reportDate?: string): Promise<DailyReport> {
+  const searchParams = new URLSearchParams();
+  if (reportDate) {
+    searchParams.set("report_date", reportDate);
+  }
+  const query = searchParams.toString();
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/reports/daily${query ? `?${query}` : ""}`, { cache: "no-store" }, accessToken);
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as DailyReport;
+}
+
+export async function generateDailyReport(accessToken: string, reportDate?: string): Promise<DailyReport> {
+  const searchParams = new URLSearchParams();
+  if (reportDate) {
+    searchParams.set("report_date", reportDate);
+  }
+  const query = searchParams.toString();
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/reports/daily/generate${query ? `?${query}` : ""}`, { cache: "no-store" }, accessToken);
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as DailyReport;
+}
+
+export async function getTodayPlan(accessToken: string): Promise<TodayPlan> {
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/reports/plans/today`, { cache: "no-store" }, accessToken);
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as TodayPlan;
+}
+
+export async function getRetentionCurve(accessToken: string, courseId?: string): Promise<RetentionCurve> {
+  const searchParams = new URLSearchParams();
+  if (courseId) {
+    searchParams.set("course_id", courseId);
+  }
+  const query = searchParams.toString();
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/reports/retention-curve${query ? `?${query}` : ""}`, { cache: "no-store" }, accessToken);
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as RetentionCurve;
+}
+
+export async function getErrorBreakdown(accessToken: string): Promise<ErrorBreakdown> {
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/reports/error-breakdown`, { cache: "no-store" }, accessToken);
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as ErrorBreakdown;
+}
+
+export async function getStudyStreak(accessToken: string): Promise<StudyStreak> {
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/reports/streak`, { cache: "no-store" }, accessToken);
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as StudyStreak;
+}
+
+export async function getMemoryDashboardWithCourse(accessToken: string, courseId?: string): Promise<MemoryDashboard> {
+  const searchParams = new URLSearchParams();
+  if (courseId) {
+    searchParams.set("course_id", courseId);
+  }
+  const query = searchParams.toString();
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/memory/dashboard${query ? `?${query}` : ""}`, { cache: "no-store" }, accessToken);
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as MemoryDashboard;
+}
+
+export async function getWordHistory(accessToken: string, word: string): Promise<WordHistoryResponse> {
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/reports/word-history/${encodeURIComponent(word)}`,
+    { cache: "no-store" },
+    accessToken,
+  );
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as WordHistoryResponse;
 }

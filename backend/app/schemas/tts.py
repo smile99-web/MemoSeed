@@ -25,3 +25,35 @@ class CosyVoiceSpeechSynthesisRequest(BaseModel):
     speaker: str = Field(min_length=1)
     api_url: str
 
+
+class CachedSpeechRequest(BaseModel):
+    text: str = Field(min_length=1)
+    voice: str = Field(min_length=1)
+    speech_rate: int = Field(default=0, ge=-50, le=100)
+    suffix: str = Field(default="mp3", pattern=r"^(mp3|wav)$")
+
+
+class PrefetchCourseAudioRequest(BaseModel):
+    course_id: str = Field(min_length=1)
+    voice: str = Field(min_length=1)
+    language: str | None = None
+    speech_rate: int = Field(default=0, ge=-50, le=100)
+
+
+class PrefetchCourseAudioResponse(BaseModel):
+    course_id: str
+    words: dict[str, str]
+    cache_hits: int
+    cache_misses: int
+
+
+class PhonicsDeckItem(BaseModel):
+    phoneme_key: str
+    display_label: str
+    synth_text: str
+    audio_url: str
+
+
+class PhonicsDeckResponse(BaseModel):
+    phonemes: list[PhonicsDeckItem]
+

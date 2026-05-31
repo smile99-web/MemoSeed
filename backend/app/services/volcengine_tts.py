@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from app.services.tts_cache import get_cached_audio, store_cached_audio
+
 logger = logging.getLogger("volcengine_tts")
 
 DEFAULT_VOLCENGINE_TTS_ENDPOINT = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
@@ -13,6 +15,8 @@ DEFAULT_VOLCENGINE_TTS_RESOURCE_ID = "seed-tts-2.0"
 DEFAULT_VOLCENGINE_TTS_MODEL = "seed-tts-2.0-standard"
 DEFAULT_VOLCENGINE_TTS_CHINESE_VOICE = "zh_female_xiaohe_uranus_bigtts"
 DEFAULT_VOLCENGINE_TTS_ENGLISH_VOICE = "en_female_dacey_uranus_bigtts"
+
+AUDIO_SUFFIX = "mp3"
 
 
 @dataclass(frozen=True)
@@ -26,13 +30,18 @@ class VolcengineTtsSettings:
     speech_rate: int = 0
 
 
-def synthesize_volcengine_speech(text: str, settings: VolcengineTtsSettings) -> bytes:
+def synthesize_volcengine_speech(text: str, settings: VolcengineTtsSettings, use_cache: bool = True) -> bytes:
     if not text.strip():
         raise ValueError("TTS text is required")
     if not settings.voice.strip():
         raise ValueError("TTS voice is required")
     if not settings.api_key or not settings.api_key.strip():
         raise ValueError("Volcengine TTS X-Api-Key is required")
+
+    if use_cache:
+        cached = get_cached_audio(text, settings.voice, settings.speech_rate, suffix=AUDIO_SUFFIX)
+        if cached is not None:
+            return cached
 
     payload = build_payload(text, settings)
     logger.info(
@@ -66,8 +75,11 @@ def synthesize_volcengine_speech(text: str, settings: VolcengineTtsSettings) -> 
     if not audio_chunks:
         logger.error("Volcengine TTS returned empty audio (no audio chunks collected)")
         raise ValueError("Volcengine TTS returned empty audio")
-    logger.info("Volcengine TTS success: audio_size=%d bytes", len(b"".join(audio_chunks)))
-    return b"".join(audio_chunks)
+    audio = b"".join(audio_chunks)
+    logger.info("Volcengine TTS success: audio_size=%d bytes", len(audio))
+    if use_cache:
+        store_cached_audio(text, settings.voice, settings.speech_rate, audio, suffix=AUDIO_SUFFIX)
+    return audio
 
 
 def build_headers(settings: VolcengineTtsSettings) -> dict[str, str]:

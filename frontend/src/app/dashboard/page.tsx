@@ -5,9 +5,29 @@ import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
-import { fitFsrsParameters, getMemoryDashboard, MemoryDashboard, WordMasterySummary } from "@/lib/memory";
+import {
+  DailyReport,
+  ErrorBreakdown,
+  fitFsrsParameters,
+  generateDailyReport,
+  getDailyReport,
+  getErrorBreakdown,
+  getMemoryDashboard,
+  getMemoryDashboardWithCourse,
+  getRetentionCurve,
+  getStudyStreak,
+  getTodayPlan,
+  getWordHistory,
+  MemoryDashboard,
+  RetentionCurve,
+  StudyStreak,
+  TodayPlan,
+  WordHistoryResponse,
+  WordMasterySummary,
+} from "@/lib/memory";
 
 const statusLabels: Record<WordMasterySummary["status"], string> = {
   difficult: "困难词",
@@ -46,6 +66,58 @@ function formatDuration(totalSeconds: number): string {
   return `${hours} 小时 ${minutes} 分钟`;
 }
 
+function getDaysSince(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+  const timestamp = new Date(value).getTime();
+  if (Number.isNaN(timestamp)) {
+    return null;
+  }
+  return Math.floor((Date.now() - timestamp) / 86400000);
+}
+
+function getFsrsFitRecommendation(dashboard: MemoryDashboard): { title: string; detail: string; tone: "muted" | "ready" | "wait" } {
+  if (dashboard.total_reviews < dashboard.fsrs_min_training_reviews) {
+    return {
+      title: "暂时不建议拟合",
+      detail: `还差 ${dashboard.fsrs_min_training_reviews - dashboard.total_reviews} 条历史答题记录，数据太少时拟合容易不稳定。`,
+      tone: "muted",
+    };
+  }
+
+  if (dashboard.fsrs_parameters_source !== "user_fitted" || !dashboard.fsrs_fitted_at) {
+    return {
+      title: "建议现在拟合",
+      detail: `历史答题记录已达到 ${dashboard.total_reviews} 条，可以从内置权重切换为个人拟合参数。`,
+      tone: "ready",
+    };
+  }
+
+  const newReviewCount = Math.max(dashboard.total_reviews - dashboard.fsrs_training_review_count, 0);
+  const daysSinceFit = getDaysSince(dashboard.fsrs_fitted_at);
+  if (newReviewCount >= 1500) {
+    return {
+      title: "建议重新拟合",
+      detail: `上次拟合后新增 ${newReviewCount} 条答题记录，已经有足够新数据更新参数。`,
+      tone: "ready",
+    };
+  }
+  if (daysSinceFit !== null && daysSinceFit >= 30 && newReviewCount >= 500) {
+    return {
+      title: "可以考虑重新拟合",
+      detail: `距离上次拟合 ${daysSinceFit} 天，新增 ${newReviewCount} 条记录，可以用近期数据校准一次。`,
+      tone: "ready",
+    };
+  }
+
+  return {
+    title: "暂不建议重复拟合",
+    detail: `上次拟合后新增 ${newReviewCount} 条记录${daysSinceFit !== null ? `，已过 ${daysSinceFit} 天` : ""}；建议新增约 1500 条或间隔约 1 个月后再拟合。`,
+    tone: "wait",
+  };
+}
+
 function StatCard({ label, value, hint }: { label: string; value: string | number; hint: string }) {
   return (
     <Card>
@@ -60,7 +132,7 @@ function StatCard({ label, value, hint }: { label: string; value: string | numbe
   );
 }
 
-function WordTable({ title, words }: { title: string; words: WordMasterySummary[] }) {
+function WordTable({ title, words, onWordClick }: { title: string; words: WordMasterySummary[]; onWordClick?: (word: string) => void }) {
   return (
     <Card>
       <CardHeader>
@@ -90,7 +162,7 @@ function WordTable({ title, words }: { title: string; words: WordMasterySummary[
               <tbody>
                 {words.map((word) => (
                   <tr className="border-t" key={`${title}-${word.word}`}>
-                    <td className="px-3 py-2 font-medium">{word.word}</td>
+                    <td className="px-3 py-2 font-medium text-primary hover:underline cursor-pointer" onClick={() => onWordClick?.(word.word)}>{word.word}</td>
                     <td className="px-3 py-2">{word.status_label || statusLabels[word.status]}</td>
                     <td className="px-3 py-2">{formatPercent(word.priority_score)}</td>
                     <td className="px-3 py-2">{formatPercent(word.memory_strength)}</td>
@@ -111,6 +183,70 @@ function WordTable({ title, words }: { title: string; words: WordMasterySummary[
   );
 }
 
+function WordHistoryModal({ history, onClose }: { history: WordHistoryResponse; onClose: () => void }) {
+  const errorTypeLabels: Record<string, string> = {
+    "first-letter": "首字母",
+    "meaning": "词义",
+    "middle": "中间结构",
+    "sequence": "字母顺序",
+    "ending": "词尾",
+    "missing-letter": "漏字母",
+    "extra-letter": "多字母",
+    "unknown": "完全不会",
+    "spelling": "拼写",
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center overflow-auto bg-slate-950/60 px-4 py-10" onClick={onClose}>
+      <div className="relative w-full max-w-2xl rounded-lg bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-xl font-bold">{history.word} 的复习历史</h2>
+          <button onClick={onClose} className="text-muted-foreground hover:text-slate-900 text-lg">x</button>
+        </div>
+        <div className="mb-4 flex gap-4 text-sm">
+          <span>当前强度: {Math.round(history.current_strength * 100)}%</span>
+          <span>遗忘风险: {Math.round(history.current_risk * 100)}%</span>
+          <span>复习 {history.review_count} 次, 错误 {history.mistake_count} 次</span>
+        </div>
+        <div className="max-h-96 overflow-y-auto rounded-lg border">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-muted sticky top-0">
+              <tr>
+                <th className="px-3 py-2">时间</th>
+                <th className="px-3 py-2">类型</th>
+                <th className="px-3 py-2">结果</th>
+                <th className="px-3 py-2">错误类型</th>
+                <th className="px-3 py-2">详情</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.events.map((evt, i) => (
+                <tr key={i} className="border-t">
+                  <td className="px-3 py-1.5">{new Date(evt.timestamp).toLocaleString("zh-CN")}</td>
+                  <td className="px-3 py-1.5">{evt.event_type === "review" ? (
+                    <span className={evt.is_correct ? "text-emerald-600" : "text-red-500"}>
+                      {evt.is_correct ? "正确" : "错误"}
+                    </span>
+                  ) : "犯错"}</td>
+                  <td className="px-3 py-1.5">{evt.score != null ? `${evt.score} / 5` : "-"}</td>
+                  <td className="px-3 py-1.5">{evt.error_type ? errorTypeLabels[evt.error_type] ?? evt.error_type : "-"}</td>
+                  <td className="px-3 py-1.5 max-w-xs text-muted-foreground">{evt.detail ?? "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {history.events.length === 0 ? (
+            <p className="px-3 py-4 text-center text-muted-foreground">暂无历史记录。</p>
+          ) : null}
+        </div>
+        <div className="mt-4 text-right">
+          <Button onClick={onClose} variant="outline" size="sm">关闭</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const [dashboard, setDashboard] = useState<MemoryDashboard | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -120,6 +256,16 @@ export default function DashboardPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [fsrsFitMessage, setFsrsFitMessage] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [dailyReport, setDailyReport] = useState<DailyReport | null>(null);
+  const [todayPlan, setTodayPlan] = useState<TodayPlan | null>(null);
+  const [retentionCurve, setRetentionCurve] = useState<RetentionCurve | null>(null);
+  const [errorBreakdown, setErrorBreakdown] = useState<ErrorBreakdown | null>(null);
+  const [studyStreak, setStudyStreak] = useState<StudyStreak | null>(null);
+  const [selectedCourseId] = useState<string>("");
+  const [isGeneratingReport, setIsGeneratingReport] = useState(false);
+  const [selectedWordHistory, setSelectedWordHistory] = useState<WordHistoryResponse | null>(null);
+  const [, setIsLoadingWordHistory] = useState(false);
 
   useEffect(() => {
     async function loadDashboard() {
@@ -131,7 +277,21 @@ export default function DashboardPage() {
       }
 
       try {
-        setDashboard(await getMemoryDashboard(accessToken));
+        const courseId = selectedCourseId || undefined;
+        const [dashboardData, reportData, planData, curveData, errorData, streakData] = await Promise.all([
+          getMemoryDashboardWithCourse(accessToken, courseId),
+          getDailyReport(accessToken).catch(() => null),
+          getTodayPlan(accessToken).catch(() => null),
+          getRetentionCurve(accessToken, courseId).catch(() => null),
+          getErrorBreakdown(accessToken).catch(() => null),
+          getStudyStreak(accessToken).catch(() => null),
+        ]);
+        setDashboard(dashboardData);
+        setDailyReport(reportData);
+        setTodayPlan(planData);
+        setRetentionCurve(curveData);
+        setErrorBreakdown(errorData);
+        setStudyStreak(streakData);
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "读取数据看板失败");
       } finally {
@@ -140,7 +300,7 @@ export default function DashboardPage() {
     }
 
     void loadDashboard();
-  }, []);
+  }, [selectedCourseId]);
 
   async function exportUserData() {
     const accessToken = getAccessToken();
@@ -215,6 +375,40 @@ export default function DashboardPage() {
     }
   }
 
+  async function handleGenerateReport() {
+    const accessToken = getAccessToken();
+    if (!accessToken) {
+      return;
+    }
+    setIsGeneratingReport(true);
+    try {
+      const report = await generateDailyReport(accessToken);
+      setDailyReport(report);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "生成日报失败");
+    } finally {
+      setIsGeneratingReport(false);
+    }
+  }
+
+  async function handleWordDrillDown(word: string) {
+    const accessToken = getAccessToken();
+    if (!accessToken) return;
+    setIsLoadingWordHistory(true);
+    try {
+      const history = await getWordHistory(accessToken, word);
+      setSelectedWordHistory(history);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "获取单词历史失败");
+    } finally {
+      setIsLoadingWordHistory(false);
+    }
+  }
+
+  const fsrsFitRecommendation = dashboard ? getFsrsFitRecommendation(dashboard) : null;
+  const maxRetentionCount = retentionCurve ? Math.max(...retentionCurve.bins.map((b) => b.total_reviews), 1) : 1;
+  const maxErrorCount = errorBreakdown ? Math.max(...errorBreakdown.items.map((item) => Math.max(item.this_week_count, item.last_week_count)), 1) : 1;
+
   return (
     <main className="min-h-screen px-6 py-10 ipad:px-8 ipad:py-14">
       <section className="mx-auto max-w-6xl space-y-6 ipad:space-y-8">
@@ -258,12 +452,129 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {isLoading ? <p className="text-sm text-muted-foreground ipad:text-base">正在加载数据...</p> : null}
+        {isLoading ? (
+          <div className="space-y-6 ipad:space-y-8">
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <Skeleton className="h-28 rounded-lg" />
+              <Skeleton className="h-28 rounded-lg" />
+              <Skeleton className="h-28 rounded-lg" />
+              <Skeleton className="h-28 rounded-lg" />
+            </div>
+            <div className="grid gap-4 md:grid-cols-3">
+              <Skeleton className="h-28 rounded-lg" />
+              <Skeleton className="h-28 rounded-lg" />
+              <Skeleton className="h-28 rounded-lg" />
+            </div>
+            <Skeleton className="h-48 rounded-lg" />
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <Skeleton className="h-28 rounded-lg" />
+              <Skeleton className="h-28 rounded-lg" />
+              <Skeleton className="h-28 rounded-lg" />
+              <Skeleton className="h-28 rounded-lg" />
+            </div>
+            <Skeleton className="h-40 rounded-lg" />
+            <Skeleton className="h-64 rounded-lg" />
+          </div>
+        ) : null}
         {!isLoading && errorMessage ? <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 ipad:px-6 ipad:py-4 ipad:text-base">{errorMessage}</p> : null}
         {fsrsFitMessage ? <p className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 ipad:px-6 ipad:py-4 ipad:text-base">{fsrsFitMessage}</p> : null}
 
+        {!isLoading && !errorMessage && !dashboard ? (
+          <Card className="border-dashed">
+            <CardHeader className="text-center">
+              <CardTitle className="text-xl ipad:text-2xl">暂无学习数据</CardTitle>
+              <CardDescription className="ipad:text-base">
+                还没有学习数据，去开始学习吧
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex justify-center pb-6">
+              <Button asChild>
+                <Link href="/learning">开始学习</Link>
+              </Button>
+            </CardContent>
+          </Card>
+        ) : null}
+
         {dashboard ? (
           <>
+            {dailyReport ? (
+              <Card className="border-emerald-200 bg-emerald-50/30">
+                <CardHeader>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <CardTitle className="text-emerald-800">今日学习报告</CardTitle>
+                    <span className="text-sm text-muted-foreground">{dailyReport.report_date}</span>
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <p className="text-sm leading-relaxed text-emerald-900">{dailyReport.summary}</p>
+                  <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5">
+                      正确率 {Math.round(dailyReport.accuracy_rate * 100)}%
+                    </span>
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5">
+                      学习 {dailyReport.study_duration_minutes} 分钟
+                    </span>
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5">
+                      练习 {dailyReport.words_practiced} 个单词
+                    </span>
+                    {studyStreak ? (
+                      <span className="rounded-full bg-orange-100 px-2 py-0.5">
+                        连续 {studyStreak.current_streak_days} 天
+                      </span>
+                    ) : null}
+                  </div>
+                  {dailyReport.struggling_words.length > 0 ? (
+                    <div className="space-y-1">
+                      <p className="text-xs font-medium text-muted-foreground">需要关注的单词</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {dailyReport.struggling_words.map((sw) => (
+                          <span
+                            key={sw.word}
+                            className="inline-flex items-center gap-1 rounded border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs"
+                          >
+                            {sw.word}
+                            <span className="text-amber-600">({sw.recommendation})</span>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  <Button type="button" variant="outline" size="sm" onClick={handleGenerateReport} disabled={isGeneratingReport}>
+                    {isGeneratingReport ? "正在生成..." : "重新生成日报"}
+                  </Button>
+                </CardContent>
+              </Card>
+            ) : (
+              <div className="flex flex-wrap items-center gap-3 rounded-lg border border-dashed p-4">
+                <p className="text-sm text-muted-foreground">今日学习报告尚未生成。</p>
+                <Button type="button" variant="outline" size="sm" onClick={handleGenerateReport} disabled={isGeneratingReport}>
+                  {isGeneratingReport ? "正在生成..." : "生成今日日报"}
+                </Button>
+              </div>
+            )}
+
+            {todayPlan ? (
+              <Card>
+                <CardHeader>
+                  <CardTitle>今日学习计划</CardTitle>
+                  <CardDescription>预计总时长 {todayPlan.total_minutes} 分钟</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {todayPlan.items.map((item) => (
+                    <div key={item.task_type} className="flex items-center justify-between rounded-md bg-muted/50 px-3 py-2">
+                      <div>
+                        <p className="text-sm font-medium">{item.task_description}</p>
+                        <p className="text-xs text-muted-foreground">约 {item.estimated_minutes} 分钟</p>
+                      </div>
+                      {item.item_count > 0 ? (
+                        <span className="text-sm font-medium text-primary">{item.item_count} 项</span>
+                      ) : null}
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+            ) : null}
+
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
               <StatCard label="已掌握单词" value={dashboard.mastered_words} hint={`共 ${dashboard.total_words} 个单词，已掌握 ${dashboard.mastered_words} 个`} />
               <StatCard label="困难/教学中单词" value={dashboard.weak_words} hint={`${dashboard.learning_words} 个正在巩固或接近掌握`} />
@@ -291,6 +602,20 @@ export default function DashboardPage() {
                   <p>当前模式：{dashboard.fsrs_parameters_source === "user_fitted" ? "个人拟合参数" : "内置权重"}</p>
                   <p>历史答题记录：{dashboard.total_reviews} / {dashboard.fsrs_min_training_reviews}</p>
                   <p>上次拟合：{formatDateTime(dashboard.fsrs_fitted_at)}</p>
+                  {fsrsFitRecommendation ? (
+                    <div
+                      className={`mt-3 rounded-md border px-3 py-2 ${
+                        fsrsFitRecommendation.tone === "ready"
+                          ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                          : fsrsFitRecommendation.tone === "wait"
+                            ? "border-amber-200 bg-amber-50 text-amber-800"
+                            : "border-slate-200 bg-slate-50 text-slate-700"
+                      }`}
+                    >
+                      <p className="font-semibold">{fsrsFitRecommendation.title}</p>
+                      <p className="mt-1">{fsrsFitRecommendation.detail}</p>
+                    </div>
+                  ) : null}
                 </div>
                 <Button
                   type="button"
@@ -306,7 +631,15 @@ export default function DashboardPage() {
               <StatCard label="今日学习时长" value={formatDuration(dashboard.study_time.today_seconds)} hint="20 秒无键盘输入会自动暂停计时" />
               <StatCard label="本周学习时长" value={formatDuration(dashboard.study_time.week_seconds)} hint="按自然周统计活跃学习时间" />
               <StatCard label="本月学习时长" value={formatDuration(dashboard.study_time.month_seconds)} hint="按自然月统计活跃学习时间" />
-              <StatCard label="今年学习时长" value={formatDuration(dashboard.study_time.year_seconds)} hint={`累计 ${formatDuration(dashboard.study_time.total_seconds)}`} />
+              {studyStreak ? (
+                <StatCard
+                  label="累计学习时长"
+                  value={formatDuration(dashboard.study_time.total_seconds)}
+                  hint={`连续 ${studyStreak.current_streak_days} 天，共 ${studyStreak.total_study_days} 天学习，最长连续 ${studyStreak.longest_streak_days} 天${studyStreak.today_studied ? "，今天已学习" : ""}`}
+                />
+              ) : (
+                <StatCard label="今年学习时长" value={formatDuration(dashboard.study_time.year_seconds)} hint={`累计 ${formatDuration(dashboard.study_time.total_seconds)}`} />
+              )}
             </div>
 
             <Card>
@@ -330,11 +663,90 @@ export default function DashboardPage() {
               </CardContent>
             </Card>
 
-            <div className="grid gap-4 xl:grid-cols-2">
-              <WordTable title="最需要复习的单词" words={dashboard.weakest_words} />
-              <WordTable title="掌握最稳定的单词" words={dashboard.strongest_words} />
+            {retentionCurve ? (
+              <Card>
+                <CardHeader>
+                  <CardTitle>记忆保持曲线</CardTitle>
+                  <CardDescription>
+                    横轴为距离上次复习的天数，纵轴为实际正确率。柱高表示该间隔下的复习次数。
+                    {retentionCurve.course_id ? "（已按课程筛选）" : ""}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {retentionCurve.bins.map((bin) => (
+                    <div className="grid grid-cols-[5rem_1fr_4rem_3rem] items-center gap-3" key={bin.elapsed_days_label}>
+                      <span className="text-sm text-muted-foreground">{bin.elapsed_days_label} 天</span>
+                      <div className="relative h-4 overflow-hidden rounded-sm bg-muted">
+                        <div
+                          className="absolute inset-y-0 left-0 rounded-sm bg-blue-400"
+                          style={{ width: `${bin.total_reviews > 0 ? Math.max((bin.total_reviews / maxRetentionCount) * 100, 2) : 0}%` }}
+                        />
+                      </div>
+                      <span className="text-right text-sm font-medium tabular-nums">
+                        {bin.total_reviews > 0 ? `${Math.round(bin.recall_rate * 100)}%` : "-"}
+                      </span>
+                      <span className="text-right text-xs text-muted-foreground tabular-nums">{bin.total_reviews}</span>
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+            ) : null}
+
+            {errorBreakdown && errorBreakdown.items.length > 0 ? (
+              <Card>
+                <CardHeader>
+                  <CardTitle>错误类型分布</CardTitle>
+                  <CardDescription>
+                    本周共 {errorBreakdown.total_this_week} 个错误
+                    {errorBreakdown.total_last_week > 0 ? `，上周 ${errorBreakdown.total_last_week} 个` : ""}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {errorBreakdown.items.map((item) => (
+                    <div className="grid grid-cols-[6rem_1fr_3rem_4rem] items-center gap-3" key={item.error_type}>
+                      <span className="text-sm text-muted-foreground">{item.error_label}</span>
+                      <div className="flex h-4 items-center gap-1">
+                        <div
+                          className="h-full rounded-sm bg-blue-400"
+                          style={{ width: `${item.this_week_count > 0 ? Math.max((item.this_week_count / maxErrorCount) * 100, 2) : 0}%` }}
+                          title={`本周: ${item.this_week_count}`}
+                        />
+                        <div
+                          className="h-full rounded-sm bg-slate-300"
+                          style={{ width: `${item.last_week_count > 0 ? Math.max((item.last_week_count / maxErrorCount) * 100, 2) : 0}%` }}
+                          title={`上周: ${item.last_week_count}`}
+                        />
+                      </div>
+                      <span className="text-right text-sm tabular-nums">{item.this_week_count}</span>
+                      <span className="text-right text-xs tabular-nums">
+                        {item.trend === "up" ? "↑ 上升" : item.trend === "down" ? "↓ 下降" : "→ 持平"}
+                      </span>
+                    </div>
+                  ))}
+                  <div className="flex items-center gap-4 pt-2 text-xs text-muted-foreground">
+                    <span className="flex items-center gap-1">
+                      <span className="inline-block h-2.5 w-2.5 rounded-sm bg-blue-400" /> 本周
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="inline-block h-2.5 w-2.5 rounded-sm bg-slate-300" /> 上周
+                    </span>
+                  </div>
+                </CardContent>
+              </Card>
+            ) : null}
+
+            <div className="grid gap-4">
+              <WordTable title="最需要复习的单词" words={dashboard.weakest_words} onWordClick={handleWordDrillDown} />
+              <WordTable title="掌握最稳定的单词" words={dashboard.strongest_words} onWordClick={handleWordDrillDown} />
             </div>
           </>
+        ) : null}
+
+        {selectedWordHistory ? (
+          <WordHistoryModal
+            history={selectedWordHistory}
+            onClose={() => setSelectedWordHistory(null)}
+          />
         ) : null}
       </section>
     </main>

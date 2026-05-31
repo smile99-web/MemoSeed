@@ -1,6 +1,5 @@
-from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -8,6 +7,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
+from app.models.ai_daily_report import AiDailyReport
+from app.models.daily_plan import DailyPlan
 from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
 from app.models.mistake_log import MistakeLog
@@ -19,7 +20,7 @@ from app.models.word_review_task import WordReviewTask
 from app.schemas.memory import MemoryDashboardResponse, ReviewBucket, StudyTimeSummary, WordMasterySummary
 from app.services.fsrs_fitting import MIN_FSRS_TRAINING_REVIEWS
 from app.services.memory_scheduler import FSRS_WEIGHTS_SETTING_KEY, calculate_current_forget_risk
-from app.utils import average, extract_mistake_words, normalize_word, parse_datetime_setting, tokenize_words
+from app.utils import average, extract_mistake_words, parse_datetime_setting, tokenize_words
 
 
 LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -50,6 +51,21 @@ class WordStats:
     last_reviewed_at: datetime | None = None
     error_type_counts: dict[str, int] | None = None
     scheduled_task_count: int = 0
+
+
+def error_count_value(value: object) -> int:
+    if isinstance(value, dict):
+        value = value.get("count", 0)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def dominant_error_type(error_type_counts: dict[str, object] | None) -> str | None:
+    if not error_type_counts:
+        return None
+    return max(error_type_counts.items(), key=lambda item: error_count_value(item[1]))[0]
 
 
 MASTERY_STATUS_LABELS = {
@@ -90,11 +106,14 @@ def get_word_stats(word_stats: dict[str, WordStats], word: str) -> WordStats:
     )
 
 
-def build_memory_dashboard(db: Session, user_id: UUID) -> MemoryDashboardResponse:
+def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = None) -> MemoryDashboardResponse:
     now = datetime.now(UTC)
-    item_rows = db.execute(
-        select(LearningItem, MemoryState).outerjoin(MemoryState, MemoryState.learning_item_id == LearningItem.id).where(LearningItem.user_id == user_id)
-    ).all()
+    item_query = select(LearningItem, MemoryState).outerjoin(MemoryState, MemoryState.learning_item_id == LearningItem.id).where(LearningItem.user_id == user_id)
+    if course_id is not None:
+        item_query = item_query.where(LearningItem.course_id == course_id)
+    item_rows = db.execute(item_query).all()
+    memory_states = [memory_state for _, memory_state in item_rows if memory_state is not None]
+    memory_state_by_id = {memory_state.id: memory_state for memory_state in memory_states}
 
     word_stats: dict[str, WordStats] = {}
     for learning_item, memory_state in item_rows:
@@ -119,8 +138,15 @@ def build_memory_dashboard(db: Session, user_id: UUID) -> MemoryDashboardRespons
     word_state_rows = db.scalars(select(WordMemoryState).where(WordMemoryState.user_id == user_id)).all()
     for word_state in word_state_rows:
         stats = get_word_stats(word_stats, word_state.word)
-        stats.direct_strengths.append(word_state.memory_strength)
-        stats.direct_risks.append(word_state.forget_risk)
+        linked_memory_state = memory_state_by_id.get(word_state.memory_state_id)
+        if linked_memory_state is not None:
+            current_word_risk = calculate_current_forget_risk(linked_memory_state, now)
+            current_word_strength = round(1 - current_word_risk, 2)
+        else:
+            current_word_risk = word_state.forget_risk
+            current_word_strength = word_state.memory_strength
+        stats.direct_strengths.append(current_word_strength)
+        stats.direct_risks.append(current_word_risk)
         if word_state.next_micro_review_at is not None:
             stats.direct_next_reviews.append(word_state.next_micro_review_at)
             stats.next_reviews.append(word_state.next_micro_review_at)
@@ -135,7 +161,7 @@ def build_memory_dashboard(db: Session, user_id: UUID) -> MemoryDashboardRespons
         stats.last_reviewed_at = word_state.last_reviewed_at or stats.last_reviewed_at
         stats.error_type_counts = stats.error_type_counts or {}
         for key, value in (word_state.error_type_counts or {}).items():
-            stats.error_type_counts[str(key)] = stats.error_type_counts.get(str(key), 0) + int(value or 0)
+            stats.error_type_counts[str(key)] = stats.error_type_counts.get(str(key), 0) + error_count_value(value)
 
     pending_task_counts = dict(
         db.execute(
@@ -181,12 +207,16 @@ def build_memory_dashboard(db: Session, user_id: UUID) -> MemoryDashboardRespons
             elif review_mode.startswith("word-context"):
                 stats.context_correct_count += 1
 
-    mistake_rows = db.execute(
-        select(MistakeLog.learning_item_id, MistakeLog.mistake_type, MistakeLog.error_type, MistakeLog.expected_answer, MistakeLog.actual_answer).where(
-            MistakeLog.user_id == user_id,
-            MistakeLog.is_resolved.is_(False),
-        )
-    ).all()
+    mistake_query = select(
+        MistakeLog.learning_item_id, MistakeLog.mistake_type, MistakeLog.error_type, MistakeLog.expected_answer, MistakeLog.actual_answer
+    ).where(
+        MistakeLog.user_id == user_id,
+        MistakeLog.is_resolved.is_(False),
+    )
+    if course_id is not None:
+        course_li_ids = list(db.scalars(select(LearningItem.id).where(LearningItem.user_id == user_id, LearningItem.course_id == course_id)).all())
+        mistake_query = mistake_query.where(MistakeLog.learning_item_id.in_(course_li_ids))
+    mistake_rows = db.execute(mistake_query).all()
     for learning_item_id, mistake_type, error_type, expected_answer, actual_answer in mistake_rows:
         mistake_words = extract_mistake_words(mistake_type, expected_answer, actual_answer)
         if len(mistake_words) == 0 and mistake_type == "word-spelling":
@@ -203,14 +233,19 @@ def build_memory_dashboard(db: Session, user_id: UUID) -> MemoryDashboardRespons
     weak_words = len([summary for summary in summaries if summary.status in {"difficult", "teaching"}])
     learning_words = max(len(summaries) - mastered_words - weak_words, 0)
 
-    memory_states = [memory_state for _, memory_state in item_rows if memory_state is not None]
     current_forget_risks = [calculate_current_forget_risk(state, now) for state in memory_states]
     current_memory_strengths = [round(1 - risk, 2) for risk in current_forget_risks]
 
-    total_reviews = db.scalar(select(func.count(ReviewLog.id)).where(ReviewLog.user_id == user_id)) or 0
-    correct_reviews = db.scalar(select(func.count(ReviewLog.id)).where(ReviewLog.user_id == user_id, ReviewLog.is_correct.is_(True))) or 0
-    total_mistakes = db.scalar(select(func.count(MistakeLog.id)).where(MistakeLog.user_id == user_id)) or 0
-    unresolved_mistakes = db.scalar(select(func.count(MistakeLog.id)).where(MistakeLog.user_id == user_id, MistakeLog.is_resolved.is_(False))) or 0
+    review_base = select(func.count(ReviewLog.id)).where(ReviewLog.user_id == user_id)
+    mistake_base = select(func.count(MistakeLog.id)).where(MistakeLog.user_id == user_id)
+    if course_id is not None:
+        course_item_ids = list(db.scalars(select(LearningItem.id).where(LearningItem.user_id == user_id, LearningItem.course_id == course_id)).all())
+        review_base = review_base.where(ReviewLog.learning_item_id.in_(course_item_ids))
+        mistake_base = mistake_base.where(MistakeLog.learning_item_id.in_(course_item_ids))
+    total_reviews = db.scalar(review_base) or 0
+    correct_reviews = db.scalar(review_base.where(ReviewLog.is_correct.is_(True))) or 0
+    total_mistakes = db.scalar(mistake_base) or 0
+    unresolved_mistakes = db.scalar(mistake_base.where(MistakeLog.is_resolved.is_(False))) or 0
 
     try:
         stored_settings = db.scalar(select(UserModelSettings).where(UserModelSettings.user_id == user_id))
@@ -420,3 +455,603 @@ def build_review_buckets(memory_states: list[MemoryState], now: datetime) -> lis
         ("长期保持", lambda state: state.next_review_at > now + timedelta(days=30)),
     ]
     return [ReviewBucket(label=label, count=len([state for state in memory_states if predicate(state)])) for label, predicate in buckets]
+
+
+def compute_study_streak(db: Session, user_id: UUID) -> dict[str, object]:
+    now_local = datetime.now(LOCAL_TIMEZONE)
+    today = now_local.date()
+
+    all_logs = db.execute(
+        select(StudyTimeLog.recorded_at, StudyTimeLog.duration_seconds)
+        .where(StudyTimeLog.user_id == user_id)
+        .order_by(StudyTimeLog.recorded_at.desc())
+    ).all()
+
+    study_dates: dict[date, int] = {}
+    for recorded_at, duration_seconds in all_logs:
+        if recorded_at is None:
+            continue
+        local_date = recorded_at.astimezone(LOCAL_TIMEZONE).date()
+        study_dates[local_date] = study_dates.get(local_date, 0) + int(duration_seconds or 0)
+
+    active_dates = {d for d, secs in study_dates.items() if secs >= 300}
+
+    current_streak = 0
+    check_date = today
+    while check_date in active_dates:
+        current_streak += 1
+        check_date = check_date - timedelta(days=1)
+
+    longest_streak = 0
+    sorted_dates = sorted(active_dates)
+    current_run = 0
+    prev_date: date | None = None
+    for d in sorted_dates:
+        if prev_date is not None and (d - prev_date).days == 1:
+            current_run += 1
+        else:
+            current_run = 1
+        longest_streak = max(longest_streak, current_run)
+        prev_date = d
+
+    streak_start = today - timedelta(days=current_streak - 1) if current_streak > 0 else None
+
+    return {
+        "current_streak_days": current_streak,
+        "longest_streak_days": longest_streak,
+        "streak_start_date": streak_start,
+        "total_study_days": len(active_dates),
+        "today_studied": today in active_dates,
+    }
+
+
+def build_daily_report(db: Session, user_id: UUID, report_date: date | None = None) -> dict[str, object]:
+    now_local = datetime.now(LOCAL_TIMEZONE)
+    target_date = report_date or now_local.date()
+    day_start_utc = datetime(target_date.year, target_date.month, target_date.day, tzinfo=LOCAL_TIMEZONE).astimezone(UTC)
+    day_end_utc = day_start_utc + timedelta(days=1)
+
+    today_reviews = db.execute(
+        select(ReviewLog)
+        .where(ReviewLog.user_id == user_id, ReviewLog.reviewed_at >= day_start_utc, ReviewLog.reviewed_at < day_end_utc)
+        .order_by(ReviewLog.reviewed_at.asc())
+    ).scalars().all()
+
+    review_count = len(today_reviews)
+    correct_count = sum(1 for r in today_reviews if r.is_correct)
+    accuracy_rate = round(correct_count / review_count, 2) if review_count else 0.0
+    total_duration_seconds = sum(r.duration_seconds for r in today_reviews)
+    study_minutes = total_duration_seconds // 60
+    words_practiced = len({r.learning_item_id for r in today_reviews})
+
+    today_mistakes = db.execute(
+        select(func.count(MistakeLog.id))
+        .where(MistakeLog.user_id == user_id, MistakeLog.occurred_at >= day_start_utc, MistakeLog.occurred_at < day_end_utc)
+    ).scalar() or 0
+
+    streak_data = compute_study_streak(db, user_id)
+
+    word_states = db.scalars(select(WordMemoryState).where(WordMemoryState.user_id == user_id)).all()
+    struggling = sorted(
+        [ws for ws in word_states if ws.priority_score >= 0.3],
+        key=lambda ws: (-ws.priority_score, -ws.consecutive_error_count),
+    )[:3]
+    struggling_words = [
+        {
+            "word": ws.word,
+            "priority_score": ws.priority_score,
+            "memory_strength": ws.memory_strength,
+            "mistake_count": ws.consecutive_error_count,
+            "error_type": dominant_error_type(ws.error_type_counts),
+            "recommendation": ERROR_TYPE_LABELS.get(
+                dominant_error_type(ws.error_type_counts) or "",
+                "需要多练习",
+            ) if ws.error_type_counts else "需要多练习",
+        }
+        for ws in struggling
+    ]
+
+    spelling_errors = db.scalar(
+        select(func.count(MistakeLog.id))
+        .where(
+            MistakeLog.user_id == user_id,
+            MistakeLog.occurred_at >= day_start_utc,
+            MistakeLog.occurred_at < day_end_utc,
+            MistakeLog.error_type.in_(["spelling", "missing-letter", "extra-letter", "sequence", "first-letter", "middle", "ending"]),
+        )
+    ) or 0
+    spelling_error_rate = round(spelling_errors / review_count, 2) if review_count else 0.0
+
+    sentence_errors = db.scalar(
+        select(func.count(MistakeLog.id))
+        .where(
+            MistakeLog.user_id == user_id,
+            MistakeLog.occurred_at >= day_start_utc,
+            MistakeLog.occurred_at < day_end_utc,
+            MistakeLog.error_type.in_(["meaning", "unknown"]),
+        )
+    ) or 0
+    sentence_error_rate = round(sentence_errors / review_count, 2) if review_count else 0.0
+
+    now = datetime.now(UTC)
+    memory_states = db.scalars(
+        select(MemoryState).join(LearningItem, MemoryState.learning_item_id == LearningItem.id).where(
+            LearningItem.user_id == user_id,
+            MemoryState.next_review_at <= now,
+        )
+    ).all()
+    review_backlog = len(memory_states)
+    high_forget_risk = len([s for s in memory_states if s.forget_risk >= 0.7])
+
+    summary = _generate_daily_summary(
+        review_count, correct_count, accuracy_rate, study_minutes,
+        words_practiced, today_mistakes, struggling_words,
+        streak_data["current_streak_days"], db, user_id,
+    )
+
+    next_day_strategy: dict[str, object] = {}
+    if struggling_words:
+        next_day_strategy["focus_words"] = [sw["word"] for sw in struggling_words]
+        next_day_strategy["suggestion"] = f"重点复习：{'、'.join(next_day_strategy['focus_words'])}"
+
+    return {
+        "report_date": target_date,
+        "review_count": review_count,
+        "correct_count": correct_count,
+        "accuracy_rate": accuracy_rate,
+        "study_duration_minutes": study_minutes,
+        "words_practiced": words_practiced,
+        "mistake_count": today_mistakes,
+        "streak_days": streak_data["current_streak_days"],
+        "struggling_words": struggling_words,
+        "summary": summary,
+        "next_day_strategy": next_day_strategy,
+        "_raw": {
+            "spelling_error_rate": spelling_error_rate,
+            "sentence_error_rate": sentence_error_rate,
+            "review_backlog_count": review_backlog,
+            "high_forget_risk_count": high_forget_risk,
+        },
+    }
+
+
+def _generate_daily_summary(
+    review_count: int,
+    correct_count: int,
+    accuracy_rate: float,
+    study_minutes: int,
+    words_practiced: int,
+    mistake_count: int,
+    struggling_words: list[dict[str, object]],
+    streak_days: int,
+    db: Session,
+    user_id: UUID,
+) -> str:
+    try:
+        llm_summary = _generate_llm_summary(
+            review_count, correct_count, accuracy_rate, study_minutes,
+            words_practiced, mistake_count, struggling_words, streak_days,
+            db, user_id,
+        )
+        if llm_summary:
+            return llm_summary
+    except Exception:
+        pass
+    return _build_fallback_summary(review_count, correct_count, accuracy_rate, study_minutes, mistake_count, struggling_words, streak_days)
+
+
+def _generate_llm_summary(
+    review_count: int,
+    correct_count: int,
+    accuracy_rate: float,
+    study_minutes: int,
+    words_practiced: int,
+    mistake_count: int,
+    struggling_words: list[dict[str, object]],
+    streak_days: int,
+    db: Session,
+    user_id: UUID,
+) -> str | None:
+    from app.services.llm_translation import LlmTranslationSettings, call_llm_generate
+    from app.services.secure_model_settings import get_private_model_settings
+
+    settings = get_private_model_settings(db, user_id)
+    provider = str(settings.get("llmProvider") or "ollama").strip()
+    base_url = str(settings.get("llmBaseUrl") or "").strip()
+    model = str(settings.get("llmModel") or "").strip()
+    api_key = str(settings.get("llmApiKey") or "").strip()
+
+    if not base_url or not model:
+        return None
+
+    llm_settings = LlmTranslationSettings(
+        provider=provider,
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+    )
+
+    struggling_detail = ""
+    if struggling_words:
+        word_list = "、".join(str(sw.get("word", "")) for sw in struggling_words[:3])
+        struggling_detail = f"今天困难词：{word_list}。"
+        for sw in struggling_words[:3]:
+            error_label = str(sw.get("recommendation", ""))
+            if error_label:
+                struggling_detail += f"{sw.get('word', '')}容易在{error_label}上出错。"
+
+    prompt = (
+        "你是一个儿童英语学习助手的家长报告生成器。请用温暖、鼓励的中文语气，为家长写一段今日学习总结，2-4句话即可。\n\n"
+        f"今天复习了{review_count}次，其中{correct_count}次正确，准确率{round(accuracy_rate * 100)}%。\n"
+        f"学习了{study_minutes}分钟，练习了{words_practiced}个单词。\n"
+        f"今天有{mistake_count}个新的拼写或理解错误。\n"
+        f"连续打卡{streak_days}天。\n"
+        f"{struggling_detail}\n\n"
+        "请在总结后给出1条具体的今日学习建议（例如：'今天可以重点练习 -ight 结尾的拼写规律，这些词容易出错：light、night、right。'）。\n"
+        "不要使用markdown格式，直接输出纯文本，语气亲切自然。"
+    )
+
+    try:
+        response = call_llm_generate(llm_settings, prompt)
+        return response.strip().strip('"').strip()
+    except Exception:
+        return None
+
+
+def _build_fallback_summary(
+    review_count: int,
+    correct_count: int,
+    accuracy_rate: float,
+    study_minutes: int,
+    mistake_count: int,
+    struggling_words: list[dict[str, object]],
+    streak_days: int,
+) -> str:
+    parts = [f"今天完成了{review_count}次复习，正确率{round(accuracy_rate * 100)}%，学习时长{study_minutes}分钟。"]
+    if struggling_words:
+        word_list = "、".join(str(sw.get("word", "")) for sw in struggling_words[:3])
+        error_info = struggling_words[0].get("recommendation", "多练习") if struggling_words else "多练习"
+        parts.append(f"困难词：{word_list}，建议重点练习{error_info}。")
+    if mistake_count > 0:
+        parts.append(f"今天有{mistake_count}个新错误需要注意。")
+    if streak_days > 0:
+        parts.append(f"已经连续学习{streak_days}天，继续保持！")
+    return "".join(parts)
+
+
+def build_today_plan(db: Session, user_id: UUID) -> dict[str, object]:
+    now_utc = datetime.now(UTC)
+    now_local = datetime.now(LOCAL_TIMEZONE)
+    today = now_local.date()
+
+    due_count = db.scalar(
+        select(func.count(MemoryState.id))
+        .join(LearningItem, MemoryState.learning_item_id == LearningItem.id)
+        .where(LearningItem.user_id == user_id, MemoryState.next_review_at <= now_utc)
+    ) or 0
+
+    new_word_items = db.scalar(
+        select(func.count(LearningItem.id))
+        .outerjoin(MemoryState, MemoryState.learning_item_id == LearningItem.id)
+        .where(
+            LearningItem.user_id == user_id,
+            LearningItem.item_type == "word",
+            (MemoryState.id.is_(None)) | (MemoryState.repetition_count == 0),
+        )
+    ) or 0
+
+    unresolved_mistake_count = db.scalar(
+        select(func.count(MistakeLog.id))
+        .where(MistakeLog.user_id == user_id, MistakeLog.is_resolved.is_(False))
+    ) or 0
+
+    plan = db.scalar(select(DailyPlan).where(DailyPlan.user_id == user_id, DailyPlan.plan_date == today))
+    if plan is None:
+        plan = DailyPlan(
+            user_id=user_id,
+            plan_date=today,
+            warmup_review_minutes=10,
+            new_learning_minutes=20,
+            sentence_training_minutes=20,
+            mistake_reinforcement_minutes=10,
+            new_word_limit=10,
+            new_phrase_limit=5,
+        )
+
+    time_budget = {
+        "warmup_review_minutes": plan.warmup_review_minutes,
+        "new_learning_minutes": plan.new_learning_minutes,
+        "sentence_training_minutes": plan.sentence_training_minutes,
+        "mistake_reinforcement_minutes": plan.mistake_reinforcement_minutes,
+    }
+
+    items: list[dict[str, object]] = []
+    if due_count > 0:
+        items.append({
+            "task_type": "due_review",
+            "task_description": f"{due_count}个待复习单词或短句",
+            "estimated_minutes": plan.warmup_review_minutes,
+            "item_count": due_count,
+        })
+    if new_word_items > 0:
+        new_limit = min(new_word_items, max(plan.new_word_limit, 1) if plan.new_word_limit > 0 else new_word_items)
+        items.append({
+            "task_type": "new_words",
+            "task_description": f"{new_limit}个新单词学习",
+            "estimated_minutes": plan.new_learning_minutes,
+            "item_count": new_limit,
+        })
+    else:
+        items.append({
+            "task_type": "sentence_training",
+            "task_description": "句子训练",
+            "estimated_minutes": plan.sentence_training_minutes,
+            "item_count": 0,
+        })
+    if unresolved_mistake_count > 0:
+        items.append({
+            "task_type": "mistake_reinforcement",
+            "task_description": f"{unresolved_mistake_count}个错词强化练习",
+            "estimated_minutes": plan.mistake_reinforcement_minutes,
+            "item_count": unresolved_mistake_count,
+        })
+
+    total_minutes = sum(int(item["estimated_minutes"]) for item in items)  # type: ignore[arg-type]
+
+    return {
+        "plan_date": today,
+        "total_minutes": total_minutes,
+        "due_review_count": due_count,
+        "new_words_ready": new_word_items,
+        "unresolved_mistake_count": unresolved_mistake_count,
+        "items": items,
+        "time_budget": time_budget,
+    }
+
+
+def build_word_history(db: Session, user_id: UUID, word: str) -> dict[str, object]:
+    normalized_word = word.strip().lower()
+    if not normalized_word:
+        raise ValueError("Word must not be empty")
+
+    item_ids = list(db.scalars(
+        select(LearningItem.id).where(LearningItem.user_id == user_id)
+    ).all())
+
+    review_logs = db.execute(
+        select(ReviewLog).where(
+            ReviewLog.user_id == user_id,
+            ReviewLog.learning_item_id.in_(item_ids),
+        ).order_by(ReviewLog.reviewed_at.asc())
+    ).scalars().all()
+
+    item_texts: dict[UUID, str] = {}
+    for item_id in item_ids:
+        li = db.scalar(select(LearningItem).where(LearningItem.id == item_id))
+        if li is not None:
+            item_texts[item_id] = li.english_text.lower()
+
+    word_item_ids = {lid for lid, text in item_texts.items() if normalized_word in text.split()}
+
+    mistake_logs = db.execute(
+        select(MistakeLog).where(
+            MistakeLog.user_id == user_id,
+            MistakeLog.learning_item_id.in_(list(word_item_ids)),
+        ).order_by(MistakeLog.occurred_at.asc())
+    ).scalars().all()
+
+    events: list[dict[str, object]] = []
+
+    for rl in review_logs:
+        if rl.learning_item_id in word_item_ids:
+            events.append({
+                "timestamp": rl.reviewed_at,
+                "event_type": "review",
+                "score": rl.score,
+                "is_correct": rl.is_correct,
+                "error_type": rl.error_type,
+                "memory_strength": None,
+                "detail": f"评分{int(rl.score)}/{'正确' if rl.is_correct else '错误'}",
+            })
+
+    for ml in mistake_logs:
+        events.append({
+            "timestamp": ml.occurred_at,
+            "event_type": "mistake",
+            "score": None,
+            "is_correct": False,
+            "error_type": ml.error_type,
+            "memory_strength": None,
+            "detail": f"{ml.mistake_type}: {ml.actual_answer} (应为: {ml.expected_answer})",
+        })
+
+    word_state = db.scalar(select(WordMemoryState).where(WordMemoryState.user_id == user_id, WordMemoryState.word == normalized_word))
+    current_strength = word_state.memory_strength if word_state is not None else 0.0
+    current_risk = word_state.forget_risk if word_state is not None else 1.0
+
+    events.sort(key=lambda e: e["timestamp"])  # type: ignore[arg-type, return-value]
+
+    return {
+        "word": normalized_word,
+        "events": events,
+        "current_strength": current_strength,
+        "current_risk": current_risk,
+        "review_count": len([e for e in events if e["event_type"] == "review"]),
+        "mistake_count": len([e for e in events if e["event_type"] == "mistake"]),
+    }
+
+
+def build_retention_curve(db: Session, user_id: UUID, course_id: UUID | None = None) -> dict[str, object]:
+    bucket_labels = [0.5, 1, 2, 3, 5, 7, 14, 30, 60, 90]
+    bucket_max: dict[float, float] = {0.5: 0.5, 1: 1, 2: 2, 3: 3, 5: 5, 7: 7, 14: 14, 30: 30, 60: 60, 90: 90}
+
+    item_query = select(LearningItem.id).where(LearningItem.user_id == user_id)
+    if course_id is not None:
+        item_query = item_query.where(LearningItem.course_id == course_id)
+    item_ids = list(db.scalars(item_query).all())
+
+    if not item_ids:
+        return {"bins": [{"elapsed_days_label": str(bl), "elapsed_days": bl, "total_reviews": 0, "correct_reviews": 0, "recall_rate": 0.0} for bl in bucket_labels], "course_id": course_id}
+
+    # Group reviews by learning_item_id
+    reviews_by_item: dict[UUID, list[tuple[datetime, bool]]] = {}
+    review_item_rows = db.execute(
+        select(ReviewLog.learning_item_id, ReviewLog.reviewed_at, ReviewLog.is_correct).where(
+            ReviewLog.user_id == user_id,
+            ReviewLog.learning_item_id.in_(item_ids),
+        ).order_by(ReviewLog.reviewed_at.asc())
+    ).all()
+    for li_id, r_at, is_c in review_item_rows:
+        reviews_by_item.setdefault(li_id, []).append((r_at, is_c))
+
+    bucket_counts: dict[float, int] = {}
+    bucket_correct: dict[float, int] = {}
+
+    for li_id, reviews in reviews_by_item.items():
+        prev_at: datetime | None = None
+        for r_at, is_c in reviews:
+            if prev_at is not None:
+                elapsed_days = (r_at - prev_at).total_seconds() / 86400
+                bucket = 90.0
+                for bl in sorted(bucket_labels):
+                    if elapsed_days <= bucket_max[bl]:
+                        bucket = bl
+                        break
+                bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+                if is_c:
+                    bucket_correct[bucket] = bucket_correct.get(bucket, 0) + 1
+            prev_at = r_at
+
+    bins: list[dict[str, object]] = []
+    for bl in bucket_labels:
+        total = bucket_counts.get(bl, 0)
+        correct = bucket_correct.get(bl, 0)
+        bins.append({
+            "elapsed_days_label": str(bl),
+            "elapsed_days": bl,
+            "total_reviews": total,
+            "correct_reviews": correct,
+            "recall_rate": round(correct / total, 2) if total else 0.0,
+        })
+
+    return {"bins": bins, "course_id": course_id}
+
+
+def build_error_breakdown(db: Session, user_id: UUID) -> dict[str, object]:
+    now_local = datetime.now(LOCAL_TIMEZONE)
+    today = now_local.date()
+    week_start = today - timedelta(days=today.weekday())
+    last_week_start = week_start - timedelta(days=7)
+    last_week_end = week_start - timedelta(days=1)
+
+    this_week_start_utc = datetime(week_start.year, week_start.month, week_start.day, tzinfo=LOCAL_TIMEZONE).astimezone(UTC)
+    last_week_start_utc = datetime(last_week_start.year, last_week_start.month, last_week_start.day, tzinfo=LOCAL_TIMEZONE).astimezone(UTC)
+    last_week_end_utc = datetime(last_week_end.year, last_week_end.month, last_week_end.day, 23, 59, 59, tzinfo=LOCAL_TIMEZONE).astimezone(UTC)
+
+    def count_errors_by_type(start_utc: datetime, end_utc: datetime) -> dict[str, int]:
+        rows = db.execute(
+            select(MistakeLog.error_type, func.count(MistakeLog.id))
+            .where(
+                MistakeLog.user_id == user_id,
+                MistakeLog.occurred_at >= start_utc,
+                MistakeLog.occurred_at <= end_utc,
+                MistakeLog.error_type.isnot(None),
+            )
+            .group_by(MistakeLog.error_type)
+        ).all()
+        return {str(et): int(cnt) for et, cnt in rows if et}
+
+    this_week = count_errors_by_type(this_week_start_utc, datetime.now(UTC))
+    last_week = count_errors_by_type(last_week_start_utc, last_week_end_utc)
+
+    all_types = set(this_week.keys()) | set(last_week.keys())
+    items: list[dict[str, object]] = []
+    for et in sorted(all_types):
+        tw = this_week.get(et, 0)
+        lw = last_week.get(et, 0)
+        if tw > lw:
+            trend = "up"
+        elif tw < lw:
+            trend = "down"
+        else:
+            trend = "stable"
+        items.append({
+            "error_type": et,
+            "error_label": ERROR_TYPE_LABELS.get(et, et),
+            "this_week_count": tw,
+            "last_week_count": lw,
+            "trend": trend,
+        })
+
+    return {
+        "items": items,
+        "total_this_week": sum(this_week.values()),
+        "total_last_week": sum(last_week.values()),
+    }
+
+
+def generate_ai_daily_report(db: Session, user_id: UUID, report_date: date | None = None) -> dict[str, object]:
+    report_data = build_daily_report(db, user_id, report_date)
+    raw = report_data.pop("_raw", {})
+
+    existing = db.scalar(
+        select(AiDailyReport).where(
+            AiDailyReport.user_id == user_id,
+            AiDailyReport.report_date == report_data["report_date"],
+        )
+    )
+
+    if existing is not None:
+        existing.accuracy_rate = report_data["accuracy_rate"]
+        existing.spelling_error_rate = raw.get("spelling_error_rate", 0.0)  # type: ignore[arg-type]
+        existing.sentence_error_rate = raw.get("sentence_error_rate", 0.0)  # type: ignore[arg-type]
+        existing.study_duration_minutes = report_data["study_duration_minutes"]
+        existing.review_backlog_count = raw.get("review_backlog_count", 0)  # type: ignore[arg-type]
+        existing.high_forget_risk_count = raw.get("high_forget_risk_count", 0)  # type: ignore[arg-type]
+        existing.summary = report_data["summary"]
+        existing.next_day_strategy = report_data["next_day_strategy"]
+    else:
+        db.add(
+            AiDailyReport(
+                user_id=user_id,
+                report_date=report_data["report_date"],
+                accuracy_rate=report_data["accuracy_rate"],
+                spelling_error_rate=raw.get("spelling_error_rate", 0.0),  # type: ignore[arg-type]
+                sentence_error_rate=raw.get("sentence_error_rate", 0.0),  # type: ignore[arg-type]
+                study_duration_minutes=report_data["study_duration_minutes"],
+                review_backlog_count=raw.get("review_backlog_count", 0),  # type: ignore[arg-type]
+                high_forget_risk_count=raw.get("high_forget_risk_count", 0),  # type: ignore[arg-type]
+                summary=report_data["summary"],
+                next_day_strategy=report_data["next_day_strategy"],
+            )
+        )
+    db.commit()
+
+    return report_data
+
+
+def check_and_generate_daily_report(db: Session, user_id: UUID) -> bool:
+    now_local = datetime.now(LOCAL_TIMEZONE)
+    if now_local.hour < 20:
+        return False
+
+    today = now_local.date()
+    today_start_utc = datetime(today.year, today.month, today.day, tzinfo=LOCAL_TIMEZONE).astimezone(UTC)
+    existing = db.scalar(
+        select(AiDailyReport).where(
+            AiDailyReport.user_id == user_id,
+            AiDailyReport.report_date == today,
+        )
+    )
+    if existing is not None:
+        return False
+
+    today_has_study = db.scalar(
+        select(func.count(StudyTimeLog.id)).where(StudyTimeLog.user_id == user_id, StudyTimeLog.recorded_at >= today_start_utc)
+    ) or 0
+
+    if today_has_study == 0:
+        return False
+
+    generate_ai_daily_report(db, user_id, today)
+    return True

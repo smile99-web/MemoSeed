@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from math import ceil, exp
+from math import ceil, exp, log
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -53,6 +53,41 @@ FSRS_WEIGHTS = (
     0.6621,
 )
 FSRS_WEIGHTS_SETTING_KEY = "fsrsWeights"
+
+# Child-calibrated FSRS weights: initial stability values reduced ~50% vs adult defaults.
+# Indices 0-3 correspond to Again / Hard / Good / Easy initial stability in days.
+CHILD_FSRS_WEIGHTS = (
+    0.20,       # Again
+    0.70,       # Hard
+    1.50,       # Good (adult: 3.173)
+    5.00,       # Easy (adult: 15.691)
+    7.1949,     # w[4] — initial difficulty baseline (unchanged)
+    0.5345,     # w[5]
+    1.4604,     # w[6]
+    0.0046,     # w[7]
+    1.54575,    # w[8]
+    0.1192,     # w[9]
+    1.01925,    # w[10]
+    1.9395,     # w[11]
+    0.11,       # w[12]
+    0.29605,    # w[13]
+    2.2698,     # w[14]
+    0.2315,     # w[15]
+    2.9898,     # w[16]
+    0.51655,    # w[17]
+    0.6621,     # w[18]
+)
+
+CHILD_TARGET_RETENTION = 0.85
+
+# Child STS (short-term stability) constants for intraday memory scheduling.
+# STS models the rapidly decaying working-memory trace that operates on a
+# minutes-to-hours timescale, as opposed to the days-to-months timescale of
+# the long-term FSRS stability.
+CHILD_STS_DECAY = -0.8                 # steeper than long-term FSRS_DECAY=-0.5
+CHILD_STS_HALF_LIFE_MINUTES = 30       # STS half-life in minutes
+CHILD_STS_TO_LTS_TRANSFER_RATE = 0.15  # fraction of STS converted to LTS per review
+
 LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
 WORD_MEMORY_SOURCE = "word-memory"
 EASY_FUNCTION_WORDS = {
@@ -143,6 +178,33 @@ def get_user_fsrs_weights(db: Session, user_id: UUID) -> tuple[float, ...]:
     if stored_settings is None:
         return FSRS_WEIGHTS
     return normalize_fsrs_weights(stored_settings.settings.get(FSRS_WEIGHTS_SETTING_KEY)) or FSRS_WEIGHTS
+
+
+def get_effective_fsrs_params(db: Session, user_id: UUID) -> tuple[tuple[float, ...], float]:
+    """Return (fsrs_weights, target_retention) based on user profile and any personalized fit.
+
+    Defaults to child-calibrated parameters (useChildProfile=True) since this is a child app.
+    Personalized weights from a prior fitting always take precedence.
+    """
+    try:
+        stored_settings = db.scalar(select(UserModelSettings).where(UserModelSettings.user_id == user_id))
+    except ProgrammingError:
+        return (CHILD_FSRS_WEIGHTS, CHILD_TARGET_RETENTION)
+
+    if stored_settings is None:
+        return (CHILD_FSRS_WEIGHTS, CHILD_TARGET_RETENTION)
+
+    settings = stored_settings.settings or {}
+    use_child_profile = settings.get("useChildProfile", True)
+
+    personalized_weights = normalize_fsrs_weights(settings.get(FSRS_WEIGHTS_SETTING_KEY))
+    if personalized_weights is not None:
+        target_retention = CHILD_TARGET_RETENTION if use_child_profile else FSRS_TARGET_RETENTION
+        return (personalized_weights, target_retention)
+
+    if use_child_profile:
+        return (CHILD_FSRS_WEIGHTS, CHILD_TARGET_RETENTION)
+    return (FSRS_WEIGHTS, FSRS_TARGET_RETENTION)
 
 
 def initial_fsrs_difficulty(rating: int, weights: tuple[float, ...] = FSRS_WEIGHTS) -> float:
@@ -240,25 +302,68 @@ def next_fsrs_forget_stability(difficulty: float, stability_days: float, retriev
     return constrain_stability(min(next_stability, stability_days))
 
 
-def calculate_fsrs_interval(stability_days: float) -> timedelta:
-    interval_days = stability_days / FSRS_FACTOR * (FSRS_TARGET_RETENTION ** (1 / FSRS_DECAY) - 1)
+def calculate_fsrs_interval(stability_days: float, target_retention: float = FSRS_TARGET_RETENTION) -> timedelta:
+    interval_days = stability_days / FSRS_FACTOR * (target_retention ** (1 / FSRS_DECAY) - 1)
     return timedelta(days=constrain_stability(interval_days))
 
 
-def calculate_failure_delay(score: int, lapse_count: int, now: datetime) -> timedelta:
-    if lapse_count <= 1:
-        return timedelta(minutes=3)
-    if lapse_count == 2:
-        return timedelta(minutes=10)
-    if lapse_count == 3:
-        return timedelta(minutes=30 if score <= 1 else 20)
+def compute_short_term_stability(memory_state: MemoryState, now: datetime) -> float:
+    """Return the current short-term stability (STS) after applying exponential decay.
 
-    local_now = now.astimezone(LOCAL_TIMEZONE)
-    end_of_day = local_now.replace(hour=20, minute=0, second=0, microsecond=0)
-    if end_of_day <= local_now:
-        end_of_day = local_now.replace(hour=21, minute=30, second=0, microsecond=0)
-    delay = end_of_day.astimezone(UTC) - now
-    return max(delay, timedelta(minutes=45))
+    STS = initial_stability_short * exp(-elapsed_minutes * ln(2) / CHILD_STS_HALF_LIFE_MINUTES)
+    """
+    if memory_state.short_term_stability is None:
+        return 1.0
+    if memory_state.last_short_term_updated_at is None:
+        return float(memory_state.short_term_stability)
+    elapsed_minutes = (now - memory_state.last_short_term_updated_at).total_seconds() / 60.0
+    if elapsed_minutes <= 0:
+        return float(memory_state.short_term_stability)
+    decay_rate = log(2) / CHILD_STS_HALF_LIFE_MINUTES
+    current_sts = float(memory_state.short_term_stability) * exp(-elapsed_minutes * decay_rate)
+    return round(clamp(current_sts, 0.0, 1.0), 4)
+
+
+def same_day_next_interval(sts: float, target_retrievability: float) -> timedelta:
+    """Compute the same-day review interval derived from STS exponential decay.
+
+    Solves  STS * exp(-t * ln(2) / half_life) = target_retrievability  for t,
+    clamped to [2, 360] minutes.
+    """
+    if sts <= target_retrievability:
+        return timedelta(minutes=2.0)
+    interval_minutes = -(CHILD_STS_HALF_LIFE_MINUTES / log(2)) * log(target_retrievability / sts)
+    clamped_minutes = clamp(interval_minutes, 2.0, 360.0)
+    return timedelta(minutes=clamped_minutes)
+
+
+def calculate_failure_delay(score: int, lapse_count: int, now: datetime, memory_state: MemoryState) -> timedelta:
+    """STS-based failure delay replacing the hardcoded 3/10/30-minute ladder.
+
+    Each failure reduces the short-term stability by 40 % and the next
+    interval is computed from the reduced STS via same_day_next_interval.
+    """
+    current_sts = compute_short_term_stability(memory_state, now)
+
+    # Cumulative STS reduction: each consecutive failure knocks off 40 %.
+    reduced_sts = current_sts * (0.6 ** lapse_count)
+
+    # Use a failure target that decreases with more failures, giving longer
+    # recovery intervals for repeated lapses.
+    failure_target = max(0.05, FSRS_TARGET_RETENTION * (0.7 ** (lapse_count - 1)))
+
+    delay = same_day_next_interval(reduced_sts, failure_target)
+
+    # For many failures, schedule within the same learning day.
+    if lapse_count > 3:
+        local_now = now.astimezone(LOCAL_TIMEZONE)
+        end_of_day = local_now.replace(hour=20, minute=0, second=0, microsecond=0)
+        if end_of_day <= local_now:
+            end_of_day = local_now.replace(hour=21, minute=30, second=0, microsecond=0)
+        end_of_day_delay = end_of_day.astimezone(UTC) - now
+        delay = max(min(delay, end_of_day_delay), timedelta(minutes=2))
+
+    return delay
 
 
 def estimate_item_difficulty_adjustment(learning_item: LearningItem, rating: int) -> float:
@@ -351,6 +456,8 @@ def get_or_create_memory_state(db: Session, learning_item: LearningItem, now: da
         repetition_count=0,
         lapse_count=0,
         next_review_at=now,
+        short_term_stability=1.0,
+        last_short_term_updated_at=now,
     )
     db.add(memory_state)
     db.flush()
@@ -366,6 +473,8 @@ def schedule_memory_review(
     response_text: str | None,
     duration_seconds: int,
     error_type: str | None = None,
+    encoding_stage: str | None = None,
+    encoding_duration_ms: int = 0,
 ) -> MemoryScheduleResult:
     if score < 0 or score > 5:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Score must be between 0 and 5")
@@ -375,8 +484,9 @@ def schedule_memory_review(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning item not found")
 
     now = datetime.now(UTC)
-    fsrs_weights = get_user_fsrs_weights(db, user_id)
+    fsrs_weights, fsrs_target_retention = get_effective_fsrs_params(db, user_id)
     memory_state = get_or_create_memory_state(db, learning_item, now)
+    current_sts = compute_short_term_stability(memory_state, now)
     is_correct = score >= 3
     rating = score_to_fsrs_rating(score)
     previous_repetition_count = memory_state.repetition_count
@@ -410,13 +520,32 @@ def schedule_memory_review(
     else:
         next_stability_days = next_fsrs_forget_stability(next_difficulty, previous_stability_days, previous_retrievability, fsrs_weights)
 
+    # STS-to-LTS transfer: convert a fraction of current short-term stability
+    # into durable long-term stability on each successful review.
+    if is_correct and current_sts > 0:
+        next_stability_days = constrain_stability(
+            next_stability_days + CHILD_STS_TO_LTS_TRANSFER_RATE * current_sts
+        )
+
     memory_state.ease_factor = next_difficulty
     if not is_correct:
-        review_delay = calculate_failure_delay(score, memory_state.lapse_count, now)
+        review_delay = calculate_failure_delay(score, memory_state.lapse_count, now, memory_state)
     elif previous_repetition_count == 0:
-        review_delay = FIRST_SUCCESS_DELAYS.get(rating, timedelta(days=1))
+        # Use STS-derived interval for same-day (sub-24-hour) first successes
+        # instead of the hardcoded FIRST_SUCCESS_DELAYS lookup table.
+        same_day_targets = {
+            FSRS_HARD: 0.5,
+            FSRS_GOOD: 0.35,
+            FSRS_EASY: 0.2,
+        }
+        same_day_target = same_day_targets.get(rating, FSRS_TARGET_RETENTION)
+        sts_delay = same_day_next_interval(current_sts, same_day_target)
+        if sts_delay < timedelta(hours=24):
+            review_delay = sts_delay
+        else:
+            review_delay = FIRST_SUCCESS_DELAYS.get(rating, timedelta(days=1))
     else:
-        review_delay = calculate_fsrs_interval(next_stability_days)
+        review_delay = calculate_fsrs_interval(next_stability_days, fsrs_target_retention)
 
     review_delay = adjust_delay_for_learning_item(review_delay, learning_item, memory_state)
     memory_state.interval_days = calculate_interval_days(review_delay)
@@ -424,9 +553,14 @@ def schedule_memory_review(
         next_retrievability_at_due = calculate_fsrs_retrievability(review_delay.total_seconds() / 86400, next_stability_days)
         memory_state.forget_risk = round(clamp(1 - next_retrievability_at_due + min(memory_state.lapse_count * 0.03, 0.15), 0.0, 1.0), 2)
         memory_state.memory_strength = round(1 - memory_state.forget_risk, 2)
+        # Reset STS after successful review: memory has reconsolidated.
+        memory_state.short_term_stability = 1.0
     else:
         memory_state.forget_risk = 1.0
         memory_state.memory_strength = round(max(score / 5 * 0.35, 0.0), 2)
+        # Each failure reduces STS by 40 % for the next interval.
+        memory_state.short_term_stability = round(current_sts * 0.6, 4)
+    memory_state.last_short_term_updated_at = now
     memory_state.last_reviewed_at = now
     memory_state.next_review_at = now + review_delay
 
@@ -439,6 +573,8 @@ def schedule_memory_review(
         is_correct=is_correct,
         response_text=response_text,
         duration_seconds=duration_seconds,
+        encoding_stage=encoding_stage,
+        encoding_duration_ms=encoding_duration_ms,
     )
     db.add(review_log)
 

@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { getAccessToken } from "@/lib/auth";
 import { Course, CoursePackage, createCourse, createCoursePackage, deleteCourse, deleteCoursePackage, exportCoursePackage, importCoursePackage, listCoursePackages, listCourses, PackageExportData, PackageImportResult } from "@/lib/courses";
-import { LearningImportProgress, LearningImportResponse, LearningItem, listLearningItems, uploadLearningItems, validateImportFile } from "@/lib/learning";
+import { CourseCacheRebuildProgress, CourseCacheStatus, CourseCacheItemStatus, getCourseCacheStatus, LearningImportProgress, LearningImportResponse, LearningItem, listLearningItems, rebuildCourseCache, uploadLearningItems, validateImportFile } from "@/lib/learning";
 import { ModelSettings, getModelSettings, loadPersistedModelSettings } from "@/lib/model-settings";
 
 const itemTypeLabels: Record<LearningItem["item_type"], string> = {
@@ -54,6 +54,9 @@ export default function LearningImportPage() {
   const [importPackageResult, setImportPackageResult] = useState<PackageImportResult | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [importProgress, setImportProgress] = useState<LearningImportProgress | null>(null);
+  const [isRebuildingCache, setIsRebuildingCache] = useState(false);
+  const [cacheRebuildProgress, setCacheRebuildProgress] = useState<CourseCacheRebuildProgress | null>(null);
+  const [cacheStatus, setCacheStatus] = useState<CourseCacheStatus | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [modelSettings, setModelSettings] = useState<ModelSettings>(getModelSettings());
 
@@ -111,6 +114,20 @@ export default function LearningImportPage() {
     }
   }
 
+  async function refreshCacheStatus(courseId: string) {
+    const accessToken = getAccessToken();
+    if (!accessToken || !courseId) {
+      setCacheStatus(null);
+      return;
+    }
+
+    try {
+      setCacheStatus(await getCourseCacheStatus(courseId, accessToken));
+    } catch {
+      setCacheStatus(null);
+    }
+  }
+
   useEffect(() => {
     void loadPackages();
     void loadPersistedModelSettings().then(setModelSettings);
@@ -123,6 +140,8 @@ export default function LearningImportPage() {
 
   useEffect(() => {
     void refreshItems(selectedCourseId);
+    void refreshCacheStatus(selectedCourseId);
+    setCacheRebuildProgress(null);
   }, [selectedCourseId]);
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
@@ -359,6 +378,7 @@ export default function LearningImportPage() {
       setResult(response);
       setImportProgress({ percent: 95, message: "正在刷新当前课程内容..." });
       await refreshItems(selectedCourseId);
+      await refreshCacheStatus(selectedCourseId);
       setImportProgress({ percent: 100, message: "导入完成" });
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "导入失败");
@@ -366,6 +386,58 @@ export default function LearningImportPage() {
     } finally {
       setIsUploading(false);
     }
+  }
+
+  async function handleRebuildCourseCache() {
+    if (!selectedCourseId) {
+      setErrorMessage("请先选择课程");
+      return;
+    }
+
+    const accessToken = getAccessToken();
+    if (!accessToken) {
+      setErrorMessage("请先登录后再重新生成缓存");
+      return;
+    }
+
+    setIsRebuildingCache(true);
+    setErrorMessage(null);
+    setCacheRebuildProgress({
+      status: "running",
+      percent: 1,
+      message: "准备重新生成课程缓存...",
+      stats: {
+        items: items.length,
+        sentence_translations: 0,
+        term_translations: 0,
+        speech_cached: 0,
+        speech_missing: 0,
+        errors: 0,
+      },
+    });
+
+    try {
+      await rebuildCourseCache(selectedCourseId, accessToken, modelSettings, setCacheRebuildProgress);
+      await refreshItems(selectedCourseId);
+      await refreshCacheStatus(selectedCourseId);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "重新生成课程缓存失败");
+    } finally {
+      setIsRebuildingCache(false);
+    }
+  }
+
+  function getItemCacheStatus(itemId: string): CourseCacheItemStatus | null {
+    return cacheStatus?.items.find((item) => item.learning_item_id === itemId) ?? null;
+  }
+
+  function renderCacheBadge(label: string, ready: boolean | undefined) {
+    const isReady = Boolean(ready);
+    return (
+      <span className={`rounded-full px-2 py-1 text-xs font-bold ${isReady ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+        {label}{isReady ? "已生成" : "未生成"}
+      </span>
+    );
   }
 
   return (
@@ -545,14 +617,41 @@ export default function LearningImportPage() {
                 {selectedCourse ? (
                   <div className="space-y-3 rounded-lg border bg-secondary/40 p-3">
                     <p className="text-sm text-muted-foreground">{selectedCourse.description || "暂无课程说明"}</p>
-                    <Button
-                      disabled={deletingCourseId === selectedCourse.id}
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        disabled={isRebuildingCache || items.length === 0}
+                        onClick={handleRebuildCourseCache}
+                        type="button"
+                        variant="secondary"
+                      >
+                        {isRebuildingCache ? "重新生成中..." : "重新生成课程缓存"}
+                      </Button>
+                      <Button
+                      disabled={deletingCourseId === selectedCourse.id || isRebuildingCache}
                       onClick={() => requestDeleteCourse(selectedCourse.id)}
                       type="button"
                       variant="outline"
                     >
                       {deletingCourseId === selectedCourse.id ? "删除中..." : "删除已创建课程"}
                     </Button>
+                    </div>
+                    {cacheRebuildProgress ? (
+                      <div className="space-y-2 rounded-md border bg-background p-3" role="status" aria-live="polite">
+                        <div className="flex items-center justify-between text-xs text-muted-foreground">
+                          <span>{cacheRebuildProgress.message}</span>
+                          <span>{cacheRebuildProgress.percent}%</span>
+                        </div>
+                        <div className="h-2 overflow-hidden rounded-full bg-muted">
+                          <div
+                            className="h-full rounded-full bg-emerald-500 transition-all duration-300"
+                            style={{ width: `${cacheRebuildProgress.percent}%` }}
+                          />
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          句子释义 {cacheRebuildProgress.stats.sentence_translations}，单词/词组释义 {cacheRebuildProgress.stats.term_translations}，发音缓存 {cacheRebuildProgress.stats.speech_cached}，未缓存 {cacheRebuildProgress.stats.speech_missing}，错误 {cacheRebuildProgress.stats.errors}
+                        </p>
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -630,6 +729,43 @@ export default function LearningImportPage() {
           </Card>
         ) : null}
 
+        {cacheStatus ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>当前课程缓存状态</CardTitle>
+              <CardDescription>绿色表示已经保存到数据库并可直接复用，黄色表示还没有生成或生成失败。</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-3 text-sm ipad:grid-cols-3 lg:grid-cols-6">
+                <div className="rounded-lg border bg-secondary/30 p-3">
+                  <p className="font-bold">句子中文释义</p>
+                  <p className="text-muted-foreground">{cacheStatus.summary.sentence_translations_ready} / {cacheStatus.summary.total_items}</p>
+                </div>
+                <div className="rounded-lg border bg-secondary/30 p-3">
+                  <p className="font-bold">句子英文发音</p>
+                  <p className="text-muted-foreground">{cacheStatus.summary.sentence_english_audio_ready} / {cacheStatus.summary.total_items}</p>
+                </div>
+                <div className="rounded-lg border bg-secondary/30 p-3">
+                  <p className="font-bold">句子中文发音</p>
+                  <p className="text-muted-foreground">{cacheStatus.summary.sentence_chinese_audio_ready} / {cacheStatus.summary.total_items}</p>
+                </div>
+                <div className="rounded-lg border bg-secondary/30 p-3">
+                  <p className="font-bold">单词/词组释义</p>
+                  <p className="text-muted-foreground">{cacheStatus.summary.term_translations_ready} / {cacheStatus.summary.total_terms}</p>
+                </div>
+                <div className="rounded-lg border bg-secondary/30 p-3">
+                  <p className="font-bold">单词英文发音</p>
+                  <p className="text-muted-foreground">{cacheStatus.summary.word_english_audio_ready} / {cacheStatus.summary.total_terms}</p>
+                </div>
+                <div className="rounded-lg border bg-secondary/30 p-3">
+                  <p className="font-bold">单词中文发音</p>
+                  <p className="text-muted-foreground">{cacheStatus.summary.word_chinese_audio_ready} / {cacheStatus.summary.total_terms}</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
+
         <Card>
           <CardHeader>
             <CardTitle>当前课程已上传内容</CardTitle>
@@ -644,16 +780,30 @@ export default function LearningImportPage() {
                       <th className="px-3 py-2">类型</th>
                       <th className="px-3 py-2">英文</th>
                       <th className="px-3 py-2">中文</th>
+                      <th className="px-3 py-2">缓存状态</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {items.map((item) => (
-                      <tr className="border-t" key={item.id}>
-                        <td className="px-3 py-2">{itemTypeLabels[item.item_type]}</td>
-                        <td className="px-3 py-2">{item.english_text}</td>
-                        <td className="px-3 py-2">{item.chinese_text}</td>
-                      </tr>
-                    ))}
+                    {items.map((item) => {
+                      const itemCacheStatus = getItemCacheStatus(item.id);
+                      return (
+                        <tr className="border-t" key={item.id}>
+                          <td className="px-3 py-2">{itemTypeLabels[item.item_type]}</td>
+                          <td className="px-3 py-2">{item.english_text}</td>
+                          <td className="px-3 py-2">{item.chinese_text}</td>
+                          <td className="px-3 py-2">
+                            <div className="flex flex-wrap gap-1">
+                              {renderCacheBadge("句子中文", itemCacheStatus?.sentence_chinese_translation_ready)}
+                              {renderCacheBadge("句子英文发音", itemCacheStatus?.sentence_english_audio_ready)}
+                              {renderCacheBadge("句子中文发音", itemCacheStatus?.sentence_chinese_audio_ready)}
+                              {renderCacheBadge("单词释义", itemCacheStatus?.word_translations_ready)}
+                              {renderCacheBadge("单词英文发音", itemCacheStatus?.word_english_audio_ready)}
+                              {renderCacheBadge("单词中文发音", itemCacheStatus?.word_chinese_audio_ready)}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

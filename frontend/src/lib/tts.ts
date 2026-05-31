@@ -1,19 +1,28 @@
-import { refreshAccessToken } from "@/lib/auth";
+import { getFreshAccessToken } from "@/lib/api";
 import { getApiBaseUrl } from "@/lib/api-base-url";
 import { ModelSettings } from "@/lib/model-settings";
-
-let refreshTokenPromise: Promise<string | null> | null = null;
 
 export interface TtsSynthesisOptions {
   speechRate?: number;
   speed?: number;
 }
 
-async function getFreshAccessToken(): Promise<string | null> {
-  refreshTokenPromise ??= refreshAccessToken().finally(() => {
-    refreshTokenPromise = null;
-  });
-  return refreshTokenPromise;
+export interface PrefetchCourseAudioResult {
+  course_id: string;
+  words: Record<string, string>;
+  cache_hits: number;
+  cache_misses: number;
+}
+
+export interface PhonicsDeckItem {
+  phoneme_key: string;
+  display_label: string;
+  synth_text: string;
+  audio_url: string;
+}
+
+export interface PhonicsDeck {
+  phonemes: PhonicsDeckItem[];
 }
 
 export async function synthesizeVolcengineSpeech(
@@ -257,4 +266,100 @@ async function parseSpeechError(response: Response): Promise<string> {
     // Keep the status-based message when the response is not JSON.
   }
   return message;
+}
+
+export function getCachedAudioUrl(hashWithExt: string): string {
+  return `${getApiBaseUrl()}/tts/cached/${hashWithExt}`;
+}
+
+export async function ensureCachedAudio(
+  text: string,
+  voice: string,
+  speechRate: number,
+  accessToken: string,
+  suffix: string = "mp3",
+): Promise<{ cached: boolean; url: string }> {
+  const response = await fetch(`${getApiBaseUrl()}/tts/ensure-cached`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ text, voice, speech_rate: speechRate, suffix }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await parseSpeechError(response));
+  }
+
+  return response.json() as Promise<{ cached: boolean; url: string }>;
+}
+
+export async function prefetchCourseAudio(
+  courseId: string,
+  voice: string,
+  language: string,
+  speechRate: number,
+  accessToken: string,
+): Promise<PrefetchCourseAudioResult> {
+  const response = await fetch(`${getApiBaseUrl()}/tts/prefetch-course-audio`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      course_id: courseId,
+      voice,
+      language,
+      speech_rate: speechRate,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await parseSpeechError(response));
+  }
+
+  return response.json() as Promise<PrefetchCourseAudioResult>;
+}
+
+export async function getPhonicsDeck(accessToken: string): Promise<PhonicsDeck> {
+  const response = await fetch(`${getApiBaseUrl()}/tts/phonics-deck`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(await parseSpeechError(response));
+  }
+
+  return response.json() as Promise<PhonicsDeck>;
+}
+
+export async function generatePhonicsDeckAudio(accessToken: string): Promise<{ generated: number; cached: number; errors: number; total: number }> {
+  const response = await fetch(`${getApiBaseUrl()}/tts/phonics-deck/generate`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(await parseSpeechError(response));
+  }
+
+  return response.json() as Promise<{ generated: number; cached: number; errors: number; total: number }>;
+}
+
+export async function playCachedAudio(url: string, playbackRate = 1): Promise<void> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Cached audio not found: ${response.status}`);
+  }
+  const audioBlob = await response.blob();
+  await playAudioBlob(audioBlob, playbackRate);
 }

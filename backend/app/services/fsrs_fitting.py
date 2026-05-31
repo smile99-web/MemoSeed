@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.models.review_log import ReviewLog
 from app.models.user_model_settings import UserModelSettings
 from app.services.memory_scheduler import (
+    CHILD_FSRS_WEIGHTS,
     FSRS_DECAY,
     FSRS_FACTOR,
     FSRS_WEIGHTS,
@@ -21,7 +22,7 @@ from app.services.memory_scheduler import (
 )
 from app.utils import clamp
 
-MIN_FSRS_TRAINING_REVIEWS = 3000
+MIN_FSRS_TRAINING_REVIEWS = 500
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class FsrsFitResult:
     training_pair_count: int
     accuracy_rate: float
     weights: list[float]
+    child_fitted: bool = True
 
 
 def fit_user_fsrs_parameters(db: Session, user_id: UUID) -> FsrsFitResult:
@@ -61,13 +63,17 @@ def fit_user_fsrs_parameters(db: Session, user_id: UUID) -> FsrsFitResult:
     fitted_weights = list(FSRS_WEIGHTS)
     for rating in range(1, 5):
         samples = stability_samples_by_rating.get(rating, [])
-        if len(samples) >= 50:
+        if len(samples) >= 15:
             sample_stability = median(samples)
-            default_stability = FSRS_WEIGHTS[rating - 1]
-            fitted_weights[rating - 1] = constrain_stability(default_stability * 0.35 + sample_stability * 0.65)
+            child_prior = CHILD_FSRS_WEIGHTS[rating - 1]
+            fitted_weights[rating - 1] = constrain_stability(child_prior * 0.3 + sample_stability * 0.7)
 
     for index in range(1, 4):
         fitted_weights[index] = max(fitted_weights[index], fitted_weights[index - 1] + 0.05)
+
+    # Guard: never exceed the child-calibrated ceiling for initial stability weights.
+    for index in range(4):
+        fitted_weights[index] = min(fitted_weights[index], CHILD_FSRS_WEIGHTS[index])
 
     difficulty_adjustment = (0.78 - accuracy_rate) * 3
     fitted_weights[4] = clamp(FSRS_WEIGHTS[4] + difficulty_adjustment, 4.0, 9.0)
@@ -96,6 +102,7 @@ def fit_user_fsrs_parameters(db: Session, user_id: UUID) -> FsrsFitResult:
         "fsrsTrainingReviewCount": review_count,
         "fsrsTrainingPairCount": sum(len(samples) for samples in stability_samples_by_rating.values()),
         "fsrsAccuracyRate": round(accuracy_rate, 4),
+        "childFitted": True,
     }
     db.commit()
 
@@ -105,6 +112,7 @@ def fit_user_fsrs_parameters(db: Session, user_id: UUID) -> FsrsFitResult:
         training_pair_count=sum(len(samples) for samples in stability_samples_by_rating.values()),
         accuracy_rate=round(accuracy_rate, 4),
         weights=rounded_weights,
+        child_fitted=True,
     )
 
 

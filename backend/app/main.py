@@ -8,8 +8,10 @@ from app.api.v1.router import api_router
 from app.core.config import settings
 from app.db.session import engine
 from app.models.course_completion_log import CourseCompletionLog
+from app.models.speech_asset import SpeechAsset
 from app.models.word_memory_state import WordMemoryState
 from app.models.word_review_task import WordReviewTask
+from app.models.word_translation import WordTranslation
 
 
 def ensure_lightweight_schema_upgrades() -> None:
@@ -31,8 +33,10 @@ def ensure_lightweight_schema_upgrades() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     CourseCompletionLog.__table__.create(bind=engine, checkfirst=True)
+    SpeechAsset.__table__.create(bind=engine, checkfirst=True)
     WordMemoryState.__table__.create(bind=engine, checkfirst=True)
     WordReviewTask.__table__.create(bind=engine, checkfirst=True)
+    WordTranslation.__table__.create(bind=engine, checkfirst=True)
     ensure_lightweight_schema_upgrades()
     yield
 

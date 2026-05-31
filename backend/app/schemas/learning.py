@@ -10,7 +10,11 @@ class LearningItemBase(BaseModel):
     english_text: str = Field(min_length=1)
     chinese_text: str = Field(min_length=1)
     phonetic: str | None = None
+    syllables: list[str] | None = None
+    grapheme_phoneme_map: dict[str, str] | None = None
     difficulty_level: int = Field(default=1, ge=1, le=5)
+    sort_order: int = 0
+    unit_label: str | None = None
     source: str | None = None
 
 
@@ -60,6 +64,55 @@ class LearningTranslationResponse(BaseModel):
     chinese_text: str
 
 
+class WordTranslationsRequest(BaseModel):
+    words: list[str] = Field(min_length=1, max_length=80)
+    course_id: UUID | None = None
+    llm_provider: str | None = None
+    llm_base_url: str | None = None
+    llm_model: str | None = None
+    llm_api_key: str | None = None
+
+
+class WordTranslationsResponse(BaseModel):
+    translations: dict[str, str]
+
+
+class CourseCacheRebuildRequest(BaseModel):
+    llm_provider: str | None = None
+    llm_base_url: str | None = None
+    llm_model: str | None = None
+    llm_api_key: str | None = None
+
+
+class CourseCacheStatusSummary(BaseModel):
+    total_items: int
+    sentence_translations_ready: int
+    sentence_english_audio_ready: int
+    sentence_chinese_audio_ready: int
+    total_terms: int
+    term_translations_ready: int
+    word_english_audio_ready: int
+    word_chinese_audio_ready: int
+    speech_assets_ready: int
+    total_speech_assets: int
+
+
+class CourseCacheItemStatus(BaseModel):
+    learning_item_id: UUID
+    sentence_chinese_translation_ready: bool
+    sentence_english_audio_ready: bool
+    sentence_chinese_audio_ready: bool
+    word_translations_ready: bool
+    word_english_audio_ready: bool
+    word_chinese_audio_ready: bool
+
+
+class CourseCacheStatusResponse(BaseModel):
+    course_id: UUID
+    summary: CourseCacheStatusSummary
+    items: list[CourseCacheItemStatus]
+
+
 class WordMistakeLogRequest(BaseModel):
     learning_item_id: UUID
     expected_word: str = Field(min_length=1)
@@ -80,6 +133,8 @@ class WordReviewRequest(BaseModel):
     response_text: str | None = None
     duration_seconds: int = Field(default=0, ge=0)
     error_type: str | None = Field(default=None, max_length=32)
+    encoding_stage: str | None = Field(default=None, max_length=32)
+    encoding_duration_ms: int = Field(default=0, ge=0)
 
 
 class WordReviewResponse(BaseModel):
@@ -87,10 +142,16 @@ class WordReviewResponse(BaseModel):
     word: str
 
 
+class DynamicSentenceCandidate(BaseModel):
+    english_text: str
+    chinese_text: str
+
+
 class DynamicSentenceRequest(BaseModel):
     course_id: UUID | None = None
     current_sentence: str = ""
     mistaken_words: list[str] = Field(default_factory=list)
+    difficulty_level: int = Field(default=3, ge=1, le=5)
     llm_provider: str | None = None
     llm_base_url: str | None = None
     llm_model: str | None = None
@@ -103,6 +164,7 @@ class DynamicSentenceResponse(BaseModel):
     focus_words: list[str]
     known_words: list[str]
     weak_words: list[str]
+    candidates: list[DynamicSentenceCandidate] = Field(default_factory=list)
 
 
 class LearningEncouragementRequest(BaseModel):

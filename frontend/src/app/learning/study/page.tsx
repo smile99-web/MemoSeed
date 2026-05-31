@@ -2,17 +2,53 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { KeyboardEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { KeyboardEvent, MouseEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { useDevice } from "@/hooks/use-device";
-import { getAccessToken, getAuthUser } from "@/lib/auth";
-import { addCourseCompletion, formatCourseDuration } from "@/lib/course-progress";
+import { getAccessToken } from "@/lib/auth";
+import { addCourseCompletion } from "@/lib/course-progress";
 import { Course, listCoursePackages, listCourses } from "@/lib/courses";
-import { generateDynamicSentence, generateLearningEncouragement, LearningItem, listDueReviewItems, listLearningItems, logWordMistake, logWordReview, translateLearningText } from "@/lib/learning";
+import { generateDynamicSentence, generateLearningEncouragement, getWordTranslations, LearningItem, listDueReviewItems, listLearningItems, logWordMistake, logWordReview, translateLearningText } from "@/lib/learning";
 import { recordCourseCompletion, recordStudyTime, scheduleMemoryReview } from "@/lib/memory";
 import { ModelSettings, defaultModelSettings, getModelSettings, loadPersistedModelSettings } from "@/lib/model-settings";
-import { playAudioBlob, stopAudioPlayback, synthesizeCosyVoiceSpeech, synthesizeKokoroSpeech, synthesizeVolcengineSpeech, TtsSynthesisOptions } from "@/lib/tts";
+import { playAudioBlob, prefetchCourseAudio, stopAudioPlayback, synthesizeCosyVoiceSpeech, synthesizeKokoroSpeech, synthesizeVolcengineSpeech, TtsSynthesisOptions } from "@/lib/tts";
+
+import {
+  tokenizeEnglish,
+  normalizeTypedWord,
+  normalizeEnglishKey,
+  buildChunkedEnglishSpeechText,
+  buildWordByWordEnglishSpeechText,
+  buildFocusedWordSpeechText,
+  getFirstLetter,
+  getMatchedPrefixLength,
+  classifySpellingError,
+  buildReviewTaskInstruction,
+  getReviewTaskModeLabel,
+  rotateChoices,
+  splitIntoSyllables,
+  getPhonemeSpeakableText,
+  getGraphemesForChunk,
+  buildChildFriendlyHint,
+  wait,
+  getDynamicReviewWords,
+  mergeLearningQueues,
+  formatStudyDuration,
+  getStudyProgressKey,
+  getFallbackEncouragement,
+  calculateSentenceScore,
+  getTtsSpeechRate,
+  getAdaptivePreviewDuration,
+  CONTEXT_EXAMPLE_TEMPLATES,
+  commonPartLabels,
+  ChildFriendlyHintData,
+} from "@/lib/study-utils";
+
+import HintDisplay from "./components/HintDisplay";
+import MiniCelebrationConfetti from "./components/MiniCelebrationConfetti";
+import CelebrationModal, { type CelebrationSummary, type NextCourseTarget } from "./components/CelebrationModal";
+import WordInput from "./components/WordInput";
 
 const itemTypeLabels: Record<LearningItem["item_type"], string> = {
   word: "单词",
@@ -20,11 +56,54 @@ const itemTypeLabels: Record<LearningItem["item_type"], string> = {
   sentence: "句子",
 };
 
-const annotationColors = ["border-emerald-500", "border-sky-500", "border-violet-500", "border-amber-500", "border-rose-400"] as const;
-const STUDY_IDLE_TIMEOUT_MS = 20_000;
+const STUDY_IDLE_TIMEOUT_MS = 10_000;
 const STUDY_TIME_FLUSH_SECONDS = 10;
-const DUE_REVIEW_POLL_MS = 60_000;
-const WORD_PREVIEW_MS = 5000;
+const WORD_PREVIEW_MS = 10000;
+const WORD_MEANING_REVIEW_MS = 5000;
+const WORD_TRANSLATION_TIMEOUT_MS = 2500;
+const DIFFICULT_WORD_CONFIRMATION_COUNT = 3;
+const INITIAL_REVIEW_QUEUE_LIMIT = 30;
+const REFILL_REVIEW_QUEUE_LIMIT = 12;
+const BASIC_WORD_MEANINGS: Record<string, string> = {
+  a: "一个",
+  an: "一个",
+  am: "是",
+  are: "是",
+  be: "是",
+  book: "书",
+  can: "能",
+  day: "天",
+  do: "做",
+  does: "做",
+  every: "每个",
+  go: "去",
+  good: "好的",
+  has: "有",
+  have: "有",
+  he: "他",
+  i: "我",
+  in: "在里面",
+  is: "是",
+  it: "它",
+  like: "喜欢",
+  me: "我",
+  my: "我的",
+  new: "新的",
+  not: "不",
+  of: "的",
+  on: "在上面",
+  school: "学校",
+  she: "她",
+  student: "学生",
+  teacher: "老师",
+  the: "这个",
+  to: "去",
+  us: "我们",
+  we: "我们",
+  what: "什么",
+  you: "你",
+  your: "你的",
+};
 const NATURAL_ENGLISH_TTS_OPTIONS: TtsSynthesisOptions = {
   speechRate: 0,
 };
@@ -34,339 +113,28 @@ const SLOW_ENGLISH_TTS_OPTIONS: TtsSynthesisOptions = {
 const WORD_ENGLISH_TTS_OPTIONS: TtsSynthesisOptions = {
   speechRate: 0,
 };
-const commonPartLabels: Record<string, string> = {
-  i: "代词",
-  you: "代词",
-  he: "代词",
-  she: "代词",
-  it: "代词",
-  we: "代词",
-  they: "代词",
-  me: "代词",
-  him: "代词",
-  her: "代词",
-  us: "代词",
-  them: "代词",
-  a: "冠词",
-  an: "冠词",
-  the: "冠词",
-  am: "动词",
-  is: "动词",
-  are: "动词",
-  was: "动词",
-  were: "动词",
-  have: "动词",
-  has: "动词",
-  had: "动词",
-  do: "动词",
-  does: "动词",
-  did: "动词",
-  can: "情态动词",
-  will: "情态动词",
-  new: "形容词",
-  old: "形容词",
-  good: "形容词",
-  bad: "形容词",
-};
 
-type AnswerState = "typing" | "mistake-word-practice" | "sentence-complete";
+function normalizeChoiceAnswer(value: string | null | undefined): string {
+  return (value ?? "").trim().replace(/\s+/g, "");
+}
+
+function hasChineseText(value: string | null | undefined): boolean {
+  return /[\u4e00-\u9fff]/.test(value ?? "");
+}
+
+function isCorrectChoiceAnswer(choice: string, answer: string | null | undefined): boolean {
+  const normalizedChoice = normalizeChoiceAnswer(choice);
+  const normalizedAnswer = normalizeChoiceAnswer(answer);
+  return Boolean(normalizedChoice && normalizedAnswer && normalizedChoice === normalizedAnswer);
+}
+
+type AnswerState = "typing" | "mistake-word-practice" | "word-meaning-review" | "sentence-complete";
+type EncodingStage = "meaning_intro" | "listen" | "chunk_trace" | "whole_recall" | "contextual_use";
 type WordStatus = "idle" | "correct" | "incorrect" | "skipped";
 type MistakePracticeStatus = "idle" | "incorrect";
 
-interface CelebrationSummary {
-  courseName: string;
-  durationSeconds: number;
-  correctWordCount: number;
-  encouragementChineseText: string;
-  encouragementEnglishText: string;
-  canContinue: boolean;
-  statusMessage: string;
-}
 
-interface NextCourseTarget {
-  id: string;
-  name: string;
-  packageId: string;
-}
 
-function tokenizeEnglish(value: string): string[] {
-  return value.trim().split(/\s+/).filter(Boolean);
-}
-
-function normalizeTypedWord(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[“”]/g, '"')
-    .replace(/[‘’]/g, "'")
-    .replace(/^[^a-z0-9']+|[^a-z0-9']+$/g, "");
-}
-
-function normalizeEnglishKey(value: string): string {
-  return value.trim().toLowerCase().replace(/^[^a-z0-9']+|[^a-z0-9']+$/g, "");
-}
-
-function cleanEnglishSpeechWord(value: string): string {
-  return value.trim().replace(/^[^a-zA-Z0-9']+|[^a-zA-Z0-9']+$/g, "");
-}
-
-function buildChunkedEnglishSpeechText(value: string): string {
-  const words = tokenizeEnglish(value).map(cleanEnglishSpeechWord).filter(Boolean);
-  if (words.length <= 3) {
-    return words.join(" ");
-  }
-
-  const chunks: string[] = [];
-  for (let index = 0; index < words.length; index += 3) {
-    chunks.push(words.slice(index, index + 3).join(" "));
-  }
-  return chunks.join(". ");
-}
-
-function buildWordByWordEnglishSpeechText(value: string): string {
-  return tokenizeEnglish(value).map(cleanEnglishSpeechWord).filter(Boolean).join(". ");
-}
-
-function buildFocusedWordSpeechText(word: string): string {
-  const cleanWord = cleanEnglishSpeechWord(word);
-  if (!cleanWord) {
-    return "";
-  }
-  return `${cleanWord}. ${cleanWord}.`;
-}
-
-function getFirstLetter(value: string): string {
-  return normalizeEnglishKey(value).charAt(0);
-}
-
-function getMatchedPrefixLength(expectedWord: string, typedWord: string): number {
-  const normalizedExpected = normalizeEnglishKey(expectedWord);
-  const normalizedTyped = normalizeEnglishKey(typedWord);
-  let matchedPrefixLength = 0;
-  while (
-    matchedPrefixLength < normalizedExpected.length
-    && matchedPrefixLength < normalizedTyped.length
-    && normalizedExpected[matchedPrefixLength] === normalizedTyped[matchedPrefixLength]
-  ) {
-    matchedPrefixLength += 1;
-  }
-
-  return matchedPrefixLength;
-}
-
-function countSharedLetters(expectedWord: string, typedWord: string): number {
-  const expectedLetters = new Map<string, number>();
-  normalizeEnglishKey(expectedWord)
-    .split("")
-    .forEach((letter) => {
-      expectedLetters.set(letter, (expectedLetters.get(letter) ?? 0) + 1);
-    });
-  return normalizeEnglishKey(typedWord)
-    .split("")
-    .reduce((count, letter) => {
-      const availableCount = expectedLetters.get(letter) ?? 0;
-      if (availableCount <= 0) {
-        return count;
-      }
-      expectedLetters.set(letter, availableCount - 1);
-      return count + 1;
-    }, 0);
-}
-
-function isAdjacentLetterSwap(expectedWord: string, typedWord: string): boolean {
-  const normalizedExpected = normalizeEnglishKey(expectedWord);
-  const normalizedTyped = normalizeEnglishKey(typedWord);
-  if (normalizedExpected.length !== normalizedTyped.length || normalizedExpected.length < 2) {
-    return false;
-  }
-  const differentIndexes = normalizedExpected
-    .split("")
-    .map((letter, index) => (letter === normalizedTyped[index] ? -1 : index))
-    .filter((index) => index >= 0);
-  return (
-    differentIndexes.length === 2
-    && differentIndexes[1] === differentIndexes[0] + 1
-    && normalizedExpected[differentIndexes[0]] === normalizedTyped[differentIndexes[1]]
-    && normalizedExpected[differentIndexes[1]] === normalizedTyped[differentIndexes[0]]
-  );
-}
-
-function classifySpellingError(expectedWord: string, typedWord: string): string {
-  const normalizedExpected = normalizeEnglishKey(expectedWord);
-  const normalizedTyped = normalizeEnglishKey(typedWord);
-  const sharedLetterRatio = normalizedExpected.length === 0 ? 0 : countSharedLetters(normalizedExpected, normalizedTyped) / normalizedExpected.length;
-  if (normalizedTyped.length >= 2 && sharedLetterRatio < 0.35) {
-    return "unknown";
-  }
-  if (getFirstLetter(normalizedExpected) !== getFirstLetter(normalizedTyped)) {
-    return "first-letter";
-  }
-  if (isAdjacentLetterSwap(normalizedExpected, normalizedTyped)) {
-    return "sequence";
-  }
-  if (normalizedExpected.length !== normalizedTyped.length) {
-    return normalizedTyped.length < normalizedExpected.length ? "missing-letter" : "extra-letter";
-  }
-  const matchedPrefixLength = getMatchedPrefixLength(normalizedExpected, normalizedTyped);
-  if (matchedPrefixLength >= Math.max(1, normalizedExpected.length - 2)) {
-    return "ending";
-  }
-  if (matchedPrefixLength <= Math.max(1, Math.floor(normalizedExpected.length / 2))) {
-    return "middle";
-  }
-  return "sequence";
-}
-
-function maskWordByIndexes(word: string, visibleIndexes: Set<number>): string {
-  const normalizedWord = normalizeEnglishKey(word);
-  return normalizedWord
-    .split("")
-    .map((letter, index) => (visibleIndexes.has(index) ? letter : "_"))
-    .join(" ");
-}
-
-function buildReviewTaskInstruction(taskType: string | undefined, word: string): string {
-  const normalizedWord = normalizeEnglishKey(word);
-  if (!taskType || !normalizedWord) {
-    return "";
-  }
-  if (taskType === "listen_spell") {
-    return "听英文发音后拼写。";
-  }
-  if (taskType === "missing_letter") {
-    const visibleIndexes = new Set<number>([0, Math.max(normalizedWord.length - 1, 0)]);
-    return `补全缺失字母：${maskWordByIndexes(normalizedWord, visibleIndexes)}`;
-  }
-  if (taskType === "hidden_recall") {
-    return "看 5 秒后会隐藏，再凭记忆重拼。";
-  }
-  if (taskType === "recall_word") {
-    return "不看答案，直接凭记忆拼写。";
-  }
-  if (taskType === "cloze_sentence") {
-    return "只填写错过的单词。";
-  }
-  if (taskType === "chinese_to_english") {
-    return "根据中文意思拼写英文。";
-  }
-  return "";
-}
-
-function getReviewTaskModeLabel(taskType: string | undefined): string {
-  const labels: Record<string, string> = {
-    chinese_to_english: "看中文拼英文",
-    listen_spell: "听英文拼英文",
-    english_to_chinese: "英文选中文",
-    match_translation: "中英文配对",
-    missing_letter: "缺字母填空",
-    cloze_sentence: "短句填空",
-    hidden_recall: "隐藏重拼",
-    recall_word: "无提示拼写",
-  };
-  return taskType ? labels[taskType] ?? "专项复习" : "";
-}
-
-function formatChunkLengths(lengths: number[]): string {
-  return lengths.join(" + ");
-}
-
-function getFrontHintChunkLengths(wordLength: number): number[] {
-  if (wordLength <= 3) {
-    return [wordLength];
-  }
-
-  const firstChunkLength = wordLength <= 6 ? 2 : 3;
-  return [firstChunkLength, wordLength - firstChunkLength];
-}
-
-function buildFrontChunkHint(word: string): string {
-  const normalizedWord = normalizeEnglishKey(word);
-  const chunkLengths = getFrontHintChunkLengths(normalizedWord.length);
-  const visibleLength = chunkLengths[0] ?? 0;
-  const visibleIndexes = new Set<number>();
-  for (let index = 0; index < visibleLength; index += 1) {
-    visibleIndexes.add(index);
-  }
-
-  return `分段提示：按 ${formatChunkLengths(chunkLengths)} 个字母分段，一共 ${normalizedWord.length} 个字母。前面音节：${maskWordByIndexes(word, visibleIndexes)}`;
-}
-
-function buildSecondChunkHint(word: string): string {
-  const normalizedWord = normalizeEnglishKey(word);
-  const chunkLengths = getFrontHintChunkLengths(normalizedWord.length);
-  const hiddenLength = chunkLengths[0] ?? 0;
-  const visibleIndexes = new Set<number>();
-  for (let index = hiddenLength; index < normalizedWord.length; index += 1) {
-    visibleIndexes.add(index);
-  }
-
-  return `分段提示：按 ${formatChunkLengths(chunkLengths)} 个字母分段，一共 ${normalizedWord.length} 个字母。第二音节：${maskWordByIndexes(word, visibleIndexes)}`;
-}
-
-function buildEndingHint(word: string): string {
-  const normalizedWord = normalizeEnglishKey(word);
-  const visibleIndexes = new Set<number>();
-  const startIndex = Math.max(normalizedWord.length - 2, 0);
-  for (let index = startIndex; index < normalizedWord.length; index += 1) {
-    visibleIndexes.add(index);
-  }
-  return `词尾提示：注意最后 ${normalizedWord.length - startIndex} 个字母：${maskWordByIndexes(word, visibleIndexes)}`;
-}
-
-function buildTypedSpellingHint(expectedWord: string, typedWord: string, errorCount: number, errorType: string): string {
-  const normalizedExpected = normalizeEnglishKey(expectedWord);
-  if (errorType === "unknown") {
-    return `先看 5 秒建立印象，再遮住重拼。这个单词一共 ${normalizedExpected.length} 个字母。`;
-  }
-  if (errorType === "first-letter") {
-    return `先确认中文意思，再听首音。首字母是 ${normalizedExpected[0] ?? ""}。`;
-  }
-  if (errorType === "ending") {
-    return buildEndingHint(expectedWord);
-  }
-  if (errorType === "sequence") {
-    return `顺序提示：字母可能站错位置，先按分段慢慢拼。${buildFrontChunkHint(expectedWord)}`;
-  }
-  if (errorType === "missing-letter" || errorType === "extra-letter") {
-    return `长度提示：这个单词一共 ${normalizedExpected.length} 个字母。${buildFrontChunkHint(expectedWord)}`;
-  }
-  return buildProgressiveSpellingHint(expectedWord, typedWord, errorCount);
-}
-
-function buildProgressiveSpellingHint(expectedWord: string, typedWord: string, errorCount: number): string {
-  const normalizedExpected = normalizeEnglishKey(expectedWord);
-  const matchedPrefixLength = getMatchedPrefixLength(expectedWord, typedWord);
-
-  if (errorCount === 1) {
-    return `提示：${maskWordByIndexes(expectedWord, new Set([0]))}，一共 ${normalizedExpected.length} 个字母。`;
-  }
-
-  if (errorCount === 2) {
-    return buildFrontChunkHint(expectedWord);
-  }
-
-  if (errorCount === 3) {
-    return buildSecondChunkHint(expectedWord);
-  }
-
-  const nextVisibleIndex = Math.min(Math.max(matchedPrefixLength, 1), Math.max(normalizedExpected.length - 1, 0));
-  const visibleIndexes = new Set<number>([0]);
-  for (let index = 0; index < Math.min(matchedPrefixLength, normalizedExpected.length); index += 1) {
-    visibleIndexes.add(index);
-  }
-  visibleIndexes.add(nextVisibleIndex);
-  const nextLetter = normalizedExpected[nextVisibleIndex] ?? "";
-  return `下一步提示：第 ${nextVisibleIndex + 1} 个字母是 ${nextLetter}。${maskWordByIndexes(expectedWord, visibleIndexes)}。先遮住答案，在心里拼一遍再输入。`;
-}
-
-function getWordInputWidth(word: string): string {
-  const normalizedLength = Math.max(normalizeEnglishKey(word).length, 2);
-  return `${Math.min(Math.max(normalizedLength * 3, 8), 24)}rem`;
-}
-
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
 
 function speakWithBrowser(text: string, language: string, playbackRate = 1): Promise<void> {
   if (!text.trim() || !("speechSynthesis" in window)) {
@@ -383,6 +151,143 @@ function speakWithBrowser(text: string, language: string, playbackRate = 1): Pro
     window.speechSynthesis.speak(utterance);
   });
 }
+
+function playSyllableAudio(word: string, chunkIndex: number, cachedSyllables?: string[] | null, onTtsPlay?: ((blob: Blob) => void)): void {
+  const chunks = splitIntoSyllables(word, cachedSyllables);
+  const chunk = chunks[chunkIndex];
+  if (!chunk) {
+    return;
+  }
+
+  // Try professional TTS first
+  if (onTtsPlay) {
+    const accessToken = getAccessToken();
+    if (accessToken) {
+      const settings = getModelSettings();
+      try {
+        void synthesizeVolcengineSpeech(chunk, settings.ttsEnglishVoice, "en-US", settings, accessToken, { speechRate: 0 }).then((blob) => {
+          onTtsPlay(blob);
+        }).catch(() => {
+          // Fallback to browser
+          speakSyllableWithBrowser(chunk);
+        });
+        return;
+      } catch {
+        // Fall through to browser
+      }
+    }
+  }
+
+  speakSyllableWithBrowser(chunk);
+}
+
+function speakSyllableWithBrowser(chunk: string): void {
+  if (!("speechSynthesis" in window)) {
+    return;
+  }
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(chunk);
+  utterance.lang = "en-US";
+  utterance.rate = 1;
+  window.speechSynthesis.speak(utterance);
+}
+
+// Phonics audio cache: phoneme -> audio Blob
+const phonicsAudioCache = new Map<string, Blob>();
+
+async function synthesizeAndCachePhonemeAudio(phoneme: string): Promise<Blob | null> {
+  const cached = phonicsAudioCache.get(phoneme);
+  if (cached) return cached;
+
+  const speakableText = getPhonemeSpeakableText(phoneme);
+  if (!speakableText) return null;
+
+  const accessToken = getAccessToken();
+  if (!accessToken) return null;
+
+  const settings = getModelSettings();
+  try {
+    const blob = await synthesizeVolcengineSpeech(speakableText, settings.ttsEnglishVoice, "en-US", settings, accessToken, { speechRate: 0 });
+    phonicsAudioCache.set(phoneme, blob);
+    return blob;
+  } catch {
+    return null;
+  }
+}
+
+async function playPhonicsAudio(word: string, chunkIndex: number, gpMap: Record<string, string> | null | undefined, cachedSyllables?: string[] | null, onTtsPlay?: ((blob: Blob) => void) | null): Promise<void> {
+  const chunks = splitIntoSyllables(word, cachedSyllables);
+  const chunk = chunks[chunkIndex];
+  if (!chunk) {
+    return;
+  }
+
+  // If no grapheme-phoneme map is available, fall back to letter name spelling via browser
+  if (!gpMap || Object.keys(gpMap).length === 0) {
+    playLegacyLetterAudio(chunk, onTtsPlay ?? undefined);
+    return;
+  }
+
+  // Find graphemes that make up this chunk
+  const graphemes = getGraphemesForChunk(chunk, gpMap);
+
+  stopAudioPlayback();
+
+  // Use Volcengine TTS for each phoneme
+  for (let i = 0; i < graphemes.length; i += 1) {
+    const grapheme = graphemes[i];
+    const phoneme = gpMap[grapheme];
+    if (!phoneme) continue;
+
+    const blob = await synthesizeAndCachePhonemeAudio(phoneme);
+    if (blob) {
+      if (onTtsPlay) {
+        onTtsPlay(blob);
+      } else {
+        await playAudioBlob(blob);
+      }
+      if (i < graphemes.length - 1) {
+        await wait(120);
+      }
+    }
+  }
+}
+
+function playLegacyLetterAudio(chunk: string, onTtsPlay?: (blob: Blob) => void): void {
+  if (!("speechSynthesis" in window)) return;
+
+  // Try professional TTS for single letters first
+  if (onTtsPlay) {
+    const accessToken = getAccessToken();
+    if (accessToken) {
+    const settings = getModelSettings();
+    const letters = chunk.split("").join(". ");
+    try {
+        void synthesizeVolcengineSpeech(letters, settings.ttsEnglishVoice, "en-US", settings, accessToken, { speechRate: 0 }).then((blob) => {
+          onTtsPlay(blob);
+        }).catch(() => {
+          speakLettersWithBrowser(chunk);
+        });
+        return;
+      } catch {
+        // Fall through to browser
+      }
+    }
+  }
+
+  speakLettersWithBrowser(chunk);
+}
+
+function speakLettersWithBrowser(chunk: string): void {
+  window.speechSynthesis.cancel();
+  const letters = chunk.split("").join(".");
+  const utterance = new SpeechSynthesisUtterance(letters);
+  utterance.lang = "en-US";
+  utterance.rate = 1;
+  window.speechSynthesis.speak(utterance);
+}
+
+
 
 async function speakWithKokoro(
   text: string,
@@ -413,63 +318,6 @@ async function speakWithKokoro(
     console.warn("课程学习 TTS 播放失败，已回退到浏览器语音。", error);
     await speakWithBrowser(text, language, options.speed ?? 1);
   }
-}
-
-function formatStudyDuration(totalSeconds: number): string {
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  const paddedMinutes = String(minutes).padStart(2, "0");
-  const paddedSeconds = String(seconds).padStart(2, "0");
-  return hours > 0 ? `${hours}:${paddedMinutes}:${paddedSeconds}` : `${minutes}:${paddedSeconds}`;
-}
-
-function getStudyProgressKey(courseId: string): string {
-  const userId = getAuthUser()?.id ?? "anonymous";
-  return `memoseed_study_progress_${userId}_${courseId}`;
-}
-
-function getFallbackEncouragement(courseName: string): { chineseText: string; englishText: string } {
-  const fallbackEncouragements = [
-    {
-      chineseText: `${courseName}完成得很棒，继续保持这份认真！`,
-      englishText: "Great work finishing this lesson. Keep going with confidence!",
-    },
-    {
-      chineseText: `你又向前走了一步，下一课也一定可以！`,
-      englishText: "You took another step forward. You can do the next lesson too!",
-    },
-    {
-      chineseText: `今天的努力会变成明天的进步，做得好！`,
-      englishText: "Today's effort will become tomorrow's progress. Well done!",
-    },
-  ];
-  return fallbackEncouragements[Math.floor(Math.random() * fallbackEncouragements.length)];
-}
-
-function getDynamicReviewWords(item: LearningItem | null): string[] {
-  if (item?.focus_words && item.focus_words.length > 0) {
-    return item.focus_words.map(normalizeEnglishKey).filter(Boolean);
-  }
-  if (!item?.source?.startsWith("AI 动态复习：")) {
-    return [];
-  }
-  return item.source
-    .replace("AI 动态复习：", "")
-    .split(",")
-    .map(normalizeEnglishKey)
-    .filter(Boolean);
-}
-
-function mergeLearningQueues(reviewItems: LearningItem[], courseItems: LearningItem[]): LearningItem[] {
-  const seenItemIds = new Set<string>();
-  return [...reviewItems, ...courseItems].filter((item) => {
-    if (seenItemIds.has(item.id)) {
-      return false;
-    }
-    seenItemIds.add(item.id);
-    return true;
-  });
 }
 
 async function speakWithKokoroApi(text: string, voice: string, settings: ModelSettings, options: TtsSynthesisOptions = {}): Promise<Blob> {
@@ -526,111 +374,70 @@ function playCelebrationSound() {
   window.setTimeout(() => void audioContext.close().catch(() => undefined), 900);
 }
 
-function CelebrationConfetti({ runKey }: { runKey: number }) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const context = canvas?.getContext("2d");
-    if (!canvas || !context) {
-      return;
-    }
-
-    const dpr = window.devicePixelRatio || 1;
-    const resizeCanvas = () => {
-      canvas.width = Math.floor(canvas.clientWidth * dpr);
-      canvas.height = Math.floor(canvas.clientHeight * dpr);
-      context.setTransform(dpr, 0, 0, dpr, 0, 0);
-    };
-    resizeCanvas();
-
-    const colors = ["#10b981", "#0ea5e9", "#f59e0b", "#ef4444", "#8b5cf6"];
-    const pieces = Array.from({ length: 150 }, () => ({
-      x: Math.random() * canvas.clientWidth,
-      y: -20 - Math.random() * canvas.clientHeight * 0.6,
-      size: 6 + Math.random() * 7,
-      color: colors[Math.floor(Math.random() * colors.length)],
-      rotation: Math.random() * Math.PI,
-      rotationSpeed: -0.18 + Math.random() * 0.36,
-      speedX: -2.5 + Math.random() * 5,
-      speedY: 2 + Math.random() * 4,
-    }));
-
-    let animationFrame = 0;
-    const startedAt = performance.now();
-    const drawFrame = (time: number) => {
-      context.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
-      pieces.forEach((piece) => {
-        piece.x += piece.speedX;
-        piece.y += piece.speedY;
-        piece.rotation += piece.rotationSpeed;
-        if (piece.y > canvas.clientHeight + 30) {
-          piece.y = -20;
-          piece.x = Math.random() * canvas.clientWidth;
-        }
-
-        context.save();
-        context.translate(piece.x, piece.y);
-        context.rotate(piece.rotation);
-        context.fillStyle = piece.color;
-        context.fillRect(-piece.size / 2, -piece.size / 2, piece.size, piece.size * 0.55);
-        context.restore();
-      });
-
-      if (time - startedAt < 5200) {
-        animationFrame = window.requestAnimationFrame(drawFrame);
-      }
-    };
-
-    animationFrame = window.requestAnimationFrame(drawFrame);
-    window.addEventListener("resize", resizeCanvas);
-    return () => {
-      window.cancelAnimationFrame(animationFrame);
-      window.removeEventListener("resize", resizeCanvas);
-    };
-  }, [runKey]);
-
-  return <canvas ref={canvasRef} className="pointer-events-none absolute inset-0 h-full w-full" />;
+function playCorrectDing() {
+  const AudioContextCtor = window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioContextCtor) return;
+  const ctx = new AudioContextCtor();
+  const now = ctx.currentTime;
+  [523.25, 659.25].forEach((freq, i) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = freq;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    const startAt = now + i * 0.1;
+    gain.gain.setValueAtTime(0.0001, startAt);
+    gain.gain.exponentialRampToValueAtTime(0.18, startAt + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.18);
+    osc.start(startAt);
+    osc.stop(startAt + 0.2);
+  });
+  setTimeout(() => void ctx.close().catch(() => undefined), 600);
 }
 
-function CelebrationModal({ nextCourse, summary }: { nextCourse: NextCourseTarget | null; summary: CelebrationSummary }) {
-  const nextCourseHref = nextCourse
-    ? `/learning/study?course_id=${nextCourse.id}&package_id=${nextCourse.packageId}&course_name=${encodeURIComponent(nextCourse.name)}`
-    : "/learning";
+function playIncorrectTap() {
+  const AudioContextCtor = window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioContextCtor) return;
+  const ctx = new AudioContextCtor();
+  const now = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  const lpFilter = ctx.createBiquadFilter();
+  const gain = ctx.createGain();
+  osc.type = "sine";
+  osc.frequency.value = 220;
+  lpFilter.type = "lowpass";
+  lpFilter.frequency.value = 400;
+  osc.connect(lpFilter);
+  lpFilter.connect(gain);
+  gain.connect(ctx.destination);
+  gain.gain.setValueAtTime(0.14, now);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.1);
+  osc.start(now);
+  osc.stop(now + 0.1);
+  setTimeout(() => void ctx.close().catch(() => undefined), 300);
+}
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-slate-950/60 px-6">
-      <CelebrationConfetti runKey={summary.durationSeconds + summary.correctWordCount} />
-      <div className="relative z-10 w-full max-w-md rounded-lg bg-white p-7 text-center shadow-2xl ipad:max-w-lg ipad:p-10">
-        <p className="text-sm font-semibold text-primary ipad:text-base">学习完成</p>
-        <h2 className="mt-2 text-3xl font-bold tracking-tight ipad:text-4xl">{summary.courseName}学习完成</h2>
-        <div className="mt-6">
-          <div className="rounded-lg border bg-slate-50 px-4 py-4 ipad:px-6 ipad:py-5">
-            <p className="text-xs text-muted-foreground ipad:text-sm">本次用时</p>
-            <p className="mt-1 text-xl font-bold text-slate-900 ipad:text-3xl">{formatCourseDuration(summary.durationSeconds)}</p>
-          </div>
-        </div>
-        <div className="mt-5 rounded-lg border bg-emerald-50 px-4 py-4 text-left ipad:mt-6 ipad:px-6 ipad:py-5">
-          <p className="text-sm font-semibold text-emerald-700 ipad:text-base">鼓励语</p>
-          <p className="mt-2 text-base font-bold text-slate-900 ipad:text-lg">{summary.encouragementChineseText}</p>
-          <p className="mt-1 text-sm font-medium text-slate-700 ipad:text-base">{summary.encouragementEnglishText}</p>
-          <p className="mt-3 text-xs text-muted-foreground ipad:text-sm">{summary.statusMessage}</p>
-        </div>
-        <div className="mt-6 flex flex-wrap justify-center gap-3 ipad:gap-4">
-          {summary.canContinue ? (
-            <Button asChild className="ipad:text-base ipad:px-5 ipad:py-2">
-              <Link href={nextCourseHref}>{nextCourse ? "学习下一课" : "返回开始学习"}</Link>
-            </Button>
-          ) : (
-            <Button disabled type="button" className="ipad:text-base ipad:px-5 ipad:py-2">{nextCourse ? "朗读后进入下一课" : "朗读后返回"}</Button>
-          )}
-          <Button asChild variant="secondary" className="ipad:text-base ipad:px-5 ipad:py-2">
-            <Link href="/learning">返回开始学习</Link>
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
+function playLevelUpSound() {
+  const AudioContextCtor = window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioContextCtor) return;
+  const ctx = new AudioContextCtor();
+  const now = ctx.currentTime;
+  [523.25, 659.25, 783.99, 1046.5, 1318.5].forEach((freq, i) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "triangle";
+    osc.frequency.value = freq;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    const startAt = now + i * 0.08;
+    gain.gain.setValueAtTime(0.0001, startAt);
+    gain.gain.exponentialRampToValueAtTime(0.15, startAt + 0.03);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.45);
+    osc.start(startAt);
+    osc.stop(startAt + 0.5);
+  });
+  setTimeout(() => void ctx.close().catch(() => undefined), 1200);
 }
 
 function StudyContent() {
@@ -659,16 +466,22 @@ function StudyContent() {
   const [wordConsecutiveCorrect, setWordConsecutiveCorrect] = useState<number[]>([]);
   const [mistakePracticeConsecutiveCorrect, setMistakePracticeConsecutiveCorrect] = useState(0);
   const [mistakePracticeTranslations, setMistakePracticeTranslations] = useState<Record<string, string>>({});
+  const [sentenceWordMeanings, setSentenceWordMeanings] = useState<Record<number, string>>({});
   const [reviewTaskWordTranslation, setReviewTaskWordTranslation] = useState("");
   const [pendingMistakePracticeWords, setPendingMistakePracticeWords] = useState<string[]>([]);
   const [deferredDynamicWords, setDeferredDynamicWords] = useState<string[]>([]);
   const [hasFinalizedCurrentItem, setHasFinalizedCurrentItem] = useState(false);
   const [startedAt, setStartedAt] = useState<number>(() => Date.now());
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
+  const [childHint, setChildHint] = useState<ChildFriendlyHintData | null>(null);
+  const [previewCountdownSeconds, setPreviewCountdownSeconds] = useState(0);
+  const [celebrationTrigger, setCelebrationTrigger] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [modelSettings, setModelSettings] = useState<ModelSettings>(defaultModelSettings);
   const [activeStudySeconds, setActiveStudySeconds] = useState(0);
+  const [isStudyPaused, setIsStudyPaused] = useState(false);
+  const [isDictationMode, setIsDictationMode] = useState(false);
   const [celebrationSummary, setCelebrationSummary] = useState<CelebrationSummary | null>(null);
   const [isStudyFullscreen, setIsStudyFullscreen] = useState(true);
   const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
@@ -678,7 +491,9 @@ function StudyContent() {
   const courseRunStartedActiveMsRef = useRef(0);
   const courseRunCorrectWordKeysRef = useRef<Set<string>>(new Set());
   const lastStudyTickAtRef = useRef(Date.now());
-  const lastKeyboardAtRef = useRef(Date.now());
+  const lastStudyActivityAtRef = useRef(Date.now());
+  const isStudyPausedRef = useRef(false);
+  const isDictationModeRef = useRef(false);
   const isFlushingStudyTimeRef = useRef(false);
   const voiceSequenceRef = useRef(0);
   const modelSettingsRef = useRef<ModelSettings>(defaultModelSettings);
@@ -693,7 +508,28 @@ function StudyContent() {
   const celebrationSummaryRef = useRef<CelebrationSummary | null>(null);
   const wordPreviewTimeoutRef = useRef<number | null>(null);
   const mistakePracticePreviewTimeoutRef = useRef<number | null>(null);
-  const isRespellRoundRef = useRef(false);
+  const previewCountdownIntervalRef = useRef<number | null>(null);
+  const respellWordIndexesRef = useRef<number[]>([]);
+  const encodingStageRef = useRef<EncodingStage | null>(null);
+  const encodingStartTimeRef = useRef(0);
+  const encodingStageStartTimeRef = useRef(0);
+  const encodingStageTimeoutRef = useRef<number | null>(null);
+  const wordMeaningReviewTimeoutRef = useRef<number | null>(null);
+
+  const [encodingStage, setEncodingStage] = useState<EncodingStage | null>(null);
+  const [encodingWord, setEncodingWord] = useState("");
+  const [, setEncodingChineseText] = useState("");
+  const [encodingContextExample, setEncodingContextExample] = useState<{ english: string; chinese: string } | null>(null);
+
+  const [currentStreak, setCurrentStreak] = useState(0);
+  const [correctWordCount, setCorrectWordCount] = useState(0);
+  const [perfectSentenceCount, setPerfectSentenceCount] = useState(0);
+  const [wordAnimations, setWordAnimations] = useState<Record<number, { type: "correct" | "incorrect"; key: number }>>({});
+  const [streakCelebrateKey, setStreakCelebrateKey] = useState(0);
+  const [milestoneCelebrateKey, setMilestoneCelebrateKey] = useState(0);
+  const [starAnimKey, setStarAnimKey] = useState(0);
+  const feedbackSetAtRef = useRef<number>(0);
+  const wordAnimKeyRef = useRef(0);
 
   const currentItem = items[currentIndex] ?? null;
   const currentWords = useMemo(() => tokenizeEnglish(currentItem?.english_text ?? ""), [currentItem]);
@@ -705,10 +541,31 @@ function StudyContent() {
   const isDynamicFillBlankItem = dynamicReviewWordIndexes.length > 0;
   const currentMistakePracticeWord = mistakePracticeWords[mistakePracticeIndex] ?? "";
   const currentMistakePracticeTranslation = mistakePracticeTranslations[currentMistakePracticeWord] ?? "";
-  const isChoiceReviewTask = currentItem?.review_task_type === "english_to_chinese" || currentItem?.review_task_type === "match_translation";
+  const isChoiceReviewTask = currentItem?.review_task_type === "listen_choose_chinese" || currentItem?.review_task_type === "english_to_chinese" || currentItem?.review_task_type === "match_translation";
+  const isListeningChoiceReviewTask = currentItem?.review_task_type === "listen_choose_chinese";
   const isSingleWordReviewTask = Boolean(currentItem?.review_task_type && currentItem.review_task_type !== "cloze_sentence");
   const currentFocusedReviewWord = dynamicReviewWords[0] ?? (isSingleWordReviewTask || currentItem?.item_type === "word" ? currentWords[0] : "");
-  const isFocusedWordReview = Boolean(currentFocusedReviewWord);
+  const shouldUseSingleWordPrompt = Boolean(!isChoiceReviewTask && (isSingleWordReviewTask || currentItem?.item_type === "word"));
+  const isFocusedWordReview = Boolean(shouldUseSingleWordPrompt && currentFocusedReviewWord);
+  const choiceReviewOptions = useMemo(() => {
+    if (!currentItem || !isChoiceReviewTask) {
+      return [];
+    }
+    const backendAnswer = hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "";
+    const fallbackAnswer = hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "";
+    const correctAnswer = backendAnswer || fallbackAnswer;
+    const fallbackChoices = (currentItem.review_choices && currentItem.review_choices.length > 0 ? currentItem.review_choices : [])
+      .filter((choice) => hasChineseText(choice));
+    const choicesWithAnswer = correctAnswer && !fallbackChoices.some((choice) => isCorrectChoiceAnswer(choice, correctAnswer))
+      ? [correctAnswer, ...fallbackChoices]
+      : fallbackChoices;
+    // Prefer backend-provided choices (4+ items) over frontend 3-item fallback
+    if (choicesWithAnswer.length >= 4) {
+      return rotateChoices(choicesWithAnswer, `${currentItem.id}-${currentFocusedReviewWord}`);
+    }
+    const translatedChoices = correctAnswer ? [correctAnswer, "老师", "学生", "学校", "书", "朋友"].filter((choice, index, values) => values.indexOf(choice) === index) : [];
+    return rotateChoices(translatedChoices.length > 0 ? translatedChoices : choicesWithAnswer, `${currentItem.id}-${currentFocusedReviewWord}`);
+  }, [currentFocusedReviewWord, currentItem, isChoiceReviewTask, reviewTaskWordTranslation]);
   const reviewTaskInstruction = buildReviewTaskInstruction(currentItem?.review_task_type, currentFocusedReviewWord);
   const reviewTaskModeLabel = getReviewTaskModeLabel(currentItem?.review_task_type);
   const progressPercent = items.length > 0 ? ((currentIndex + 1) / items.length) * 100 : 0;
@@ -725,10 +582,13 @@ function StudyContent() {
 
     const nextCourseIndex = (currentCourseIndex + 1) % packageCourses.length;
     const targetCourse = packageCourses[nextCourseIndex];
+    // Check if next course has a prerequisite — lock status will be refined via API call
+    const hasPrerequisite = Boolean(targetCourse.prerequisite_course_id);
     return {
       id: targetCourse.id,
       name: targetCourse.name,
       packageId,
+      isLocked: hasPrerequisite,
     };
   }, [courseId, packageCourses, packageId]);
 
@@ -742,6 +602,10 @@ function StudyContent() {
   }, [modelSettings]);
 
   useEffect(() => {
+    isDictationModeRef.current = isDictationMode;
+  }, [isDictationMode]);
+
+  useEffect(() => {
     currentIndexRef.current = currentIndex;
     currentItemRef.current = currentItem;
     celebrationSummaryRef.current = celebrationSummary;
@@ -751,16 +615,48 @@ function StudyContent() {
     answerStateRef.current = answerState;
   }, [answerState]);
 
+  useEffect(() => {
+    if (feedbackMessage) {
+      feedbackSetAtRef.current = Date.now();
+    }
+  }, [feedbackMessage]);
+
+  useEffect(() => {
+    if (correctWordCount > 0 && correctWordCount % 5 === 0) {
+      setMilestoneCelebrateKey((k) => k + 1);
+    }
+  }, [correctWordCount]);
+
+  useEffect(() => {
+    if (currentStreak > 0 && [5, 10, 15].includes(currentStreak)) {
+      setStreakCelebrateKey((k) => k + 1);
+      playLevelUpSound();
+    }
+  }, [currentStreak]);
+
   const updateAnswerState = useCallback(function updateAnswerState(nextState: AnswerState) {
     answerStateRef.current = nextState;
     setAnswerState(nextState);
   }, []);
+
+  function clearWordMeaningReview() {
+    if (wordMeaningReviewTimeoutRef.current !== null) {
+      window.clearTimeout(wordMeaningReviewTimeoutRef.current);
+      wordMeaningReviewTimeoutRef.current = null;
+    }
+    setSentenceWordMeanings({});
+  }
 
   const clearWordPreview = useCallback(function clearWordPreview() {
     if (wordPreviewTimeoutRef.current !== null) {
       window.clearTimeout(wordPreviewTimeoutRef.current);
       wordPreviewTimeoutRef.current = null;
     }
+    if (previewCountdownIntervalRef.current !== null) {
+      window.clearInterval(previewCountdownIntervalRef.current);
+      previewCountdownIntervalRef.current = null;
+    }
+    setPreviewCountdownSeconds(0);
     setPreviewWordIndex(null);
   }, []);
 
@@ -772,7 +668,7 @@ function StudyContent() {
     setPreviewMistakePracticeWord(false);
   }, []);
 
-  const showWordPreview = useCallback(function showWordPreview(index: number, expectedWord: string) {
+  const showWordPreview = useCallback(function showWordPreview(index: number, expectedWord: string, chineseMeaning = "") {
     clearWordPreview();
     setPreviewWordIndex(index);
     setWordAnswers((current) => {
@@ -780,9 +676,53 @@ function StudyContent() {
       nextAnswers[index] = "";
       return nextAnswers;
     });
-    setFeedbackMessage(`看清这个单词 ${Math.round(WORD_PREVIEW_MS / 1000)} 秒：${expectedWord}。它会自动隐藏，然后请凭记忆完整拼写。`);
+
+    // Start countdown bar
+    const previewSeconds = Math.round(WORD_PREVIEW_MS / 1000);
+    setPreviewCountdownSeconds(previewSeconds);
+    if (previewCountdownIntervalRef.current !== null) {
+      window.clearInterval(previewCountdownIntervalRef.current);
+    }
+    const startTime = Date.now();
+    previewCountdownIntervalRef.current = window.setInterval(() => {
+      const elapsed = Date.now() - startTime;
+      const remaining = Math.max(0, previewSeconds - Math.floor(elapsed / 1000));
+      setPreviewCountdownSeconds(remaining);
+      if (remaining <= 0) {
+        if (previewCountdownIntervalRef.current !== null) {
+          window.clearInterval(previewCountdownIntervalRef.current);
+          previewCountdownIntervalRef.current = null;
+        }
+      }
+    }, 200);
+
+    // Play slow audio of the word
+    const settings = modelSettingsRef.current;
+    const speechText = buildFocusedWordSpeechText(expectedWord);
+    if (speechText) {
+      voiceSequenceRef.current += 1;
+      stopAudioPlayback();
+      const previewSequenceId = voiceSequenceRef.current;
+      void speakWithKokoro(
+        speechText,
+        settings.ttsEnglishVoice,
+        "en-US",
+        settings,
+        SLOW_ENGLISH_TTS_OPTIONS,
+        () => voiceSequenceRef.current === previewSequenceId,
+      );
+    }
+
+    setFeedbackMessage(chineseMeaning
+      ? `记住它！还剩 ${previewSeconds} 秒：${expectedWord}。中文意思：${chineseMeaning}`
+      : `记住它！还剩 ${previewSeconds} 秒：${expectedWord}`);
     wordPreviewTimeoutRef.current = window.setTimeout(() => {
       wordPreviewTimeoutRef.current = null;
+      if (previewCountdownIntervalRef.current !== null) {
+        window.clearInterval(previewCountdownIntervalRef.current);
+        previewCountdownIntervalRef.current = null;
+      }
+      setPreviewCountdownSeconds(0);
       setPreviewWordIndex(null);
       setWordStatuses((current) => {
         const nextStatuses = [...current];
@@ -791,7 +731,7 @@ function StudyContent() {
         }
         return nextStatuses;
       });
-      setFeedbackMessage("现在请凭记忆重新拼写这个单词。");
+      setFeedbackMessage(chineseMeaning ? `现在请凭记忆重新拼写这个单词。中文意思：${chineseMeaning}` : "现在请凭记忆重新拼写这个单词。");
       window.setTimeout(() => inputRefs.current[index]?.focus(), 0);
     }, WORD_PREVIEW_MS);
   }, [clearWordPreview]);
@@ -810,33 +750,12 @@ function StudyContent() {
     }, WORD_PREVIEW_MS);
   }, [clearMistakePracticePreview]);
 
-  useEffect(() => {
-    return () => {
-      if (wordPreviewTimeoutRef.current !== null) {
-        window.clearTimeout(wordPreviewTimeoutRef.current);
-      }
-      if (mistakePracticePreviewTimeoutRef.current !== null) {
-        window.clearTimeout(mistakePracticePreviewTimeoutRef.current);
-      }
-    };
+  const clearEncodingTimeout = useCallback(function clearEncodingTimeout() {
+    if (encodingStageTimeoutRef.current !== null) {
+      window.clearTimeout(encodingStageTimeoutRef.current);
+      encodingStageTimeoutRef.current = null;
+    }
   }, []);
-
-  const setPendingMistakePractice = useCallback(function setPendingMistakePractice(words: string[], translations: Record<string, string>) {
-    pendingMistakePracticeWordsRef.current = words;
-    pendingMistakePracticeTranslationsRef.current = translations;
-    setPendingMistakePracticeWords(words);
-  }, []);
-
-  const getRequiredWordIndexes = useCallback(function getRequiredWordIndexes(): number[] {
-    return isDynamicFillBlankItem ? dynamicReviewWordIndexes : currentWords.map((_, index) => index);
-  }, [currentWords, dynamicReviewWordIndexes, isDynamicFillBlankItem]);
-
-  function areRequiredWordAnswersComplete(nextAnswers: string[], nextStatuses = wordStatuses): boolean {
-    return getRequiredWordIndexes().every((wordIndex) => (
-      nextStatuses[wordIndex] === "skipped"
-      || normalizeTypedWord(nextAnswers[wordIndex] ?? "") === normalizeTypedWord(currentWords[wordIndex] ?? "")
-    ));
-  }
 
   const startVoiceSequence = useCallback(function startVoiceSequence(): number {
     voiceSequenceRef.current += 1;
@@ -927,16 +846,215 @@ function StudyContent() {
       : speakClearEnglishSentence(sequenceId, englishText, settings, includeNaturalRead);
   }, [speakClearEnglishSentence, speakFocusedEnglishWord]);
 
-  const playCurrentItemIntro = useCallback(async function playCurrentItemIntro(item: LearningItem, sequenceId: number) {
+  const advanceEncodingStage = useCallback(async function advanceEncodingStage(stage: EncodingStage, word: string, chineseText: string) {
     const settings = modelSettingsRef.current;
-    if (!(await waitInVoiceSequence(sequenceId, 1000))) {
+    const sequenceId = startVoiceSequence();
+    let nextStage: EncodingStage | null = null;
+    if (stage === "meaning_intro") { nextStage = "listen"; }
+    else if (stage === "listen") { nextStage = "chunk_trace"; }
+    else if (stage === "chunk_trace") { nextStage = "whole_recall"; }
+    else if (stage === "whole_recall") { nextStage = "contextual_use"; }
+
+    encodingStageStartTimeRef.current = Date.now();
+    encodingStageRef.current = nextStage;
+    setEncodingStage(nextStage);
+    clearEncodingTimeout();
+
+    if (!nextStage) {
+      encodingStartTimeRef.current = 0;
+      setEncodingWord("");
+      setEncodingChineseText("");
+      setEncodingContextExample(null);
+      updateAnswerState("sentence-complete");
+      setFeedbackMessage("记忆编码完成！按空格进入下一题。");
       return;
     }
+
+    if (nextStage === "listen") {
+      const syllables = (currentItem?.syllables && currentItem.syllables.length > 0)
+        ? currentItem.syllables
+        : splitIntoSyllables(word);
+      setFeedbackMessage("仔细听，这个单词分为 " + syllables.length + " 个音节：" + syllables.join(" — "));
+      if (!isDictationModeRef.current) {
+        const wordByWord = buildWordByWordEnglishSpeechText(word);
+        await speakInVoiceSequence(sequenceId, wordByWord, settings.ttsEnglishVoice, "en-US", settings, SLOW_ENGLISH_TTS_OPTIONS);
+      }
+      encodingStageTimeoutRef.current = window.setTimeout(function () {
+        void advanceEncodingStage("listen", word, chineseText);
+      }, 3000);
+      return;
+    }
+
+    if (nextStage === "chunk_trace") {
+      const graphemeMap = currentItem?.grapheme_phoneme_map ?? null;
+      if (graphemeMap) {
+        const hintParts: string[] = [];
+        const entries = Object.entries(graphemeMap);
+        for (let i = 0; i < entries.length; i++) {
+          hintParts.push(entries[i][0] + "=" + entries[i][1]);
+        }
+        setFeedbackMessage("点击每个颜色块听发音。拼读提示：" + hintParts.join("，"));
+      } else {
+        setFeedbackMessage("点击每个颜色块听发音，也可以按字母逐音朗读。");
+      }
+      encodingStageTimeoutRef.current = window.setTimeout(function () {
+        void advanceEncodingStage("chunk_trace", word, chineseText);
+      }, 6000);
+      return;
+    }
+
+    if (nextStage === "whole_recall") {
+      const previewMs = getAdaptivePreviewDuration(word);
+      const previewSeconds = Math.round(previewMs / 1000);
+      setFeedbackMessage("记住它！还剩 " + previewSeconds + " 秒：" + word);
+      setPreviewCountdownSeconds(previewSeconds);
+      if (previewCountdownIntervalRef.current !== null) {
+        window.clearInterval(previewCountdownIntervalRef.current);
+      }
+      const intervalStart = Date.now();
+      previewCountdownIntervalRef.current = window.setInterval(function () {
+        const elapsed = Date.now() - intervalStart;
+        const remaining = Math.max(0, previewSeconds - Math.floor(elapsed / 1000));
+        setPreviewCountdownSeconds(remaining);
+        if (remaining <= 0) {
+          if (previewCountdownIntervalRef.current !== null) {
+            window.clearInterval(previewCountdownIntervalRef.current);
+            previewCountdownIntervalRef.current = null;
+          }
+        }
+      }, 200);
+      const speechText = buildFocusedWordSpeechText(word);
+      if (speechText && !isDictationModeRef.current) {
+        void speakInVoiceSequence(sequenceId, speechText, settings.ttsEnglishVoice, "en-US", settings, SLOW_ENGLISH_TTS_OPTIONS);
+      }
+      encodingStageTimeoutRef.current = window.setTimeout(function () {
+        encodingStageTimeoutRef.current = null;
+        if (previewCountdownIntervalRef.current !== null) {
+          window.clearInterval(previewCountdownIntervalRef.current);
+          previewCountdownIntervalRef.current = null;
+        }
+        setPreviewCountdownSeconds(0);
+        setFeedbackMessage("现在请凭记忆拼写这个单词。");
+        setWordAnswers(function (current) {
+          const nextAnswers = current.slice();
+          nextAnswers[0] = "";
+          return nextAnswers;
+        });
+        window.setTimeout(function () { const ref = inputRefs.current[0]; if (ref) { ref.focus(); } }, 0);
+      }, previewMs);
+      return;
+    }
+
+    if (nextStage === "contextual_use") {
+      const templateIndex = word.length % CONTEXT_EXAMPLE_TEMPLATES.length;
+      const template = CONTEXT_EXAMPLE_TEMPLATES[templateIndex];
+      const exampleEnglish = template.english(word);
+      const exampleChinese = template.chinese(chineseText);
+      setEncodingContextExample({ english: exampleEnglish, chinese: exampleChinese });
+      setFeedbackMessage("例句：" + exampleChinese);
+      if (!isDictationModeRef.current) {
+        await speakInVoiceSequence(sequenceId, exampleChinese, settings.ttsChineseVoice, "zh-CN", settings);
+        if (await waitInVoiceSequence(sequenceId, 800)) {
+          await speakClearEnglish(sequenceId, exampleEnglish, settings, true);
+        }
+      }
+      encodingStageTimeoutRef.current = window.setTimeout(function () {
+        void advanceEncodingStage("contextual_use", word, chineseText);
+      }, 4000);
+      return;
+    }
+  }, [clearEncodingTimeout, currentItem, speakClearEnglish, speakInVoiceSequence, startVoiceSequence, updateAnswerState, waitInVoiceSequence]);
+
+  const startEncodingFn = useCallback(async function startEncoding(word: string, chineseText: string) {
+    const now = Date.now();
+    encodingStartTimeRef.current = now;
+    encodingStageStartTimeRef.current = now;
+    setEncodingStage("meaning_intro");
+    setEncodingWord(word);
+    setEncodingChineseText(chineseText);
+    setEncodingContextExample(null);
+    setPreviewCountdownSeconds(0);
+    clearEncodingTimeout();
+    clearWordPreview();
+    encodingStageRef.current = "meaning_intro";
+
+    setFeedbackMessage("先听中文意思和英文发音，不要看拼写。中文：" + chineseText);
+
+    const settings = modelSettingsRef.current;
+    const sequenceId = startVoiceSequence();
+
+    if (!isDictationModeRef.current) {
+      await speakInVoiceSequence(sequenceId, chineseText, settings.ttsChineseVoice, "zh-CN", settings);
+      if (!(await waitInVoiceSequence(sequenceId, 800))) return;
+      const speechText = buildFocusedWordSpeechText(word);
+      if (speechText) {
+        await speakInVoiceSequence(sequenceId, speechText, settings.ttsEnglishVoice, "en-US", settings, SLOW_ENGLISH_TTS_OPTIONS);
+        if (!(await waitInVoiceSequence(sequenceId, 600))) return;
+        await speakInVoiceSequence(sequenceId, speechText, settings.ttsEnglishVoice, "en-US", settings, SLOW_ENGLISH_TTS_OPTIONS);
+      }
+    }
+
+    encodingStageTimeoutRef.current = window.setTimeout(function () {
+      void advanceEncodingStage("meaning_intro", word, chineseText);
+    }, 1500);
+  }, [advanceEncodingStage, clearEncodingTimeout, clearWordPreview, speakInVoiceSequence, startVoiceSequence, waitInVoiceSequence]);
+
+  useEffect(() => {
+    return () => {
+      if (wordPreviewTimeoutRef.current !== null) {
+        window.clearTimeout(wordPreviewTimeoutRef.current);
+      }
+      if (mistakePracticePreviewTimeoutRef.current !== null) {
+        window.clearTimeout(mistakePracticePreviewTimeoutRef.current);
+      }
+      if (previewCountdownIntervalRef.current !== null) {
+        window.clearInterval(previewCountdownIntervalRef.current);
+      }
+      if (encodingStageTimeoutRef.current !== null) {
+        window.clearTimeout(encodingStageTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const setPendingMistakePractice = useCallback(function setPendingMistakePractice(words: string[], translations: Record<string, string>) {
+    pendingMistakePracticeWordsRef.current = words;
+    pendingMistakePracticeTranslationsRef.current = translations;
+    setPendingMistakePracticeWords(words);
+  }, []);
+
+  const getRequiredWordIndexes = useCallback(function getRequiredWordIndexes(): number[] {
+    if (respellWordIndexesRef.current.length > 0) return respellWordIndexesRef.current;
+    return isDynamicFillBlankItem ? dynamicReviewWordIndexes : currentWords.map((_, index) => index);
+  }, [currentWords, dynamicReviewWordIndexes, isDynamicFillBlankItem]);
+
+  function areRequiredWordAnswersComplete(nextAnswers: string[], nextStatuses = wordStatuses): boolean {
+    return getRequiredWordIndexes().every((wordIndex) => (
+      nextStatuses[wordIndex] === "skipped"
+      || normalizeTypedWord(nextAnswers[wordIndex] ?? "") === normalizeTypedWord(currentWords[wordIndex] ?? "")
+    ));
+  }
+
+  const playCurrentItemIntro = useCallback(async function playCurrentItemIntro(item: LearningItem, sequenceId: number) {
+    const settings = modelSettingsRef.current;
     let chineseText = item.chinese_text;
     let englishText = item.english_text;
     const focusedWords = getDynamicReviewWords(item);
-    const focusedWord = focusedWords[0] ?? (item.review_task_type || item.item_type === "word" ? tokenizeEnglish(item.english_text)[0] : "");
-    if (focusedWord) {
+    const isChoiceIntroTask = item.review_task_type === "listen_choose_chinese" || item.review_task_type === "english_to_chinese" || item.review_task_type === "match_translation";
+    const shouldUseSingleWordIntro = Boolean(!isChoiceIntroTask && ((item.review_task_type && item.review_task_type !== "cloze_sentence") || item.item_type === "word"));
+    const focusedWord = (isChoiceIntroTask || shouldUseSingleWordIntro) ? focusedWords[0] ?? tokenizeEnglish(item.english_text)[0] ?? "" : "";
+    if (isChoiceIntroTask && focusedWord) {
+      chineseText = item.review_task_type === "listen_choose_chinese" ? "听英文发音，选择中文意思" : "请选择这个英文单词的中文意思";
+      englishText = focusedWord;
+      try {
+        const accessToken = getAccessToken();
+        if (accessToken) {
+          const response = await translateLearningText(focusedWord, accessToken, modelSettingsRef.current);
+          setReviewTaskWordTranslation(response.chinese_text);
+        }
+      } catch {
+        setReviewTaskWordTranslation("");
+      }
+    } else if (shouldUseSingleWordIntro && focusedWord) {
       try {
         const accessToken = getAccessToken();
         if (accessToken) {
@@ -953,6 +1071,18 @@ function StudyContent() {
         englishText = focusedWord;
       }
     }
+
+    if (isDictationModeRef.current) {
+      return;
+    }
+
+    if (!(await waitInVoiceSequence(sequenceId, 1000))) {
+      return;
+    }
+    if (item.review_task_type === "listen_choose_chinese") {
+      await speakClearEnglish(sequenceId, englishText, settings, false);
+      return;
+    }
     if (!(await speakInVoiceSequence(sequenceId, chineseText, settings.ttsChineseVoice, "zh-CN", settings))) {
       return;
     }
@@ -963,6 +1093,9 @@ function StudyContent() {
   }, [speakClearEnglish, speakInVoiceSequence, waitInVoiceSequence]);
 
   const playChineseThenEnglish = useCallback(async function playChineseThenEnglish(chineseText: string, englishText: string, sequenceId = startVoiceSequence()) {
+    if (isDictationModeRef.current) {
+      return;
+    }
     const settings = modelSettingsRef.current;
     if (!(await speakInVoiceSequence(sequenceId, chineseText, settings.ttsChineseVoice, "zh-CN", settings))) {
       return;
@@ -973,8 +1106,27 @@ function StudyContent() {
     await speakClearEnglish(sequenceId, englishText, settings, true);
   }, [speakClearEnglish, speakInVoiceSequence, startVoiceSequence, waitInVoiceSequence]);
 
+  const playEnglishThenChinese = useCallback(async function playEnglishThenChinese(englishText: string, chineseText: string, sequenceId = startVoiceSequence()) {
+    if (isDictationModeRef.current) {
+      return;
+    }
+    const settings = modelSettingsRef.current;
+    if (!(await speakClearEnglish(sequenceId, englishText, settings, false))) {
+      return;
+    }
+    if (!(await waitInVoiceSequence(sequenceId, 700))) {
+      return;
+    }
+    if (chineseText.trim()) {
+      await speakInVoiceSequence(sequenceId, chineseText, settings.ttsChineseVoice, "zh-CN", settings);
+    }
+  }, [speakClearEnglish, speakInVoiceSequence, startVoiceSequence, waitInVoiceSequence]);
+
   const focusInputAtEnd = useCallback(function focusInputAtEnd(input: HTMLInputElement | null) {
     if (!input) {
+      return;
+    }
+    if (input.disabled || input.readOnly || document.hidden) {
       return;
     }
     input.focus();
@@ -982,7 +1134,26 @@ function StudyContent() {
     input.setSelectionRange(cursorPosition, cursorPosition);
   }, []);
 
+  const canKeepStudyInputFocused = useCallback(function canKeepStudyInputFocused() {
+    if (!currentItem || isChoiceReviewTask || celebrationSummary) {
+      return false;
+    }
+    if (answerStateRef.current === "mistake-word-practice") {
+      return !previewMistakePracticeWord;
+    }
+    if (answerStateRef.current !== "typing" || isCompletingSentenceRef.current) {
+      return false;
+    }
+    if (previewWordIndex !== null) {
+      return false;
+    }
+    return true;
+  }, [celebrationSummary, currentItem, isChoiceReviewTask, previewMistakePracticeWord, previewWordIndex]);
+
   const focusCurrentUnfinishedWord = useCallback(function focusCurrentUnfinishedWord() {
+    if (!canKeepStudyInputFocused()) {
+      return;
+    }
     if (answerStateRef.current === "mistake-word-practice") {
       focusInputAtEnd(mistakePracticeInputRef.current);
       return;
@@ -998,23 +1169,104 @@ function StudyContent() {
     });
     const targetIndex = firstUnfinished ?? activeWordIndex;
     focusInputAtEnd(inputRefs.current[targetIndex] ?? null);
-  }, [activeWordIndex, currentWords, focusInputAtEnd, getRequiredWordIndexes, wordAnswers]);
+  }, [activeWordIndex, canKeepStudyInputFocused, currentWords, focusInputAtEnd, getRequiredWordIndexes, wordAnswers]);
+
+  const scheduleStudyFocusReturn = useCallback(function scheduleStudyFocusReturn() {
+    window.setTimeout(focusCurrentUnfinishedWord, 0);
+    window.setTimeout(focusCurrentUnfinishedWord, 80);
+    window.setTimeout(focusCurrentUnfinishedWord, 250);
+  }, [focusCurrentUnfinishedWord]);
+
+  function keepStudyInputFocus(event: MouseEvent<HTMLElement>) {
+    event.preventDefault();
+    scheduleStudyFocusReturn();
+  }
+
+  useEffect(() => {
+    if (!currentItem || isChoiceReviewTask) {
+      return;
+    }
+
+    const isCurrentStudyInput = (element: Element | null) => {
+      if (!element) {
+        return false;
+      }
+      if (element === mistakePracticeInputRef.current) {
+        return true;
+      }
+      return inputRefs.current.some((input) => input === element);
+    };
+
+    const returnFocusIfNeeded = () => {
+      if (!canKeepStudyInputFocused()) {
+        return;
+      }
+      if (!isCurrentStudyInput(document.activeElement)) {
+        scheduleStudyFocusReturn();
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        scheduleStudyFocusReturn();
+      }
+    };
+
+    document.addEventListener("focusout", returnFocusIfNeeded, true);
+    window.addEventListener("pointerup", returnFocusIfNeeded, true);
+    window.addEventListener("keyup", returnFocusIfNeeded, true);
+    window.addEventListener("focus", returnFocusIfNeeded);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    const intervalId = window.setInterval(returnFocusIfNeeded, 1200);
+    scheduleStudyFocusReturn();
+
+    return () => {
+      document.removeEventListener("focusout", returnFocusIfNeeded, true);
+      window.removeEventListener("pointerup", returnFocusIfNeeded, true);
+      window.removeEventListener("keyup", returnFocusIfNeeded, true);
+      window.removeEventListener("focus", returnFocusIfNeeded);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.clearInterval(intervalId);
+    };
+  }, [canKeepStudyInputFocused, currentItem, isChoiceReviewTask, scheduleStudyFocusReturn]);
 
   const handleSpeakEnglish = useCallback(function handleSpeakEnglish() {
     const textToSpeak = answerStateRef.current === "mistake-word-practice" ? currentMistakePracticeWord : currentItem?.english_text;
     if (!textToSpeak) {
       return;
     }
-    focusCurrentUnfinishedWord();
+    scheduleStudyFocusReturn();
     const sequenceId = startVoiceSequence();
     const settings = modelSettingsRef.current;
-    void speakClearEnglish(sequenceId, textToSpeak, settings, false).finally(() => {
-      window.setTimeout(focusCurrentUnfinishedWord, 0);
+    const focusedTranslation = answerStateRef.current === "mistake-word-practice"
+      ? currentMistakePracticeTranslation
+      : isFocusedWordReview
+        ? reviewTaskWordTranslation
+        : "";
+    const speechPromise = focusedTranslation
+      ? playEnglishThenChinese(textToSpeak, focusedTranslation, sequenceId)
+      : speakClearEnglish(sequenceId, textToSpeak, settings, false);
+    void speechPromise.finally(() => {
+      scheduleStudyFocusReturn();
     });
-  }, [currentItem, currentMistakePracticeWord, focusCurrentUnfinishedWord, speakClearEnglish, startVoiceSequence]);
+  }, [currentItem, currentMistakePracticeTranslation, currentMistakePracticeWord, isFocusedWordReview, playEnglishThenChinese, reviewTaskWordTranslation, scheduleStudyFocusReturn, speakClearEnglish, startVoiceSequence]);
+
+  function runStudyButtonAction(action: () => void | Promise<unknown>) {
+    const result = action();
+    scheduleStudyFocusReturn();
+    if (result && typeof (result as Promise<unknown>).finally === "function") {
+      void (result as Promise<unknown>).finally(() => {
+        scheduleStudyFocusReturn();
+      });
+    }
+  }
 
   function toggleStudyFullscreen() {
     setIsStudyFullscreen((current) => !current);
+  }
+
+  function toggleDictationMode() {
+    setIsDictationMode((current) => !current);
   }
 
   const flushStudyTime = useCallback(async function flushStudyTime(force = false) {
@@ -1050,22 +1302,38 @@ function StudyContent() {
     courseRunStartedActiveMsRef.current = 0;
     courseRunCorrectWordKeysRef.current = new Set();
     lastStudyTickAtRef.current = Date.now();
-    lastKeyboardAtRef.current = Date.now();
+    lastStudyActivityAtRef.current = Date.now();
+    isStudyPausedRef.current = false;
     setActiveStudySeconds(0);
+    setIsStudyPaused(false);
     setCelebrationSummary(null);
   }, [courseId]);
 
   useEffect(() => {
-    function markKeyboardActivity() {
-      lastKeyboardAtRef.current = Date.now();
+    function markStudyActivity() {
+      const now = Date.now();
+      lastStudyActivityAtRef.current = now;
+      if (isStudyPausedRef.current) {
+        isStudyPausedRef.current = false;
+        setIsStudyPaused(false);
+      }
     }
 
     function tickStudyTime() {
       const now = Date.now();
       const elapsedMs = Math.max(0, now - lastStudyTickAtRef.current);
       lastStudyTickAtRef.current = now;
-      if (now - lastKeyboardAtRef.current > STUDY_IDLE_TIMEOUT_MS) {
+      if (now - lastStudyActivityAtRef.current > STUDY_IDLE_TIMEOUT_MS) {
+        if (!isStudyPausedRef.current) {
+          isStudyPausedRef.current = true;
+          setIsStudyPaused(true);
+        }
         return;
+      }
+
+      if (isStudyPausedRef.current) {
+        isStudyPausedRef.current = false;
+        setIsStudyPaused(false);
       }
 
       activeStudyMsRef.current += elapsedMs;
@@ -1081,13 +1349,17 @@ function StudyContent() {
       void flushStudyTime(true);
     }
 
-    window.addEventListener("keydown", markKeyboardActivity);
+    window.addEventListener("keydown", markStudyActivity);
+    window.addEventListener("pointerdown", markStudyActivity, true);
+    window.addEventListener("touchstart", markStudyActivity, true);
     window.addEventListener("pagehide", flushWhenLeaving);
     document.addEventListener("visibilitychange", flushWhenLeaving);
     const intervalId = window.setInterval(tickStudyTime, 1000);
 
     return () => {
-      window.removeEventListener("keydown", markKeyboardActivity);
+      window.removeEventListener("keydown", markStudyActivity);
+      window.removeEventListener("pointerdown", markStudyActivity, true);
+      window.removeEventListener("touchstart", markStudyActivity, true);
       window.removeEventListener("pagehide", flushWhenLeaving);
       document.removeEventListener("visibilitychange", flushWhenLeaving);
       window.clearInterval(intervalId);
@@ -1100,6 +1372,7 @@ function StudyContent() {
     setWordStatuses(currentWords.map(() => "idle"));
     setWordErrorCounts(currentWords.map(() => 0));
     setWordConsecutiveCorrect(currentWords.map(() => 0));
+    clearWordMeaningReview();
     clearWordPreview();
     clearMistakePracticePreview();
     setMistakenWords([]);
@@ -1111,22 +1384,31 @@ function StudyContent() {
     setMistakePracticeTranslations({});
     setReviewTaskWordTranslation("");
     setPendingMistakePractice([], {});
+    setCurrentStreak(0);
+    setWordAnimations({});
     setHasFinalizedCurrentItem(false);
     setStartedAt(Date.now());
     setActiveWordIndex(dynamicReviewWordIndexes[0] ?? 0);
     updateAnswerState("typing");
     isCompletingSentenceRef.current = false;
-    isRespellRoundRef.current = false;
+    respellWordIndexesRef.current = [];
     setFeedbackMessage(null);
-    window.setTimeout(() => inputRefs.current[dynamicReviewWordIndexes[0] ?? 0]?.focus(), 0);
-    const sequenceId = startVoiceSequence();
-    if (currentItem?.chinese_text && currentItem.english_text) {
-      void playCurrentItemIntro(currentItem, sequenceId);
+    // Multi-modal encoding for new words (not review tasks)
+    if (currentItem && !currentItem.review_task_type && currentItem.item_type === "word" && currentWords[0]) {
+      const encWord = currentWords[0];
+      const encChinese = currentItem.chinese_text;
+      void startEncodingFn(encWord, encChinese);
+    } else {
+      window.setTimeout(function () { const ref = inputRefs.current[dynamicReviewWordIndexes[0] ?? 0]; if (ref) { ref.focus(); } }, 0);
+      const seqId = startVoiceSequence();
+      if (currentItem?.chinese_text && currentItem.english_text) {
+        void playCurrentItemIntro(currentItem, seqId);
+      }
+      if (currentItem?.review_task_type === "hidden_recall" && currentWords[0]) {
+        window.setTimeout(function () { showWordPreview(0, currentWords[0]); }, 1200);
+      }
     }
-    if (currentItem?.review_task_type === "hidden_recall" && currentWords[0]) {
-      window.setTimeout(() => showWordPreview(0, currentWords[0]), 1200);
-    }
-  }, [clearMistakePracticePreview, clearWordPreview, currentItem, currentWords, dynamicReviewWordIndexes, playCurrentItemIntro, setPendingMistakePractice, showWordPreview, startVoiceSequence, updateAnswerState]);
+  }, [clearMistakePracticePreview, clearWordPreview, currentItem, currentWords, dynamicReviewWordIndexes, playCurrentItemIntro, setPendingMistakePractice, showWordPreview, startVoiceSequence, updateAnswerState, startEncodingFn]);
 
   useEffect(() => {
     if (answerState === "mistake-word-practice") {
@@ -1150,7 +1432,7 @@ function StudyContent() {
 
       try {
         const [dueReviewItems, nextItems] = await Promise.all([
-          listDueReviewItems(accessToken, courseId).catch(() => [] as LearningItem[]),
+          listDueReviewItems(accessToken, courseId, INITIAL_REVIEW_QUEUE_LIMIT, false, INITIAL_REVIEW_QUEUE_LIMIT).catch(() => [] as LearningItem[]),
           listLearningItems(accessToken, courseId),
         ]);
         queuedReviewItemIdsRef.current = new Set(dueReviewItems.map((item) => item.id));
@@ -1170,6 +1452,17 @@ function StudyContent() {
     void loadStudyItems();
   }, [courseId]);
 
+  // Prefetch course audio in background after study items are loaded
+  useEffect(() => {
+    if (isLoading || items.length === 0 || !courseId) return;
+    const accessToken = getAccessToken();
+    if (!accessToken) return;
+    const settings = modelSettingsRef.current;
+    if (settings.ttsProvider !== "volcark") return;
+    const speechRate = getTtsSpeechRate(settings);
+    void prefetchCourseAudio(courseId, settings.ttsEnglishVoice, "en-US", speechRate, accessToken).catch(() => { /* silent */ });
+  }, [isLoading, items.length, courseId]);
+
   const insertDueReviewItemsAfterCurrent = useCallback(async function insertDueReviewItemsAfterCurrent() {
     const accessToken = getAccessToken();
     const activeItem = currentItemRef.current;
@@ -1177,7 +1470,7 @@ function StudyContent() {
       return;
     }
 
-    const dueReviewItems = await listDueReviewItems(accessToken, courseId, 6).catch(() => [] as LearningItem[]);
+    const dueReviewItems = await listDueReviewItems(accessToken, courseId, REFILL_REVIEW_QUEUE_LIMIT, false, REFILL_REVIEW_QUEUE_LIMIT).catch(() => [] as LearningItem[]);
     const freshReviewItems = dueReviewItems.filter((item) => !queuedReviewItemIdsRef.current.has(item.id) && item.id !== activeItem.id);
     if (freshReviewItems.length === 0) {
       return;
@@ -1203,12 +1496,14 @@ function StudyContent() {
       return;
     }
 
+    // Only poll once at session start — no silent mid-session injection.
+    // Deferred reviews are shown as a count at session end, not forced mid-flow.
     const timeoutId = window.setTimeout(() => {
       void insertDueReviewItemsAfterCurrent();
     }, 15_000);
     const intervalId = window.setInterval(() => {
       void insertDueReviewItemsAfterCurrent();
-    }, DUE_REVIEW_POLL_MS);
+    }, 60_000);
 
     return () => {
       window.clearTimeout(timeoutId);
@@ -1254,6 +1549,7 @@ function StudyContent() {
     setWordAnswers(currentWords.map(() => ""));
     setWordStatuses(currentWords.map(() => "idle"));
     setWordErrorCounts(currentWords.map(() => 0));
+    clearWordMeaningReview();
     clearWordPreview();
     clearMistakePracticePreview();
     setMistakenWords([]);
@@ -1269,6 +1565,8 @@ function StudyContent() {
     setActiveWordIndex(dynamicReviewWordIndexes[0] ?? 0);
     updateAnswerState("typing");
     isCompletingSentenceRef.current = false;
+    setCurrentStreak(0);
+    setWordAnimations({});
     setFeedbackMessage(null);
     window.setTimeout(() => inputRefs.current[dynamicReviewWordIndexes[0] ?? 0]?.focus(), 0);
   }
@@ -1374,16 +1672,6 @@ function StudyContent() {
     return item.source_item_id ?? (item.id.startsWith("generated-") ? null : item.id);
   }
 
-  function calculateSentenceScore(errorCount: number): number {
-    if (errorCount === 0) {
-      return 5;
-    }
-    if (errorCount === 1) {
-      return 3;
-    }
-    return 2;
-  }
-
   function recordWordMemoryReview(expectedWord: string, score: number, reviewMode: string, responseText = "", errorType?: string) {
     const accessToken = getAccessToken();
     if (!accessToken || !currentItem) {
@@ -1393,6 +1681,8 @@ function StudyContent() {
     if (!learningItemId) {
       return;
     }
+    const currentEncodingStage = encodingStageRef.current;
+    const encodingDurationMs = encodingStartTimeRef.current > 0 ? Date.now() - encodingStartTimeRef.current : 0;
     void logWordReview(
       {
         learning_item_id: learningItemId,
@@ -1403,6 +1693,8 @@ function StudyContent() {
         response_text: responseText,
         error_type: errorType,
         duration_seconds: 0,
+        encoding_stage: currentEncodingStage ?? undefined,
+        encoding_duration_ms: encodingDurationMs,
       },
       accessToken,
     ).catch(() => undefined);
@@ -1503,7 +1795,11 @@ function StudyContent() {
         english_text: generatedSentence.english_text,
         chinese_text: generatedSentence.chinese_text,
         phonetic: null,
+        syllables: null,
+        grapheme_phoneme_map: null,
         difficulty_level: Math.min(Math.max(currentItem.difficulty_level, 1), 5),
+        sort_order: 0,
+        unit_label: null,
         source: `AI 动态复习：${uniqueMistakenWords.join(", ")}`,
         source_item_id: currentItem.id,
         created_at: new Date().toISOString(),
@@ -1520,8 +1816,102 @@ function StudyContent() {
     }
   }
 
-  async function completeCurrentSentence() {
+  function getBasicWordMeaning(word: string): string {
+    return BASIC_WORD_MEANINGS[normalizeEnglishKey(word)] ?? "";
+  }
+
+  async function fetchCachedWordTranslations(words: string[]): Promise<Record<string, string>> {
+    const accessToken = getAccessToken();
+    if (!accessToken) {
+      return {};
+    }
+    try {
+      return await Promise.race([
+        getWordTranslations(words, accessToken, modelSettingsRef.current, currentItemRef.current?.course_id),
+        new Promise<Record<string, string>>((resolve) => {
+          window.setTimeout(() => resolve({}), WORD_TRANSLATION_TIMEOUT_MS);
+        }),
+      ]);
+    } catch {
+      return {};
+    }
+  }
+
+  async function translateSingleWordMeaning(word: string): Promise<string> {
+    const accessToken = getAccessToken();
+    const fallbackMeaning = getBasicWordMeaning(word);
+    if (!accessToken) {
+      return fallbackMeaning;
+    }
+
+    try {
+      const translatedText = await Promise.race([
+        getWordTranslations([word], accessToken, modelSettingsRef.current, currentItemRef.current?.course_id).then((translations) => translations[normalizeEnglishKey(word)]?.trim() ?? ""),
+        new Promise<string>((resolve) => {
+          window.setTimeout(() => resolve(""), WORD_TRANSLATION_TIMEOUT_MS);
+        }),
+      ]);
+      return translatedText || fallbackMeaning;
+    } catch {
+      return fallbackMeaning;
+    }
+  }
+
+  async function buildSentenceWordMeaningMap(words: string[]): Promise<Record<number, string>> {
+    const normalizedToTranslation: Record<string, string> = {};
+    const uniqueWords = Array.from(new Set(words.map(normalizeEnglishKey).filter(Boolean)));
+
+    Object.assign(normalizedToTranslation, await fetchCachedWordTranslations(uniqueWords));
+    uniqueWords.forEach((word) => {
+      if (!normalizedToTranslation[word]) {
+        normalizedToTranslation[word] = getBasicWordMeaning(word);
+      }
+    });
+
+    const meanings: Record<number, string> = {};
+    words.forEach((word, index) => {
+      meanings[index] = normalizedToTranslation[normalizeEnglishKey(word)] || "暂未获取释义";
+    });
+    return meanings;
+  }
+
+  async function showWordMeaningsBeforeCompletion() {
     if (!currentItem || isCompletingSentenceRef.current || answerStateRef.current !== "typing") {
+      return;
+    }
+
+    const itemId = currentItem.id;
+    const words = [...currentWords];
+    const loadingMeanings: Record<number, string> = {};
+    words.forEach((_word, index) => {
+      loadingMeanings[index] = "释义准备中";
+    });
+
+    inputRefs.current.forEach((input) => input?.blur());
+    clearWordPreview();
+    setChildHint(null);
+    setSentenceWordMeanings(loadingMeanings);
+    updateAnswerState("word-meaning-review");
+    setFeedbackMessage("拼写完成！看一看每个单词的中文意思，5 秒后继续。");
+
+    const meanings = await buildSentenceWordMeaningMap(words);
+    if (currentItemRef.current?.id !== itemId || (answerStateRef.current as AnswerState) !== "word-meaning-review") {
+      return;
+    }
+
+    setSentenceWordMeanings(meanings);
+    if (wordMeaningReviewTimeoutRef.current !== null) {
+      window.clearTimeout(wordMeaningReviewTimeoutRef.current);
+    }
+    wordMeaningReviewTimeoutRef.current = window.setTimeout(() => {
+      wordMeaningReviewTimeoutRef.current = null;
+      setSentenceWordMeanings({});
+      void completeCurrentSentence({ fromWordMeaningReview: true });
+    }, WORD_MEANING_REVIEW_MS);
+  }
+
+  async function completeCurrentSentence(options: { fromWordMeaningReview?: boolean } = {}) {
+    if (!currentItem || isCompletingSentenceRef.current || (answerStateRef.current !== "typing" && !options.fromWordMeaningReview)) {
       return;
     }
 
@@ -1540,11 +1930,11 @@ function StudyContent() {
     }
 
     if (uniqueMistakenWords.length > 0) {
-      if (isRespellRoundRef.current) {
-        isRespellRoundRef.current = false;
+      if (respellWordIndexesRef.current.length > 0) {
+        respellWordIndexesRef.current = [];
         updateAnswerState("sentence-complete");
         isCompletingSentenceRef.current = false;
-        setFeedbackMessage("整句重拼完成。按空格进入下一句。");
+        setFeedbackMessage("错词重拼完成。按空格进入下一句。");
         await playCurrentReviewCompletionAudio();
         return;
       }
@@ -1562,9 +1952,13 @@ function StudyContent() {
 
     updateAnswerState("sentence-complete");
     isCompletingSentenceRef.current = false;
-    if (isRespellRoundRef.current) {
-      isRespellRoundRef.current = false;
-      setFeedbackMessage("整句重拼完全正确。按空格进入下一句。");
+    if (respellWordIndexesRef.current.length === 0) {
+      setPerfectSentenceCount((c) => c + 1);
+      setStarAnimKey((k) => k + 1);
+    }
+    if (respellWordIndexesRef.current.length > 0) {
+      respellWordIndexesRef.current = [];
+      setFeedbackMessage("错词重拼完全正确。按空格进入下一句。");
     } else {
       setFeedbackMessage(dynamicSentenceFeedback ? `${dynamicSentenceFeedback} 按空格进入下一句。` : "整句拼写正确。按空格进入下一句。");
     }
@@ -1583,6 +1977,7 @@ function StudyContent() {
   }
 
   function updateWordAnswer(index: number, value: string) {
+    setChildHint(null);
     if (previewWordIndex === index) {
       clearWordPreview();
     }
@@ -1591,7 +1986,9 @@ function StudyContent() {
       nextAnswers[index] = value.replace(/\s/g, "");
       return nextAnswers;
     });
-    setFeedbackMessage(null);
+    if (Date.now() - feedbackSetAtRef.current > 1500) {
+      setFeedbackMessage(null);
+    }
     if (wordStatuses[index] === "incorrect" || wordStatuses[index] === "skipped") {
       setWordStatuses((current) => {
         const nextStatuses = [...current];
@@ -1620,27 +2017,30 @@ function StudyContent() {
   }
 
   async function translateWordForHint(expectedWord: string): Promise<string> {
-    let translatedWord = "";
-    const accessToken = getAccessToken();
-    if (accessToken) {
-      try {
-        const response = await translateLearningText(expectedWord, accessToken, modelSettings);
-        translatedWord = response.chinese_text;
-      } catch {
-        translatedWord = "";
-      }
-    }
-    return translatedWord;
+    return translateSingleWordMeaning(expectedWord);
   }
 
   async function handleFirstLetterMistake(expectedWord: string) {
     const translatedWord = await translateWordForHint(expectedWord);
+    if (isDictationModeRef.current) {
+      setFeedbackMessage(translatedWord ? `首字母不对，请参考中文意思重试。中文：${translatedWord}` : "首字母不对，请重试。");
+      return;
+    }
     setFeedbackMessage(translatedWord ? `首字母不对，先听中文和英文读音。中文：${translatedWord}` : "首字母不对，先听英文读音再试一次。");
     await playChineseThenEnglish(translatedWord, expectedWord);
   }
 
-  function handleSpellingMistake(index: number, expectedWord: string, typedWord: string, errorCount: number, errorType: string) {
-    setFeedbackMessage(buildTypedSpellingHint(expectedWord, typedWord, errorCount, errorType));
+  async function handleSpellingMistake(index: number, expectedWord: string, typedWord: string, errorCount: number, errorType: string) {
+    const cachedSyllables = currentItem?.syllables;
+    const hint = buildChildFriendlyHint(expectedWord, errorType, getMatchedPrefixLength(expectedWord, typedWord), cachedSyllables);
+    const translatedWord = await translateWordForHint(expectedWord);
+    const hintText = translatedWord ? `${hint.text} 中文意思：${translatedWord}` : hint.text;
+    setChildHint({ ...hint, text: hintText });
+    setFeedbackMessage(hintText);
+    if (translatedWord) {
+      await playChineseThenEnglish(translatedWord, expectedWord);
+    }
+    window.setTimeout(() => inputRefs.current[index]?.focus(), 0);
   }
 
   function checkWord(index: number) {
@@ -1648,6 +2048,10 @@ function StudyContent() {
       return;
     }
     if (previewWordIndex === index) {
+      setFeedbackMessage("先看清单词，等它自动隐藏后再凭记忆输入。");
+      return;
+    }
+    if (encodingStageRef.current === "whole_recall" && previewCountdownSeconds > 0) {
       setFeedbackMessage("先看清单词，等它自动隐藏后再凭记忆输入。");
       return;
     }
@@ -1677,6 +2081,17 @@ function StudyContent() {
     setWordStatuses(nextStatusesForAttempt);
 
     if (!isCorrect) {
+      playIncorrectTap();
+      setCurrentStreak(0);
+      wordAnimKeyRef.current += 1;
+      setWordAnimations((current) => ({ ...current, [index]: { type: "incorrect", key: wordAnimKeyRef.current } }));
+      setTimeout(() => {
+        setWordAnimations((current) => {
+          const next = { ...current };
+          delete next[index];
+          return next;
+        });
+      }, 400);
       const actualWord = currentRawAnswer;
       const errorType = classifySpellingError(expectedWord, actualWord);
       const normalizedExpectedWord = normalizeEnglishKey(expectedWord);
@@ -1698,21 +2113,21 @@ function StudyContent() {
         void logWordMistake(learningItemId, expectedWord, actualWord, accessToken, errorType).catch(() => undefined);
       }
       if (nextErrorCount === 3 || (errorType === "unknown" && nextErrorCount >= 2)) {
-        void playChineseThenEnglish(currentItem?.chinese_text ?? "", expectedWord);
-        showWordPreview(index, expectedWord);
+        void translateWordForHint(expectedWord).then((translatedWord) => {
+          if (translatedWord) {
+            void playChineseThenEnglish(translatedWord, expectedWord);
+          }
+          showWordPreview(index, expectedWord, translatedWord);
+        });
         return;
       }
       if (getFirstLetter(typedValue) !== getFirstLetter(expectedWord)) {
         setFeedbackMessage("首字母不对，正在准备中文和英文读音...");
         void handleFirstLetterMistake(expectedWord);
       } else {
-        handleSpellingMistake(index, expectedWord, typedValue, nextErrorCount, errorType);
+        void handleSpellingMistake(index, expectedWord, typedValue, nextErrorCount, errorType);
       }
       return;
-    }
-
-    if (currentItem) {
-      markCorrectWord(currentItem, expectedWord, index);
     }
 
     const prevErrorCount = wordErrorCounts[index] ?? 0;
@@ -1725,24 +2140,26 @@ function StudyContent() {
         return next;
       });
 
-      if (nextConsecutive < 3) {
-        setFeedbackMessage(`已正确 ${nextConsecutive}/3 次，请再拼写确认。`);
-        if (inputRefs.current[index]) {
-          inputRefs.current[index].value = "";
-        }
+      if (nextConsecutive < DIFFICULT_WORD_CONFIRMATION_COUNT) {
+        playCorrectDing();
+        setFeedbackMessage(`拼对了 ${nextConsecutive} / ${DIFFICULT_WORD_CONFIRMATION_COUNT} 次，再拼一遍这个单词。`);
         setWordAnswers((current) => {
-          const next = [...current];
-          next[index] = "";
-          return next;
+          const nextAnswers = [...current];
+          nextAnswers[index] = "";
+          return nextAnswers;
         });
         setWordStatuses((current) => {
-          const next = [...current];
-          next[index] = "idle";
-          return next;
+          const nextStatuses = [...current];
+          nextStatuses[index] = "idle";
+          return nextStatuses;
         });
         window.setTimeout(() => inputRefs.current[index]?.focus(), 0);
         return;
       }
+
+      // Show celebration for previously-difficult words
+      setFeedbackMessage("这个单词已经连续拼对 3 次，太棒了！");
+      setCelebrationTrigger((prev) => prev + 1);
 
       setWordConsecutiveCorrect((current) => {
         const next = [...current];
@@ -1751,7 +2168,36 @@ function StudyContent() {
       });
     }
 
+    if (currentItem) {
+      markCorrectWord(currentItem, expectedWord, index);
+    }
+
+    playCorrectDing();
+    setCurrentStreak((s) => s + 1);
+    setCorrectWordCount((c) => c + 1);
+    wordAnimKeyRef.current += 1;
+    setWordAnimations((current) => ({ ...current, [index]: { type: "correct", key: wordAnimKeyRef.current } }));
+    setTimeout(() => {
+      setWordAnimations((current) => {
+        const next = { ...current };
+        delete next[index];
+        return next;
+      });
+    }, 400);
+
     recordSuccessfulWordSpelling(expectedWord, currentRawAnswer, prevErrorCount, prevErrorCount >= 3, currentItem?.item_type === "word");
+
+    // After encoding whole_recall success, advance to contextual_use stage
+    if (encodingStageRef.current === "whole_recall") {
+      setWordErrorCounts((current) => {
+        const nextCounts = [...current];
+        nextCounts[index] = 0;
+        return nextCounts;
+      });
+      clearEncodingTimeout();
+      void advanceEncodingStage("whole_recall", expectedWord, currentItem?.chinese_text ?? "");
+      return;
+    }
 
     setWordErrorCounts((current) => {
       const nextCounts = [...current];
@@ -1771,7 +2217,7 @@ function StudyContent() {
         return nextStatuses;
       });
       clearWordPreview();
-      void completeCurrentSentence();
+      void showWordMeaningsBeforeCompletion();
       return;
     }
     const nextIndex = isDynamicFillBlankItem ? dynamicReviewWordIndexes.find((wordIndex) => wordIndex > index) ?? currentWords.length : index + 1;
@@ -1781,7 +2227,7 @@ function StudyContent() {
       return;
     }
 
-    void completeCurrentSentence();
+    void showWordMeaningsBeforeCompletion();
   }
 
   function handleWordKeyDown(event: KeyboardEvent<HTMLInputElement>, index: number) {
@@ -1850,7 +2296,9 @@ function StudyContent() {
         return;
       }
 
-      setFeedbackMessage(`${buildTypedSpellingHint(expectedWord, normalizedAnswer, nextErrorCount, errorType)} 已连续错误 ${nextErrorCount} 次。`);
+      const practiceHint = buildChildFriendlyHint(expectedWord, errorType, getMatchedPrefixLength(expectedWord, normalizedAnswer), currentItem?.syllables);
+      setChildHint(practiceHint);
+      setFeedbackMessage(`${practiceHint.text} 已连续错误 ${nextErrorCount} 次。`);
       return;
     }
 
@@ -1858,13 +2306,12 @@ function StudyContent() {
       const nextConsecutive = mistakePracticeConsecutiveCorrect + 1;
       setMistakePracticeConsecutiveCorrect(nextConsecutive);
 
-      if (nextConsecutive < 2) {
-        setFeedbackMessage(`已正确 ${nextConsecutive}/2 次，请再拼写确认。`);
-        setMistakePracticeAnswer("");
-        setMistakePracticeStatus("idle");
-        window.setTimeout(() => mistakePracticeInputRef.current?.focus(), 0);
+      if (nextConsecutive < 1) {
+        // One confirmation is enough in mistake practice too
         return;
       }
+
+      setFeedbackMessage("正确！做得好！");
 
       setMistakePracticeConsecutiveCorrect(0);
     }
@@ -1897,8 +2344,20 @@ function StudyContent() {
     setMistakePracticeErrorCount(0);
     setMistakePracticeConsecutiveCorrect(0);
     clearMistakePracticePreview();
-    isRespellRoundRef.current = true;
-    setWordAnswers(currentWords.map(() => ""));
+    // Targeted respell: only previously-mistaken words are re-tested
+    const mistakenWordSet = new Set(mistakePracticeWords.map(normalizeEnglishKey));
+    const respellIndexes: number[] = [];
+    currentWords.forEach((word, idx) => {
+      if (mistakenWordSet.has(normalizeEnglishKey(word))) {
+        respellIndexes.push(idx);
+      }
+    });
+    respellWordIndexesRef.current = respellIndexes;
+
+    // Pre-fill non-mistaken words, blank mistaken ones
+    setWordAnswers(currentWords.map((word, idx) =>
+      respellIndexes.includes(idx) ? "" : word
+    ));
     setWordStatuses(currentWords.map(() => "idle"));
     setWordErrorCounts(currentWords.map(() => 0));
     setWordConsecutiveCorrect(currentWords.map(() => 0));
@@ -1907,13 +2366,14 @@ function StudyContent() {
     setPendingMistakePractice([], {});
     updateAnswerState("typing");
     isCompletingSentenceRef.current = false;
-    setActiveWordIndex(dynamicReviewWordIndexes[0] ?? 0);
-    setFeedbackMessage("错词复习完成，现在请完整拼写整句。");
+    const firstRespellIdx = respellIndexes[0] ?? 0;
+    setActiveWordIndex(firstRespellIdx);
+    setFeedbackMessage("错词复习完成。请在黄色高亮的单词框中拼写刚才错过的词。");
     const respellSequenceId = startVoiceSequence();
     if (currentItem?.chinese_text && currentItem.english_text) {
       void playCurrentItemIntro(currentItem, respellSequenceId);
     }
-    window.setTimeout(() => inputRefs.current[dynamicReviewWordIndexes[0] ?? 0]?.focus(), 0);
+    window.setTimeout(() => inputRefs.current[firstRespellIdx]?.focus(), 0);
   }
 
   async function submitChoiceReviewTask(choice: string, isCorrect: boolean) {
@@ -1944,7 +2404,15 @@ function StudyContent() {
     }
     if (!isCorrect) {
       setFeedbackMessage("这个选项不对，已加入错词专项复习。");
+      const correctMeaning = (hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "") || (hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "");
+      if (word && correctMeaning) {
+        void playEnglishThenChinese(word, correctMeaning);
+      }
       return;
+    }
+    const correctMeaning = (hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "") || (hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "") || choice;
+    if (word && correctMeaning) {
+      await playEnglishThenChinese(word, correctMeaning);
     }
     updateAnswerState("sentence-complete");
     setFeedbackMessage("选择正确。按空格进入下一步。");
@@ -2041,20 +2509,86 @@ function StudyContent() {
     : "min-w-32 ipad:min-w-32 ipad:text-sm ipad-lg:min-w-36 ipad-lg:text-base";
   const displayChinesePrompt = isStudyFullscreen && answerState === "mistake-word-practice"
     ? currentMistakePracticeTranslation || currentItem?.chinese_text || ""
+    : isChoiceReviewTask
+      ? "请选择这个英文单词的中文意思"
     : isFocusedWordReview
       ? reviewTaskWordTranslation || "中文释义准备中"
       : currentItem?.chinese_text || "";
 
   return (
-    <main className={isStudyFullscreen ? "flex min-h-[100dvh] flex-col overflow-y-auto bg-white text-slate-950" : "flex min-h-[100dvh] flex-col overflow-y-auto bg-slate-50 text-slate-950"}>
+    <>
+      <style>{`
+        @keyframes check-pop {
+          0% { transform: scale(0); opacity: 0; }
+          60% { transform: scale(1.2); opacity: 1; }
+          100% { transform: scale(1.0); opacity: 1; }
+        }
+        @keyframes incorrect-spin {
+          0% { transform: rotate(0deg); opacity: 0; }
+          100% { transform: rotate(360deg); opacity: 1; }
+        }
+        @keyframes confetti-burst {
+          0% { transform: translate(0, 0) scale(1); opacity: 1; }
+          100% { transform: translate(calc(var(--tx) * 1px), calc(var(--ty) * 1px)) scale(0); opacity: 0; }
+        }
+        @keyframes star-join {
+          0% { transform: scale(0) rotate(-180deg); opacity: 0; }
+          60% { transform: scale(1.3) rotate(15deg); opacity: 1; }
+          100% { transform: scale(1) rotate(0deg); opacity: 1; }
+        }
+        @keyframes fire-pulse {
+          0%, 100% { transform: scale(1); }
+          50% { transform: scale(1.15); }
+        }
+        @keyframes streak-flash {
+          0% { transform: scale(1); }
+          50% { transform: scale(1.4); }
+          100% { transform: scale(1); }
+        }
+        @keyframes scale-fade {
+          0% { transform: scale(0.5); opacity: 0; }
+          30% { transform: scale(1.1); opacity: 1; }
+          60% { transform: scale(1); opacity: 1; }
+          100% { transform: scale(0.8); opacity: 0; }
+        }
+      `}</style>
+      <MiniCelebrationConfetti key={`streak-${streakCelebrateKey}`} triggerKey={streakCelebrateKey} />
+      <MiniCelebrationConfetti key={`milestone-${milestoneCelebrateKey}`} triggerKey={milestoneCelebrateKey} speakMessage="太厉害了！" />
+      <main className={isStudyFullscreen ? "flex min-h-[100dvh] flex-col overflow-y-auto bg-white text-slate-950" : "flex min-h-[100dvh] flex-col overflow-y-auto bg-slate-50 text-slate-950"}>
       {celebrationSummary ? <CelebrationModal nextCourse={nextCourse} summary={celebrationSummary} /> : null}
+      {isStudyFullscreen ? (
+        <>
+          <div className="fixed left-4 top-4 z-30 flex items-center gap-2 ipad:left-6 ipad:top-6">
+            {perfectSentenceCount > 0 ? (
+              <div className="flex items-center gap-1 rounded-full bg-white/90 px-3 py-1.5 text-sm font-bold text-amber-500 shadow-sm backdrop-blur ipad:px-4 ipad:text-base">
+                <span key={starAnimKey} style={{ animation: starAnimKey > 0 ? "star-join 0.6s ease-out" : "none" }}>⭐</span>
+                <span>{perfectSentenceCount}</span>
+              </div>
+            ) : null}
+          </div>
+          <div className="fixed right-4 top-4 z-30 flex items-center gap-2 ipad:right-6 ipad:top-6">
+            {currentStreak > 0 ? (
+              <div className="flex items-center gap-1 rounded-full bg-white/90 px-3 py-1.5 text-sm font-bold text-orange-500 shadow-sm backdrop-blur ipad:px-4 ipad:text-base" style={{ animation: currentStreak >= 5 ? "fire-pulse 0.6s ease-in-out infinite" : "none" }}>
+                <span key={currentStreak} style={{ animation: currentStreak > 0 ? "streak-flash 0.3s ease-out" : "none" }}>🔥</span>
+                <span>{currentStreak}</span>
+              </div>
+            ) : null}
+            <Button className={`h-8 px-2.5 text-xs shadow-sm backdrop-blur ipad:h-9 ipad:px-3 ipad:text-sm ${isDictationMode ? "border-violet-500 bg-violet-50 text-violet-700" : "bg-white/90"}`} onClick={toggleDictationMode} onMouseDown={keepStudyInputFocus} type="button" variant="outline">
+              {isDictationMode ? "✎ 默写中" : "默写"}
+            </Button>
+            <Button className="h-8 px-2.5 text-xs shadow-sm backdrop-blur bg-white/90 ipad:h-9 ipad:px-3 ipad:text-sm" onClick={toggleStudyFullscreen} onMouseDown={keepStudyInputFocus} type="button" variant="outline">
+              退出
+            </Button>
+          </div>
+        </>
+      ) : null}
       {!isStudyFullscreen ? (
         <header className="shrink-0 border-b bg-white/95 px-4 py-2.5 shadow-sm ipad:px-5 ipad:py-2">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
-              <div className="rounded-md border bg-slate-50 px-3 py-2 text-left">
-                <p className="text-xs text-muted-foreground">学习时长</p>
-                <p className="font-mono text-lg font-semibold text-slate-900 ipad:text-xl">{formatStudyDuration(activeStudySeconds)}</p>
+              <div className={`rounded-md border px-3 py-2 text-left transition-colors ${isStudyPaused ? "border-amber-300 bg-amber-50" : "bg-slate-50"}`}>
+                <p className="text-xs text-muted-foreground">{isStudyPaused ? "⏸ 已暂停" : "学习时长"}</p>
+                <p className={`font-mono text-lg font-semibold ipad:text-xl ${isStudyPaused ? "text-amber-700" : "text-slate-900"}`}>{formatStudyDuration(activeStudySeconds)}</p>
               </div>
               <Link className="text-sm font-medium text-primary hover:underline ipad:text-base" href="/learning">
                 返回开始学习
@@ -2066,7 +2600,10 @@ function StudyContent() {
             </div>
             <div className="flex flex-wrap items-center justify-end gap-3 text-sm font-semibold text-slate-600 ipad:text-base">
               <span>{device.isIPad ? "⌨ 空格判定单词 · 整句完成后空格查看逐词中文" : "单词输入完成按空格判定，整句完成后按空格查看逐词中文"}</span>
-              <Button className="h-9 px-3 text-sm ipad:h-9 ipad:px-3 ipad:text-sm" onClick={toggleStudyFullscreen} type="button" variant="outline">
+              <Button className={`h-9 px-3 text-sm ipad:h-9 ipad:px-3 ipad:text-sm ${isDictationMode ? "border-violet-500 bg-violet-50 text-violet-700" : ""}`} onClick={toggleDictationMode} onMouseDown={keepStudyInputFocus} type="button" variant="outline">
+                {isDictationMode ? "✎ 默写中" : "默写模式"}
+              </Button>
+              <Button className="h-9 px-3 text-sm ipad:h-9 ipad:px-3 ipad:text-sm" onClick={toggleStudyFullscreen} onMouseDown={keepStudyInputFocus} type="button" variant="outline">
                 沉浸模式
               </Button>
             </div>
@@ -2093,22 +2630,68 @@ function StudyContent() {
 
             <div className={isStudyFullscreen ? "space-y-10 ipad:space-y-12 ipad-lg:space-y-14" : "mt-5 space-y-5 ipad:mt-5 ipad:space-y-4 ipad-lg:mt-6 ipad-lg:space-y-5"}>
               <p className={isStudyFullscreen ? "text-5xl font-semibold leading-tight text-slate-900 ipad:text-6xl ipad-lg:text-7xl" : "text-4xl font-semibold leading-tight text-slate-900 ipad:text-4xl ipad-lg:text-5xl"}>{displayChinesePrompt}</p>
+              {currentItem?.phonetic && !encodingStage ? (
+                <p className="text-sm font-medium text-violet-600 ipad:text-base">
+                  音标: {currentItem.phonetic}
+                </p>
+              ) : null}
+              {encodingStage && encodingStage !== "whole_recall" && encodingStage !== "contextual_use" && answerState === "typing" ? (
+                <div className="mx-auto flex max-w-3xl flex-col items-center gap-4">
+                  {encodingStage === "listen" ? (
+                    <div className="flex flex-col items-center gap-4">
+                      <p className="text-4xl font-bold tracking-widest text-slate-900 ipad:text-5xl ipad-lg:text-6xl">{encodingWord}</p>
+                      <HintDisplay
+                        word={encodingWord}
+                        chunks={(currentItem?.syllables && currentItem.syllables.length > 0) ? currentItem.syllables : splitIntoSyllables(encodingWord)}
+                        matchedPrefixLength={0}
+                        onPlayChunk={function (i) { playSyllableAudio(encodingWord, i); }}
+                        onPlayPhonics={function (chunkIndex: number) { playPhonicsAudio(encodingWord, chunkIndex, currentItem?.grapheme_phoneme_map as Record<string, string> | null | undefined); }}
+                      />
+                      <div className="mt-2 text-base text-violet-600 font-medium ipad:text-lg">
+                        {currentItem?.phonetic ? ("音标: " + currentItem.phonetic) : null}
+                      </div>
+                    </div>
+                  ) : encodingStage === "chunk_trace" ? (
+                    <div className="flex flex-col items-center gap-4">
+                      <p className="text-4xl font-bold tracking-widest text-slate-900 ipad:text-5xl ipad-lg:text-6xl">{encodingWord}</p>
+                      <HintDisplay
+                        word={encodingWord}
+                        chunks={(currentItem?.syllables && currentItem.syllables.length > 0) ? currentItem.syllables : splitIntoSyllables(encodingWord)}
+                        matchedPrefixLength={0}
+                        onPlayChunk={function (i) { playSyllableAudio(encodingWord, i); }}
+                        onPlayPhonics={function (chunkIndex: number) { playPhonicsAudio(encodingWord, chunkIndex, currentItem?.grapheme_phoneme_map as Record<string, string> | null | undefined); }}
+                      />
+                      <p className="text-sm text-slate-500">点击颜色块或喇叭按钮听发音</p>
+                    </div>
+                  ) : null}
+                </div>
+              ) : encodingStage === "contextual_use" && encodingContextExample ? (
+                <div className="mx-auto flex max-w-3xl flex-col items-center gap-3 rounded-lg border-2 border-emerald-200 bg-emerald-50 px-6 py-5 ipad:px-8 ipad:py-6">
+                  <p className="text-base font-bold text-emerald-700 ipad:text-lg">例句练习</p>
+                  <p className="text-2xl font-semibold text-slate-900 ipad:text-3xl">{encodingContextExample.english}</p>
+                  <p className="text-lg text-slate-600 ipad:text-xl">{encodingContextExample.chinese}</p>
+                  <p className="text-sm font-bold text-emerald-600">已成功记忆：{encodingWord}</p>
+                </div>
+              ) : null}
+              {encodingStage === "whole_recall" && previewCountdownSeconds > 0 ? (
+                <div className="mx-auto rounded-md bg-amber-100 px-6 py-3 text-4xl font-bold text-amber-950 ipad:text-5xl ipad-lg:text-6xl">{encodingWord}</div>
+              ) : null}
               {reviewTaskModeLabel || reviewTaskInstruction ? (
                 <div className="mx-auto max-w-2xl space-y-2">
                   {reviewTaskModeLabel ? <p className="text-base font-bold text-emerald-700 ipad:text-lg">{reviewTaskModeLabel}</p> : null}
                   {reviewTaskInstruction ? <p className="text-xl font-bold text-slate-700 ipad:text-2xl">{reviewTaskInstruction}</p> : null}
                 </div>
               ) : null}
-              {isChoiceReviewTask ? (
+              {encodingStage && encodingStage !== "whole_recall" && answerState === "typing" ? null : isChoiceReviewTask ? (
                 <div className={isStudyFullscreen ? "mx-auto flex max-w-4xl flex-col items-center gap-6 ipad:gap-8" : "mx-auto flex max-w-xl flex-col items-center gap-4 rounded-lg border bg-slate-50 px-5 py-5 ipad:max-w-xl ipad:gap-4 ipad:px-6 ipad:py-5 ipad-lg:max-w-2xl ipad-lg:gap-5 ipad-lg:px-7 ipad-lg:py-6"}>
-                  <p className="text-4xl font-bold text-slate-900 ipad:text-5xl ipad-lg:text-6xl">{currentWords[0]}</p>
-                  <div className="grid w-full max-w-xl gap-3">
-                    {(reviewTaskWordTranslation ? [reviewTaskWordTranslation, "不是这个意思", "还需要再练"] : currentItem.review_choices && currentItem.review_choices.length > 0 ? currentItem.review_choices : ["中文释义准备中"]).map((choice, index) => (
+                  <p className="text-4xl font-bold text-slate-900 ipad:text-5xl ipad-lg:text-6xl">{isListeningChoiceReviewTask ? "听读音，选中文" : currentWords[0]}</p>
+                  <div className="grid w-full max-w-xl grid-cols-2 gap-3">
+                    {(choiceReviewOptions.length > 0 ? choiceReviewOptions : ["中文释义准备中"]).map((choice, index) => (
                       <Button
                         className="justify-center px-4 py-5 text-base font-bold ipad:text-lg"
                         disabled={answerState !== "typing" || choice === "中文释义准备中"}
                         key={`${choice}-${index}`}
-                        onClick={() => void submitChoiceReviewTask(choice, choice === currentItem.review_answer || Boolean(reviewTaskWordTranslation && choice === reviewTaskWordTranslation))}
+                        onClick={() => void submitChoiceReviewTask(choice, isCorrectChoiceAnswer(choice, hasChineseText(currentItem.review_answer) ? currentItem.review_answer : reviewTaskWordTranslation))}
                         type="button"
                         variant="outline"
                       >
@@ -2138,6 +2721,7 @@ function StudyContent() {
                       if (previewMistakePracticeWord) {
                         clearMistakePracticePreview();
                       }
+                      setChildHint(null);
                       setMistakePracticeAnswer(event.target.value.replace(/\s/g, ""));
                       setMistakePracticeStatus("idle");
                       setFeedbackMessage(null);
@@ -2157,59 +2741,66 @@ function StudyContent() {
                     const normalizedWord = normalizeEnglishKey(word);
                     const status = wordStatuses[index] ?? "idle";
                     const isDynamicBlank = isDynamicFillBlankItem && dynamicReviewWordIndexes.includes(index);
-                    const shouldShowInput = !isDynamicFillBlankItem || isDynamicBlank;
-                    const isActive = activeWordIndex === index && answerState === "typing" && shouldShowInput;
+                    const isRespellRound = respellWordIndexesRef.current.length > 0;
+                    const isRespellTarget = isRespellRound && respellWordIndexesRef.current.includes(index);
+                    const isRespellNonTarget = isRespellRound && !respellWordIndexesRef.current.includes(index);
+                    const shouldShowInput = (!isDynamicFillBlankItem && !isRespellNonTarget) || isDynamicBlank;
                     return (
-                      <div className="flex shrink-0 flex-col items-center gap-2" key={`${word}-${index}`} style={{ minWidth: getWordInputWidth(word) }}>
-                        {answerState !== "typing" && shouldShowInput && !isStudyFullscreen ? (
-                          <span className="rounded-full border px-2.5 py-0.5 text-xs text-muted-foreground ipad:px-3 ipad:text-xs">
-                            {commonPartLabels[normalizedWord] ?? itemTypeLabels[currentItem.item_type]}
-                          </span>
-                        ) : null}
-                        {shouldShowInput ? (
-                          <input
-                            ref={(element) => {
-                              inputRefs.current[index] = element;
-                            }}
-                            aria-label={isDynamicBlank ? `填空：${currentItem.chinese_text}` : `第 ${index + 1} 个单词`}
-                            autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false}
-                            className={`${wordInputSizeClass} shrink-0 border-0 border-b-4 bg-transparent px-1 text-center font-semibold leading-none outline-none transition ${status === "correct" ? "border-emerald-500 text-emerald-700" : ""} ${status === "incorrect" ? "border-red-500 text-red-700" : ""} ${status === "skipped" ? "border-amber-500 text-amber-700" : ""} ${status === "idle" ? annotationColors[index % annotationColors.length] : ""} ${isActive ? "bg-emerald-50" : ""}`}
-                            disabled={answerState !== "typing" || status === "skipped" || previewWordIndex === index}
-                            placeholder={previewWordIndex === index ? "先看后拼" : status === "skipped" ? "稍后练" : isDynamicBlank ? "____" : undefined}
-                            style={{ width: getWordInputWidth(word) }}
-                            value={wordAnswers[index] ?? ""}
-                            onChange={(event) => updateWordAnswer(index, event.target.value)}
-                            onFocus={() => setActiveWordIndex(index)}
-                            onKeyDown={(event) => handleWordKeyDown(event, index)}
-                          />
-                        ) : (
-                          <span className={`flex items-center font-semibold leading-none text-slate-900 ${wordDisplaySizeClass}`}>{word}</span>
-                        )}
-                        {previewWordIndex === index ? (
-                          <span className="rounded-md bg-amber-100 px-3 py-1 text-3xl font-bold text-amber-950 ipad:text-4xl ipad-lg:text-5xl">{word}</span>
-                        ) : null}
-                        {answerState !== "typing" && shouldShowInput && !isStudyFullscreen ? <span className="text-2xl font-medium text-slate-900 ipad:text-2xl ipad-lg:text-3xl">{word}</span> : null}
-                        {status === "skipped" && !isStudyFullscreen ? <span className="text-base font-bold text-amber-700 ipad:text-base ipad-lg:text-lg">已加入错词复习</span> : null}
-                        {status === "incorrect" && !isStudyFullscreen ? <span className="text-base font-bold text-red-600 ipad:text-base ipad-lg:text-lg">请按提示再试一次</span> : null}
-                      </div>
+                      <WordInput
+                        key={`${word}-${index}`}
+                        word={word}
+                        index={index}
+                        status={status}
+                        value={wordAnswers[index] ?? ""}
+                        isActive={activeWordIndex === index && answerState === "typing" && shouldShowInput}
+                        isDynamicBlank={isDynamicBlank}
+                        isRespellNonTarget={isRespellNonTarget}
+                        isRespellTarget={isRespellTarget}
+                        shouldShowInput={shouldShowInput}
+                        isPreview={previewWordIndex === index}
+                        answerState={answerState}
+                        wordInputSizeClass={wordInputSizeClass}
+                        wordDisplaySizeClass={wordDisplaySizeClass}
+                        isStudyFullscreen={isStudyFullscreen}
+                        itemTypeLabel={commonPartLabels[normalizedWord] ?? itemTypeLabels[currentItem.item_type]}
+                        chineseText={currentItem.chinese_text}
+                        meaningText={sentenceWordMeanings[index]}
+                        animationType={wordAnimations[index]?.type}
+                        inputRef={(element) => {
+                          inputRefs.current[index] = element;
+                        }}
+                        onUpdateWordAnswer={updateWordAnswer}
+                        onFocusWord={(idx) => setActiveWordIndex(idx)}
+                        onWordKeyDown={handleWordKeyDown}
+                      />
                     );
                   })}
                 </div>
               )}
-              {feedbackMessage ? <p className={isStudyFullscreen ? "text-xl font-bold text-emerald-700 ipad:text-2xl ipad-lg:text-3xl" : answerState !== "typing" ? "text-base font-bold text-emerald-600 ipad:text-base ipad-lg:text-lg" : "text-base font-bold text-red-600 ipad:text-base ipad-lg:text-lg"}>{feedbackMessage}</p> : null}
+              {previewCountdownSeconds > 0 ? (
+                <div className="mx-auto mb-2 w-full max-w-md">
+                  <div className="mb-1 text-center text-sm font-bold text-amber-700 ipad:text-base ipad-lg:text-lg">
+                    记住它！还剩 {previewCountdownSeconds} 秒
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-amber-100">
+                    <div className="h-full rounded-full bg-amber-500 transition-all duration-200 ease-linear" style={{ width: `${(previewCountdownSeconds / Math.round(WORD_PREVIEW_MS / 1000)) * 100}%` }} />
+                  </div>
+                </div>
+              ) : null}
+              {childHint ? ( <div className="flex flex-col items-center gap-2"> <p className={isStudyFullscreen ? "text-xl font-bold text-emerald-700 ipad:text-2xl ipad-lg:text-3xl" : answerState !== "typing" ? "text-base font-bold text-emerald-600 ipad:text-base ipad-lg:text-lg" : "text-base font-bold text-red-600 ipad:text-base ipad-lg:text-lg"}>{childHint.text}</p> <HintDisplay word={childHint.word} chunks={childHint.chunks} matchedPrefixLength={childHint.matchedPrefixLength} onPlayChunk={(i) => playSyllableAudio(childHint.word, i, currentItem?.syllables, (blob) => { void playAudioBlob(blob); })} onPlayPhonics={(i) => { void playPhonicsAudio(childHint.word, i, currentItem?.grapheme_phoneme_map, currentItem?.syllables, (blob) => { void playAudioBlob(blob); }); }} graphemePhonemeMap={currentItem?.grapheme_phoneme_map} cachedSyllables={currentItem?.syllables} /> </div> ) : feedbackMessage ? <p key={celebrationTrigger} className={`${isStudyFullscreen ? "text-xl font-bold text-emerald-700 ipad:text-2xl ipad-lg:text-3xl" : answerState !== "typing" ? "text-base font-bold text-emerald-600 ipad:text-base ipad-lg:text-lg" : "text-base font-bold text-red-600 ipad:text-base ipad-lg:text-lg"} ${celebrationTrigger > 0 ? "celebration-burst" : ""}`}>{feedbackMessage}</p> : null}
               <div className={isStudyFullscreen ? "mx-auto flex w-full max-w-5xl flex-wrap items-center justify-center gap-4 px-0 py-0 ipad:gap-5 ipad-lg:gap-6" : "mx-auto flex w-full max-w-3xl flex-col items-center gap-4 rounded-lg border border-slate-200 bg-slate-50/90 px-4 py-4 ipad:max-w-3xl ipad:flex-col ipad:justify-center ipad:gap-4 ipad:px-5 ipad-lg:max-w-4xl ipad-lg:flex-row ipad-lg:gap-6 ipad-lg:px-6"}>
                 <div className="flex flex-wrap justify-center gap-3 ipad:gap-3 ipad-lg:gap-4">
                   {answerState === "mistake-word-practice" ? (
                     <>
-                      <Button className={actionButtonClass} onClick={() => void checkMistakePracticeWord()} type="button">判定错词</Button>
-                      <Button className={actionButtonClass} onClick={handleSpeakEnglish} type="button" variant="secondary">朗读英文</Button>
+                      <Button className={actionButtonClass} onClick={() => runStudyButtonAction(checkMistakePracticeWord)} onMouseDown={keepStudyInputFocus} type="button">判定错词</Button>
+                      <Button className={actionButtonClass} onClick={handleSpeakEnglish} onMouseDown={keepStudyInputFocus} type="button" variant="secondary">朗读英文</Button>
                     </>
                   ) : (
                     <>
-                      <Button className={actionButtonClass} disabled={answerState !== "typing" || isChoiceReviewTask} onClick={() => checkWord(activeWordIndex)} type="button">
+                      <Button className={actionButtonClass} disabled={answerState !== "typing" || isChoiceReviewTask} onClick={() => runStudyButtonAction(() => checkWord(activeWordIndex))} onMouseDown={keepStudyInputFocus} type="button">
                         {isDynamicFillBlankItem ? "判定填空" : "判定单词"}
                       </Button>
-                      <Button className={actionButtonClass} onClick={handleSpeakEnglish} type="button" variant="secondary">朗读英文</Button>
+                      <Button className={actionButtonClass} onClick={handleSpeakEnglish} onMouseDown={keepStudyInputFocus} type="button" variant="secondary">朗读英文</Button>
                     </>
                   )}
                 </div>
@@ -2218,29 +2809,36 @@ function StudyContent() {
                   {answerState === "sentence-complete" ? (
                     <Button
                       className={actionButtonClass}
+                      onMouseDown={keepStudyInputFocus}
                       onClick={() => {
-                        if (pendingMistakePracticeWordsRef.current.length > 0) {
-                          void beginPendingMistakePractice();
-                          return;
-                        }
-                        answerStateRef.current = "typing";
-                        handleNextItem({ completedCurrentItem: true });
+                        runStudyButtonAction(() => {
+                          if (pendingMistakePracticeWordsRef.current.length > 0) {
+                            return beginPendingMistakePractice();
+                          }
+                          answerStateRef.current = "typing";
+                          handleNextItem({ completedCurrentItem: true });
+                        });
                       }}
                       type="button"
                     >
                       {pendingMistakePracticeWords.length > 0 ? "进入错词复习" : "下一句"}
                     </Button>
                   ) : null}
-                  <Button className={actionButtonClass} onClick={resetAnswer} type="button" variant="secondary">
+                  <Button className={actionButtonClass} onClick={() => runStudyButtonAction(resetAnswer)} onMouseDown={keepStudyInputFocus} type="button" variant="secondary">
                     再来一次
                   </Button>
-                  <Button className={actionButtonClass} onClick={() => handleNextItem()} type="button" variant="outline">
+                  <Button className={actionButtonClass} onClick={() => runStudyButtonAction(() => handleNextItem())} onMouseDown={keepStudyInputFocus} type="button" variant="outline">
                     跳过
                   </Button>
                   {isStudyFullscreen ? (
-                    <Button className={actionButtonClass} onClick={toggleStudyFullscreen} type="button" variant="outline">
-                      退出沉浸
-                    </Button>
+                    <>
+                      <Button className={`${actionButtonClass} ${isDictationMode ? "border-violet-500 bg-violet-50 text-violet-700" : ""}`} onClick={toggleDictationMode} onMouseDown={keepStudyInputFocus} type="button" variant="outline">
+                        {isDictationMode ? "✎ 默写中" : "默写模式"}
+                      </Button>
+                      <Button className={actionButtonClass} onClick={toggleStudyFullscreen} onMouseDown={keepStudyInputFocus} type="button" variant="outline">
+                        退出沉浸
+                      </Button>
+                    </>
                   ) : null}
                 </div>
               </div>
@@ -2249,6 +2847,29 @@ function StudyContent() {
         ) : null}
       </section>
     </main>
+    <style>{`
+      @keyframes celebration-star-burst {
+        0% { transform: scale(0); opacity: 0; }
+        50% { transform: scale(1.3); opacity: 1; }
+        100% { transform: scale(1); opacity: 1; }
+      }
+      .celebration-burst {
+        animation: celebration-star-burst 400ms ease-out;
+        display: inline-block;
+        position: relative;
+      }
+      .celebration-burst::before {
+        content: "\\2736";
+        position: absolute;
+        left: -2rem;
+        top: 50%;
+        transform: translateY(-50%);
+        animation: celebration-star-burst 400ms ease-out;
+        font-size: 2rem;
+        color: #f59e0b;
+      }
+    `}</style>
+    </>
   );
 }
 

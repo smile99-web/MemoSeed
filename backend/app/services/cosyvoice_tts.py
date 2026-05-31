@@ -6,11 +6,14 @@ from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from app.services.tts_cache import get_cached_audio, store_cached_audio
+
 logger = logging.getLogger("cosyvoice_tts")
 
 DEFAULT_COSYVOICE_BASE_URL = "http://localhost:50000"
 COSYVOICE_SAMPLE_RATE = 22050
 COSYVOICE_SAMPLE_WIDTH = 2  # int16 PCM
+COSYVOICE_AUDIO_SUFFIX = "wav"
 
 
 @dataclass(frozen=True)
@@ -19,11 +22,16 @@ class CosyVoiceTtsSettings:
     speaker: str
 
 
-def synthesize_cosyvoice_speech(text: str, settings: CosyVoiceTtsSettings) -> bytes:
+def synthesize_cosyvoice_speech(text: str, settings: CosyVoiceTtsSettings, use_cache: bool = True) -> bytes:
     if not text.strip():
         raise ValueError("TTS text is required")
     if not settings.speaker.strip():
         raise ValueError("TTS speaker (spk_id) is required")
+
+    if use_cache:
+        cached = get_cached_audio(text, settings.speaker, 0, suffix=COSYVOICE_AUDIO_SUFFIX)
+        if cached is not None:
+            return cached
 
     base_url = settings.base_url.strip().rstrip("/")
     url = f"{base_url}/inference_sft"
@@ -63,6 +71,8 @@ def synthesize_cosyvoice_speech(text: str, settings: CosyVoiceTtsSettings) -> by
 
     wav_data = pcm_to_wav(pcm_data)
     logger.info("CosyVoice TTS success: pcm_size=%d wav_size=%d", len(pcm_data), len(wav_data))
+    if use_cache:
+        store_cached_audio(text, settings.speaker, 0, wav_data, suffix=COSYVOICE_AUDIO_SUFFIX)
     return wav_data
 
 

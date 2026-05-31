@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     cosyvoice_english_speaker: str | None = Field(default=None, alias="COSYVOICE_ENGLISH_SPEAKER")
     cosyvoice_chinese_speaker: str | None = Field(default=None, alias="COSYVOICE_CHINESE_SPEAKER")
 
+    tts_cache_dir: str | None = Field(default=None, alias="TTS_CACHE_DIR")
+
     @model_validator(mode="after")
     def validate_security_defaults(self) -> "Settings":
         if self.app_env.lower() in {"production", "prod"} and self.jwt_secret_key == "change_me_to_a_long_random_secret":

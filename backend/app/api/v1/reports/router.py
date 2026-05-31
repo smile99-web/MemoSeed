@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime
 from typing import Annotated, Any
+from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, status
 from fastapi.encoders import jsonable_encoder
@@ -22,26 +23,120 @@ from app.models.user import User
 from app.models.user_model_settings import UserModelSettings
 from app.models.word_memory_state import WordMemoryState
 from app.models.word_review_task import WordReviewTask
-from app.schemas.common import MessageResponse
+from app.schemas.reports import (
+    DailyPlanRead,
+    DailyReportResponse,
+    ErrorBreakdownResponse,
+    RetentionCurveResponse,
+    StudyStreakResponse,
+    TodayPlanResponse,
+    WordHistoryResponse,
+)
+from app.services.memory_dashboard import (
+    build_daily_report,
+    build_error_breakdown,
+    build_retention_curve,
+    build_today_plan,
+    build_word_history,
+    compute_study_streak,
+    generate_ai_daily_report,
+)
 from app.services.secure_model_settings import encrypt_model_settings, public_model_settings
 
 router = APIRouter()
 
 
-@router.get("/daily", response_model=MessageResponse)
+@router.get("/daily", response_model=DailyReportResponse)
 def get_daily_report(
     current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
     report_date: date | None = None,
-) -> MessageResponse:
-    del current_user
-    date_label = report_date.isoformat() if report_date else "latest"
-    return MessageResponse(message=f"Daily report endpoint ready for {date_label}")
+) -> DailyReportResponse:
+    data = build_daily_report(db, current_user.id, report_date)
+    data.pop("_raw", None)
+    return DailyReportResponse(**data)
 
 
-@router.get("/plans/today", response_model=MessageResponse)
-def get_today_plan(current_user: Annotated[User, Depends(get_current_user)]) -> MessageResponse:
-    del current_user
-    return MessageResponse(message="Today plan endpoint ready")
+@router.get("/daily/generate", response_model=DailyReportResponse)
+def generate_daily_report(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    report_date: date | None = None,
+) -> DailyReportResponse:
+    data = generate_ai_daily_report(db, current_user.id, report_date)
+    return DailyReportResponse(**data)
+
+
+@router.get("/plans/today", response_model=TodayPlanResponse)
+def get_today_plan(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> TodayPlanResponse:
+    data = build_today_plan(db, current_user.id)
+    return TodayPlanResponse(**data)
+
+
+@router.get("/plans/settings", response_model=DailyPlanRead)
+def get_today_plan_settings(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> DailyPlanRead:
+    today = date.today()
+    plan = db.scalar(select(DailyPlan).where(DailyPlan.user_id == current_user.id, DailyPlan.plan_date == today))
+    if plan is None:
+        plan = DailyPlan(
+            user_id=current_user.id,
+            plan_date=today,
+            warmup_review_minutes=10,
+            new_learning_minutes=20,
+            sentence_training_minutes=20,
+            mistake_reinforcement_minutes=10,
+            new_word_limit=8,
+            new_phrase_limit=4,
+            strategy={},
+        )
+        db.add(plan)
+        db.commit()
+        db.refresh(plan)
+    return DailyPlanRead.model_validate(plan)
+
+
+@router.get("/word-history/{word}", response_model=WordHistoryResponse)
+def get_word_history(
+    word: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> WordHistoryResponse:
+    data = build_word_history(db, current_user.id, word)
+    return WordHistoryResponse(**data)
+
+
+@router.get("/retention-curve", response_model=RetentionCurveResponse)
+def get_retention_curve(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    course_id: UUID | None = None,
+) -> RetentionCurveResponse:
+    data = build_retention_curve(db, current_user.id, course_id)
+    return RetentionCurveResponse(**data)
+
+
+@router.get("/error-breakdown", response_model=ErrorBreakdownResponse)
+def get_error_breakdown(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ErrorBreakdownResponse:
+    data = build_error_breakdown(db, current_user.id)
+    return ErrorBreakdownResponse(**data)
+
+
+@router.get("/streak", response_model=StudyStreakResponse)
+def get_study_streak(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> StudyStreakResponse:
+    data = compute_study_streak(db, current_user.id)
+    return StudyStreakResponse(**data)
 
 
 @router.get("/export")

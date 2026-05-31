@@ -9,7 +9,9 @@ from sqlalchemy.orm import Session
 
 from app.models.learning_item import LearningItem
 from app.schemas.learning import ImportSkippedItem
-from app.services.llm_translation import LlmTranslationSettings, needs_translation, translate_english_to_chinese
+from app.services.llm_translation import LlmTranslationSettings, enrich_word_with_phonetics, generate_phonetic_decomposition, needs_translation, translate_english_to_chinese
+from app.services.speech_asset_cache import precache_learning_speech_assets
+from app.services.word_translation_cache import ensure_word_translations, extract_unique_words
 
 SUPPORTED_IMPORT_EXTENSIONS = {".txt", ".xlsx"}
 
@@ -156,6 +158,7 @@ def import_learning_items(
     course_id: UUID,
     parsed_items: list[ParsedLearningItem],
     translation_settings: LlmTranslationSettings | None = None,
+    stored_settings: dict[str, object] | None = None,
 ) -> tuple[list[LearningItem], list[ImportSkippedItem]]:
     imported_items: list[LearningItem] = []
     skipped_items: list[ImportSkippedItem] = []
@@ -212,4 +215,155 @@ def import_learning_items(
     db.commit()
     for item in imported_items:
         db.refresh(item)
+
+    # Enrich word-type items with phonetic data (syllables + grapheme-phoneme map + IPA)
+    if translation_settings is not None:
+        word_items = [item for item in imported_items if item.item_type == "word"]
+        for item in word_items:
+            try:
+                syllables, gp_map = enrich_word_with_phonetics(item.english_text, translation_settings)
+                item.syllables = syllables
+                item.grapheme_phoneme_map = gp_map
+                # Also generate IPA if not already provided
+                if not item.phonetic:
+                    try:
+                        decomposition = generate_phonetic_decomposition(item.english_text, translation_settings)
+                        if decomposition.get("ipa"):
+                            item.phonetic = str(decomposition["ipa"])
+                    except ValueError:
+                        pass
+            except ValueError:
+                pass
+        if word_items:
+            db.commit()
+            for item in word_items:
+                db.refresh(item)
+
+        course_terms = extract_unique_words([item.english_text for item in imported_items])
+        course_terms.extend(
+            normalize_english_text(item.english_text)
+            for item in imported_items
+            if item.item_type in {"word", "phrase"} and item.english_text.strip()
+        )
+        if course_terms:
+            ensure_word_translations(db, user_id, course_terms, translation_settings, course_id)
+            db.commit()
+
+    if imported_items:
+        precache_learning_speech_assets(
+            db,
+            user_id=user_id,
+            course_id=course_id,
+            learning_items=imported_items,
+            stored_settings=stored_settings,
+        )
+        db.commit()
+
+    # Assign sort order after import
+    resequence_course_items(db, user_id, course_id)
+
     return imported_items, skipped_items
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """Compute Levenshtein distance between two strings."""
+    if len(a) < len(b):
+        a, b = b, a
+    if len(b) == 0:
+        return len(a)
+    prev_row = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        curr_row = [i]
+        for j, cb in enumerate(b, 1):
+            curr_row.append(min(
+                prev_row[j] + 1,
+                curr_row[j - 1] + 1,
+                prev_row[j - 1] + (0 if ca == cb else 1),
+            ))
+        prev_row = curr_row
+    return prev_row[-1]
+
+
+def _are_phonetically_similar(word1: str, word2: str) -> bool:
+    """Check if two words are phonetically/orthographically similar enough to be confusing.
+
+    Words with edit distance <= 1 for short words (<= 5 chars) or edit distance <= 2
+    for longer words that share the same first character are considered confusingly similar.
+    """
+    if not word1 or not word2:
+        return False
+    dist = _edit_distance(word1, word2)
+    max_len = max(len(word1), len(word2))
+    if max_len <= 5:
+        return dist <= 1
+    if dist <= 2 and word1[0] == word2[0]:
+        return True
+    return dist <= 1
+
+
+def resequence_course_items(db: Session, user_id: UUID, course_id: UUID) -> None:
+    """Auto-assign sort_order for all items in a course.
+
+    Sequencing rules:
+    1. Sort by difficulty_level ASC, then word length ASC, then alphabetical.
+    2. Separate confusingly similar words (edit-distance check) by at least 2 positions.
+    3. Assign sequential sort_order and unit_label based on difficulty tiers.
+    """
+    items = db.scalars(
+        select(LearningItem).where(
+            LearningItem.user_id == user_id,
+            LearningItem.course_id == course_id,
+        )
+    ).all()
+
+    if not items:
+        return
+
+    # Sort: difficulty_level ASC, then word length ASC, then alphabetical
+    def sort_key(item: LearningItem) -> tuple[int, int, str]:
+        clean_text = item.english_text.lower().strip()
+        return (item.difficulty_level, len(clean_text), clean_text)
+
+    sorted_items = sorted(items, key=sort_key)
+
+    # Phonetic similarity grouping: avoid confusingly similar words back-to-back
+    sequenced: list[LearningItem] = []
+    remaining = list(sorted_items)
+    while remaining:
+        candidates = list(remaining)
+        # Prefer the first remaining item that is NOT similar to the last sequenced item
+        if sequenced:
+            last_word = sequenced[-1].english_text.lower().strip()
+            safe_candidates = [
+                item for item in candidates
+                if not _are_phonetically_similar(last_word, item.english_text.lower().strip())
+            ]
+            if safe_candidates:
+                chosen = safe_candidates[0]
+            else:
+                chosen = candidates[0]
+        else:
+            chosen = candidates[0]
+        remaining.remove(chosen)
+        sequenced.append(chosen)
+
+    # Assign sort_order and unit_label
+    diff_unit_map: dict[int, str] = {
+        1: "入门单元",
+        2: "基础单元",
+        3: "进阶单元",
+        4: "提高单元",
+        5: "挑战单元",
+    }
+    unit_counters: dict[int, int] = {1: 1, 2: 1, 3: 1, 4: 1, 5: 1}
+
+    for idx, item in enumerate(sequenced):
+        item.sort_order = idx
+        level = item.difficulty_level
+        if level not in unit_counters:
+            level = 1
+        unit_label = f"{diff_unit_map.get(level, '入门单元')} {unit_counters[level]}"
+        item.unit_label = unit_label
+        unit_counters[level] += 1
+
+    db.commit()

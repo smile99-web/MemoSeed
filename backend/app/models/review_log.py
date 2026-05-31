@@ -28,6 +28,8 @@ class ReviewLog(Base):
     is_correct: Mapped[bool] = mapped_column(Boolean, nullable=False)
     response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    encoding_stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    encoding_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
 
     learning_item: Mapped["LearningItem"] = relationship(back_populates="review_logs")

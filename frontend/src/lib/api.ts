@@ -1,4 +1,5 @@
 import { getApiBaseUrl } from "@/lib/api-base-url";
+import { refreshAccessToken } from "@/lib/auth";
 
 export interface HealthResponse {
   status: string;
@@ -19,13 +20,40 @@ export class ApiRequestError extends Error {
   }
 }
 
-async function parseApiError(response: Response): Promise<string> {
+export async function parseApiError(response: Response): Promise<string> {
   try {
     const body = (await response.json()) as ApiErrorResponse;
     return body.detail ?? `API request failed: ${response.status}`;
   } catch {
     return `API request failed: ${response.status}`;
   }
+}
+
+export async function getFreshAccessToken(): Promise<string | null> {
+  return refreshAccessToken();
+}
+
+export async function fetchWithAuth(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  accessToken: string,
+): Promise<Response> {
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${accessToken}`);
+
+  let response = await fetch(input, { ...init, headers });
+  if (response.status !== 401) {
+    return response;
+  }
+
+  const refreshedAccessToken = await getFreshAccessToken();
+  if (!refreshedAccessToken) {
+    return response;
+  }
+
+  headers.set("Authorization", `Bearer ${refreshedAccessToken}`);
+  response = await fetch(input, { ...init, headers });
+  return response;
 }
 
 export async function apiRequest<TResponse, TBody extends object | undefined = undefined>(

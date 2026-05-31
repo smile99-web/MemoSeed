@@ -1,4 +1,4 @@
-import { refreshAccessToken } from "@/lib/auth";
+import { fetchWithAuth, parseApiError } from "@/lib/api";
 import { getApiBaseUrl } from "@/lib/api-base-url";
 
 export interface CoursePackage {
@@ -16,6 +16,8 @@ export interface Course {
   package_id: string;
   name: string;
   description: string;
+  prerequisite_course_id: string | null;
+  min_mastery_ratio: number;
   created_at: string;
   updated_at: string;
 }
@@ -29,6 +31,44 @@ export interface CoursePayload {
   package_id: string;
   name: string;
   description: string;
+  prerequisite_course_id?: string | null;
+  min_mastery_ratio?: number;
+}
+
+export interface CourseProgress {
+  course_id: string;
+  course_name: string;
+  total_words: number;
+  mastered: number;
+  near_mastered: number;
+  consolidating: number;
+  teaching: number;
+  difficult: number;
+}
+
+export interface CourseLockInfo {
+  course_id: string;
+  course_name: string;
+  is_locked: boolean;
+  prerequisite_course_id: string | null;
+  prerequisite_course_name: string | null;
+  mastery_ratio: number | null;
+  required_mastery_ratio: number;
+}
+
+export interface DailyPlan {
+  id: string;
+  user_id: string;
+  plan_date: string;
+  warmup_review_minutes: number;
+  new_learning_minutes: number;
+  sentence_training_minutes: number;
+  mistake_reinforcement_minutes: number;
+  new_word_limit: number;
+  new_phrase_limit: number;
+  strategy: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface PackageExportItem {
@@ -55,47 +95,6 @@ export interface PackageImportResult {
   imported_package_name: string;
   courses_count: number;
   items_count: number;
-}
-
-interface ApiErrorResponse {
-  detail?: string;
-}
-
-let refreshTokenPromise: Promise<string | null> | null = null;
-
-async function getFreshAccessToken(): Promise<string | null> {
-  refreshTokenPromise ??= refreshAccessToken().finally(() => {
-    refreshTokenPromise = null;
-  });
-  return refreshTokenPromise;
-}
-
-async function parseApiError(response: Response): Promise<string> {
-  try {
-    const body = (await response.json()) as ApiErrorResponse;
-    return body.detail ?? `请求失败：${response.status}`;
-  } catch {
-    return `请求失败：${response.status}`;
-  }
-}
-
-async function fetchWithAuth(input: RequestInfo | URL, init: RequestInit, accessToken: string): Promise<Response> {
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${accessToken}`);
-
-  let response = await fetch(input, { ...init, headers });
-  if (response.status !== 401) {
-    return response;
-  }
-
-  const refreshedAccessToken = await getFreshAccessToken();
-  if (!refreshedAccessToken) {
-    return response;
-  }
-
-  headers.set("Authorization", `Bearer ${refreshedAccessToken}`);
-  response = await fetch(input, { ...init, headers });
-  return response;
 }
 
 export async function listCoursePackages(accessToken: string): Promise<CoursePackage[]> {
@@ -208,4 +207,40 @@ export async function importCoursePackage(accessToken: string, jsonData: Package
     throw new Error(await parseApiError(response));
   }
   return (await response.json()) as PackageImportResult;
+}
+
+export async function getCourseProgress(accessToken: string, courseId: string): Promise<CourseProgress> {
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/courses/courses/${courseId}/progress`,
+    { cache: "no-store" },
+    accessToken,
+  );
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as CourseProgress;
+}
+
+export async function getCourseLockStatus(accessToken: string, courseId: string): Promise<CourseLockInfo> {
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/courses/courses/${courseId}/lock-status`,
+    { cache: "no-store" },
+    accessToken,
+  );
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as CourseLockInfo;
+}
+
+export async function getTodayPlan(accessToken: string): Promise<DailyPlan> {
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/reports/plans/settings`,
+    { cache: "no-store" },
+    accessToken,
+  );
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as DailyPlan;
 }

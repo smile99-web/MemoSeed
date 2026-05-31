@@ -78,6 +78,7 @@ def sanitize_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "ttsWebUrl",
         "ttsEnglishVoice",
         "ttsChineseVoice",
+        "ttsSpeedPreference",
         "volcengineTtsEndpoint",
         "volcengineTtsApiKey",
         "volcengineTtsResourceId",
@@ -88,7 +89,17 @@ def sanitize_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "llmApiKeyConfigured",
         "volcengineTtsApiKeyConfigured",
     }
-    return {key: value for key, value in settings.items() if key in allowed_keys and isinstance(value, str)}
+    sanitized: dict[str, Any] = {}
+    for key, value in settings.items():
+        if key not in allowed_keys:
+            continue
+        if key == "ttsSpeedPreference":
+            if isinstance(value, (int, float, str)):
+                sanitized[key] = value
+            continue
+        if isinstance(value, str):
+            sanitized[key] = value
+    return sanitized
 
 
 def preserve_non_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
@@ -98,6 +109,8 @@ def preserve_non_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "fsrsTrainingReviewCount",
         "fsrsTrainingPairCount",
         "fsrsAccuracyRate",
+        "childFitted",
+        "useChildProfile",
     }
     return {key: value for key, value in settings.items() if key in preserved_keys}
 

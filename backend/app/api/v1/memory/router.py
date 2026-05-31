@@ -14,7 +14,7 @@ from app.models.memory_state import MemoryState
 from app.models.study_time_log import StudyTimeLog
 from app.models.user import User
 from app.schemas.memory import CourseCompletionRequest, CourseProgressStats, FsrsFitResponse, MemoryDashboardResponse, MemoryScheduleResponse, MemoryStateRead, ReviewScoreRequest, StudyTimeLogRequest
-from app.services.memory_dashboard import build_memory_dashboard
+from app.services.memory_dashboard import build_memory_dashboard, check_and_generate_daily_report
 from app.schemas.review import MistakeLogRead, ReviewLogRead
 from app.services.fsrs_fitting import fit_user_fsrs_parameters
 from app.services.memory_scheduler import schedule_memory_review
@@ -26,8 +26,9 @@ router = APIRouter()
 def get_memory_dashboard(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
+    course_id: UUID | None = None,
 ) -> MemoryDashboardResponse:
-    return build_memory_dashboard(db, current_user.id)
+    return build_memory_dashboard(db, current_user.id, course_id=course_id)
 
 
 @router.post("/fsrs/fit", response_model=FsrsFitResponse)
@@ -98,6 +99,7 @@ def record_study_time(
 
     db.add(StudyTimeLog(user_id=current_user.id, course_id=payload.course_id, duration_seconds=payload.duration_seconds))
     db.commit()
+    check_and_generate_daily_report(db, current_user.id)
 
 
 @router.post("/course-completions", status_code=status.HTTP_204_NO_CONTENT)

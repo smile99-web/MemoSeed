@@ -1,21 +1,32 @@
+import math
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
 from app.models.word_memory_state import WordMemoryState
 from app.models.word_review_task import WordReviewTask
 from app.services.memory_dashboard import calculate_word_priority
-from app.utils import normalize_word
+from app.services.memory_scheduler import (
+    FSRS_DECAY,
+    FSRS_FACTOR,
+    MIN_STABILITY_DAYS,
+    compute_short_term_stability,
+    same_day_next_interval,
+    scheduled_stability_days,
+)
+from app.utils import clamp, normalize_word
 
 LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 TASK_TYPE_LABELS = {
     "chinese_to_english": "看中文拼英文",
     "listen_spell": "听英文拼英文",
+    "listen_choose_chinese": "听英文选中文",
     "english_to_chinese": "英文选中文",
     "match_translation": "中英文配对",
     "missing_letter": "缺字母填空",
@@ -25,14 +36,14 @@ TASK_TYPE_LABELS = {
 }
 
 ERROR_TYPE_TASK_STRATEGIES = {
-    "first-letter": ["english_to_chinese", "chinese_to_english", "listen_spell", "cloze_sentence"],
-    "meaning": ["english_to_chinese", "match_translation", "chinese_to_english", "cloze_sentence"],
-    "middle": ["missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
-    "sequence": ["missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
-    "ending": ["missing_letter", "cloze_sentence", "hidden_recall", "recall_word"],
-    "missing-letter": ["missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
-    "extra-letter": ["missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
-    "unknown": ["hidden_recall", "chinese_to_english", "listen_spell", "missing_letter", "cloze_sentence"],
+    "first-letter": ["listen_choose_chinese", "english_to_chinese", "chinese_to_english", "listen_spell", "cloze_sentence"],
+    "meaning": ["listen_choose_chinese", "english_to_chinese", "chinese_to_english", "match_translation", "cloze_sentence"],
+    "middle": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
+    "sequence": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
+    "ending": ["english_to_chinese", "missing_letter", "cloze_sentence", "hidden_recall", "recall_word"],
+    "missing-letter": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
+    "extra-letter": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
+    "unknown": ["english_to_chinese", "hidden_recall", "chinese_to_english", "listen_spell", "missing_letter", "cloze_sentence"],
 }
 
 TEACHING_TIPS = {
@@ -107,7 +118,12 @@ def sync_word_memory_from_review(
         word_state.last_answer_seen_at = now
     if error_type:
         counts = dict(word_state.error_type_counts or {})
-        counts[error_type] = int(counts.get(error_type, 0)) + (1 if is_correct else 2)
+        existing = counts.get(error_type)
+        if isinstance(existing, dict):
+            new_count = int(existing.get("count", 0)) + (1 if is_correct else 2)
+        else:
+            new_count = int(existing or 0) + (1 if is_correct else 2)
+        counts[error_type] = {"count": new_count, "last": now.isoformat()}
         word_state.error_type_counts = counts
 
     word_state.priority_score = calculate_word_memory_priority(word_state, now)
@@ -160,7 +176,12 @@ def schedule_micro_review_tasks_for_mistake(
 ) -> None:
     now = now or datetime.now(UTC)
     cancel_future_pending_tasks(db, user_id, word_state.word)
-    plan = build_micro_review_plan(now, word_state, error_type)
+
+    memory_state = None
+    if word_state.memory_state_id is not None:
+        memory_state = db.scalar(select(MemoryState).where(MemoryState.id == word_state.memory_state_id))
+
+    plan = build_micro_review_plan(now, word_state, error_type, memory_state)
     word_state.micro_review_stage += 1
     word_state.next_micro_review_at = plan[0][1] if plan else word_state.next_micro_review_at
 
@@ -176,7 +197,7 @@ def schedule_micro_review_tasks_for_mistake(
                 task_type=task_type,
                 prompt_text=build_task_prompt(task_type, word_state.word, prompt_text),
                 expected_answer=word_state.word,
-                choices=build_task_choices(task_type, word_state.word, prompt_text),
+                choices=build_task_choices(db, user_id, task_type, word_state.word, prompt_text),
                 priority_score=round(min(max(word_state.priority_score * priority_multiplier, 0.05), 1.0), 2),
                 status="pending",
                 source=f"word-memory:{error_type}:{TEACHING_TIPS.get(error_type, '专项复习')}",
@@ -198,38 +219,168 @@ def cancel_future_pending_tasks(db: Session, user_id: UUID, word: str) -> None:
         task.status = "superseded"
 
 
-def build_micro_review_plan(now: datetime, word_state: WordMemoryState, error_type: str) -> list[tuple[str, datetime, float]]:
+def supersede_stale_pending_tasks_for_reviewed_words(db: Session, user_id: UUID, now: datetime | None = None) -> bool:
+    """Clear old pending word tasks after the word has already been reviewed.
+
+    A word can be reviewed through another task or sentence flow while an older
+    due WordReviewTask remains pending. If the word's next review has moved into
+    the future and the task was due before the latest review, that pending task
+    is stale and should no longer block/reappear in the review queue.
+    """
+    now = now or datetime.now(UTC)
+    rows = db.execute(
+        select(WordReviewTask, WordMemoryState)
+        .join(WordMemoryState, WordMemoryState.id == WordReviewTask.word_memory_state_id)
+        .where(
+            WordReviewTask.user_id == user_id,
+            WordReviewTask.status == "pending",
+            WordReviewTask.due_at <= now,
+            WordMemoryState.last_reviewed_at.isnot(None),
+            WordMemoryState.next_micro_review_at.isnot(None),
+            WordMemoryState.last_reviewed_at >= WordReviewTask.due_at,
+            WordMemoryState.next_micro_review_at > now,
+        )
+    ).all()
+    if not rows:
+        return False
+
+    for task, _word_state in rows:
+        task.status = "superseded"
+        task.completed_at = now
+        db.add(task)
+    db.flush()
+    return True
+
+
+CHILD_TARGET_RETENTION = 0.80
+SAME_DAY_TARGET_RETRIEVABILITIES = (0.998, 0.99, 0.97, 0.94, 0.90)
+LONG_TERM_MIN_DAYS = 0.5
+LONG_TERM_MAX_DAYS = 30.0
+DEFAULT_FALLBACK_STABILITY_DAYS = 1.0
+
+
+def compute_micro_review_interval(
+    word_state: WordMemoryState,
+    target_retrievability: float,
+    is_same_day: bool,
+    now: datetime,
+    memory_state: MemoryState | None = None,
+) -> timedelta:
+    """Compute an adaptive micro-review interval using the FSRS forgetting curve.
+
+    For long-term tasks, uses full long-term stability (LTS) with the child's target
+    retention to derive an optimal interval in days.  For same-day tasks, uses the
+    STS exponential-decay model (compute_short_term_stability + same_day_next_interval)
+    to match the Ebbinghaus forgetting curve during the critical first hours.
+    """
+    if is_same_day:
+        if memory_state is not None:
+            sts = compute_short_term_stability(memory_state, now)
+        else:
+            sts = max(word_state.memory_strength * 0.3, 0.01)
+        return same_day_next_interval(sts, target_retrievability)
+
+    if memory_state is not None:
+        stability_days = scheduled_stability_days(memory_state)
+    else:
+        stability_days = max(word_state.memory_strength * 5.0, MIN_STABILITY_DAYS)
+    if stability_days <= 0:
+        stability_days = DEFAULT_FALLBACK_STABILITY_DAYS
+
+    exponent = 1.0 / FSRS_DECAY  # -2.0
+    raw_interval = stability_days * ((target_retrievability ** exponent - 1.0) / FSRS_FACTOR)
+    clamped_days = clamp(raw_interval, LONG_TERM_MIN_DAYS, LONG_TERM_MAX_DAYS)
+    return timedelta(days=clamped_days)
+
+
+def build_micro_review_plan(
+    now: datetime,
+    word_state: WordMemoryState,
+    error_type: str,
+    memory_state: MemoryState | None = None,
+) -> list[tuple[str, datetime, float]]:
+    """Build an adaptive micro-review plan with FSRS-based interval scheduling.
+
+    Same-day tasks receive intervals derived from a short-term stability (STS)
+    factor applied to the word's long-term stability.  Long-term tasks use the
+    last 3-4 tasks from the deduplicated task sequence with full LTS intervals.
+    """
     local_now = now.astimezone(LOCAL_TIMEZONE)
     end_of_day = local_now.replace(hour=20, minute=0, second=0, microsecond=0)
     if end_of_day <= local_now:
         end_of_day = local_now + timedelta(hours=2)
-    end_of_day = end_of_day.astimezone(UTC)
+    end_of_day_utc = end_of_day.astimezone(UTC)
 
     task_sequence = choose_task_sequence(word_state, error_type)
-    same_day_offsets = [
-        timedelta(0),
-        timedelta(minutes=3),
-        timedelta(minutes=10),
-        timedelta(minutes=20),
-        timedelta(minutes=30),
-        end_of_day - now,
-    ]
-    long_term_tasks = ["chinese_to_english", "cloze_sentence", "recall_word"]
-    long_term_offsets = [timedelta(days=1), timedelta(days=3), timedelta(days=7)]
-    if word_state.consecutive_error_count >= 4:
-        long_term_tasks.insert(0, "hidden_recall")
-        long_term_offsets.insert(0, timedelta(hours=2))
+    num_same_day = min(6, len(task_sequence))
+    long_term_count = min(4, len(task_sequence) - num_same_day)
+    if long_term_count < 1:
+        long_term_count = 1
 
     plan: list[tuple[str, datetime, float]] = []
-    for index, task_type in enumerate(task_sequence[: len(same_day_offsets)]):
-        delay = max(same_day_offsets[index], timedelta(0))
-        plan.append((task_type, now + delay, max(1.0 - index * 0.08, 0.62)))
-    for index, task_type in enumerate(long_term_tasks):
-        plan.append((task_type, now + long_term_offsets[index], max(0.72 - index * 0.08, 0.5)))
+
+    # Slot 0 — fires immediately for correction (timedelta(0) stays)
+    plan.append((task_sequence[0], now, 1.0))
+
+    # Same-day adaptive intervals (slots 1-5)
+    for i in range(1, num_same_day):
+        rt_index = i - 1
+        if rt_index >= len(SAME_DAY_TARGET_RETRIEVABILITIES):
+            rt_index = len(SAME_DAY_TARGET_RETRIEVABILITIES) - 1
+        target_rt = SAME_DAY_TARGET_RETRIEVABILITIES[rt_index]
+        interval = compute_micro_review_interval(word_state, target_rt, is_same_day=True, now=now, memory_state=memory_state)
+        due = now + interval
+        if due > end_of_day_utc:
+            due = end_of_day_utc
+        if i > 1:
+            prev_due = plan[-1][1]
+            if due <= prev_due:
+                due = prev_due + timedelta(minutes=1)
+        plan.append((task_sequence[i], due, max(1.0 - i * 0.08, 0.62)))
+
+    # Long-term tasks — last 3-4 from the deduplicated sequence
+    long_term_start = len(task_sequence) - long_term_count
+    if long_term_start < num_same_day:
+        long_term_start = num_same_day
+    for i, task_type in enumerate(task_sequence[long_term_start:]):
+        interval = compute_micro_review_interval(word_state, CHILD_TARGET_RETENTION, is_same_day=False, now=now, memory_state=memory_state)
+        plan.append((task_type, now + interval, max(0.72 - i * 0.08, 0.5)))
+
     return plan
 
 
+ERROR_TYPE_DECAY_HALF_LIFE_DAYS = 30.0
+
+
+def get_decayed_error_weights(word_state: WordMemoryState, now: datetime) -> dict[str, float]:
+    """Compute temporally decayed error weights.
+
+    Errors older than ERROR_TYPE_DECAY_HALF_LIFE_DAYS have exponentially
+    reduced influence.  Legacy integer counts (no timestamp) are treated
+    as fully fresh until the first dict-format update.
+    """
+    raw = word_state.error_type_counts or {}
+    decayed: dict[str, float] = {}
+    for error_type, data in raw.items():
+        if isinstance(data, dict):
+            count = float(data.get("count", 0))
+            last_str = str(data.get("last", ""))
+            days = 0.0
+            if last_str:
+                try:
+                    last_dt = datetime.fromisoformat(last_str)
+                    days = max((now - last_dt).total_seconds() / 86400.0, 0.0)
+                except (ValueError, TypeError):
+                    pass
+            weight = count * math.exp(-days / ERROR_TYPE_DECAY_HALF_LIFE_DAYS)
+        else:
+            weight = float(data or 0)
+        decayed[error_type] = weight
+    return decayed
+
+
 def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[str]:
+    now_utc = datetime.now(UTC)
     base_sequence = ERROR_TYPE_TASK_STRATEGIES.get(error_type, ["chinese_to_english", "listen_spell", "missing_letter", "cloze_sentence"])
     if word_state.consecutive_error_count >= 3 and "hidden_recall" not in base_sequence[:2]:
         base_sequence = ["hidden_recall", *base_sequence]
@@ -237,22 +388,49 @@ def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[s
         base_sequence = [*base_sequence, "recall_word"]
 
     task_counts = {str(key): int(value or 0) for key, value in (word_state.task_type_counts or {}).items()}
+    decayed_errors = get_decayed_error_weights(word_state, now_utc)
+
     deduped_sequence: list[str] = []
     for task_type in base_sequence:
         if task_type not in deduped_sequence:
             deduped_sequence.append(task_type)
-    fallback_tasks = ["chinese_to_english", "listen_spell", "missing_letter", "english_to_chinese", "cloze_sentence", "recall_word"]
+    fallback_tasks = ["listen_choose_chinese", "english_to_chinese", "chinese_to_english", "listen_spell", "missing_letter", "cloze_sentence", "recall_word"]
     for task_type in fallback_tasks:
         if task_type not in deduped_sequence:
             deduped_sequence.append(task_type)
 
-    first_task = min(deduped_sequence[:4], key=lambda task_type: task_counts.get(task_type, 0))
+    # Use decayed error weights as a tie-breaker: higher error weight → higher priority
+    # Task types with recent errors get picked LESS often (they've been practiced enough)
+    # Task types with low/no recent errors are promoted to ensure variety
+    error_map = {
+        "listen_choose_chinese": ["meaning", "first-letter"],
+        "english_to_chinese": ["first-letter", "meaning"],
+        "chinese_to_english": ["first-letter", "meaning"],
+        "match_translation": ["meaning"],
+        "listen_spell": ["first-letter", "middle", "sequence", "missing-letter", "extra-letter"],
+        "missing_letter": ["middle", "sequence", "missing-letter", "extra-letter", "ending"],
+        "cloze_sentence": ["first-letter", "meaning", "middle", "sequence", "missing-letter", "extra-letter", "ending"],
+        "hidden_recall": ["middle", "sequence", "ending", "unknown"],
+        "recall_word": ["ending"],
+    }
+    task_error_weight: dict[str, float] = {}
+    for t in deduped_sequence[:4]:
+        relevant_errors = error_map.get(t, [])
+        total_weight = sum(decayed_errors.get(e, 0.0) for e in relevant_errors)
+        task_error_weight[t] = total_weight
+
+    first_task = min(
+        deduped_sequence[:4],
+        key=lambda t: (task_counts.get(t, 0), task_error_weight.get(t, 0.0)),
+    )
     return [first_task, *[task_type for task_type in deduped_sequence if task_type != first_task]]
 
 
 def build_task_prompt(task_type: str, word: str, fallback_prompt: str) -> str:
     if task_type == "listen_spell":
         return f"听英文发音，拼写这个单词：{word}"
+    if task_type == "listen_choose_chinese":
+        return "听英文发音，选择正确的中文意思"
     if task_type == "english_to_chinese":
         return f"选择 {word} 的中文意思"
     if task_type == "match_translation":
@@ -260,7 +438,7 @@ def build_task_prompt(task_type: str, word: str, fallback_prompt: str) -> str:
     if task_type == "missing_letter":
         return f"补全缺失字母：{mask_learning_letters(word)}"
     if task_type == "cloze_sentence":
-        return fallback_prompt or f"在短句中填入 {word}"
+        return f"在短句中填入 {word}。"
     if task_type == "hidden_recall":
         return f"先看 5 秒，再隐藏重拼：{word}"
     if task_type == "recall_word":
@@ -268,11 +446,46 @@ def build_task_prompt(task_type: str, word: str, fallback_prompt: str) -> str:
     return f"根据中文意思拼写英文：{word}"
 
 
-def build_task_choices(task_type: str, word: str, fallback_prompt: str) -> list[str]:
-    if task_type not in {"english_to_chinese", "match_translation"}:
+def build_task_choices(
+    db: Session,
+    user_id: UUID,
+    task_type: str,
+    word: str,
+    correct_chinese: str,
+) -> list[str]:
+    """Build choice options for multi-choice review tasks.
+
+    Fetches up to 5 random Chinese translations from the user's other learning
+    items as distractors.  If insufficient distractors are found, returns fewer
+    items — the caller (build_micro_task_learning_item) will enrich via LLM.
+    """
+    if task_type not in {"listen_choose_chinese", "english_to_chinese", "match_translation"}:
         return []
-    correct_choice = word
-    return [correct_choice, "不是这个意思", "还需要再练"]
+    if not correct_chinese:
+        return [word]
+
+    distractor_rows = db.execute(
+        select(LearningItem.chinese_text)
+        .where(
+            LearningItem.user_id == user_id,
+            LearningItem.chinese_text.isnot(None),
+            LearningItem.chinese_text != "",
+            func.length(LearningItem.chinese_text) <= 4,
+            LearningItem.chinese_text != correct_chinese,
+        )
+        .order_by(func.random())
+        .limit(10)
+    ).scalars().all()
+
+    unique_distractors: list[str] = []
+    for text in distractor_rows:
+        text = str(text).strip()
+        if text and len(text) <= 4 and text not in unique_distractors and text != correct_chinese:
+            unique_distractors.append(text)
+        if len(unique_distractors) >= 5:
+            break
+
+    return [correct_chinese, *unique_distractors]
 
 
 def mask_middle_letters(word: str) -> str:

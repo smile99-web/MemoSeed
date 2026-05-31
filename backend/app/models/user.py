@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from app.models.learning_item import LearningItem
     from app.models.refresh_token import RefreshToken
     from app.models.study_time_log import StudyTimeLog
+    from app.models.tts_usage_log import TtsUsageLog
     from app.models.user_model_settings import UserModelSettings
 
 
@@ -38,3 +39,4 @@ class User(Base):
     study_time_logs: Mapped[list["StudyTimeLog"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     model_settings: Mapped["UserModelSettings | None"] = relationship(back_populates="user", cascade="all, delete-orphan", uselist=False)
+    tts_usage_logs: Mapped[list["TtsUsageLog"]] = relationship(back_populates="user", cascade="all, delete-orphan")

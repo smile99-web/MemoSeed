@@ -39,6 +39,8 @@ class MemoryState(Base):
     context_correct_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     next_review_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    short_term_stability: Mapped[float | None] = mapped_column(Float, nullable=True, default=1.0)
+    last_short_term_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 

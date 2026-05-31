@@ -17,6 +17,7 @@ export interface ModelSettings {
   ttsWebUrl: string;
   ttsEnglishVoice: string;
   ttsChineseVoice: string;
+  ttsSpeedPreference: number;
   volcengineTtsEndpoint: string;
   volcengineTtsApiKey: string;
   volcengineTtsResourceId: string;
@@ -49,6 +50,7 @@ export const defaultModelSettings: ModelSettings = {
   ttsWebUrl: "http://localhost:8880/web",
   ttsEnglishVoice: "af_heart",
   ttsChineseVoice: "zf_xiaobei",
+  ttsSpeedPreference: 1,
   volcengineTtsEndpoint: "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
   volcengineTtsApiKey: "",
   volcengineTtsResourceId: "seed-tts-2.0",
