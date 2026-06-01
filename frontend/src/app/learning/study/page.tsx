@@ -473,7 +473,16 @@ function StudyContent() {
   const [hasFinalizedCurrentItem, setHasFinalizedCurrentItem] = useState(false);
   const [startedAt, setStartedAt] = useState<number>(() => Date.now());
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
+  const [feedbackType, setFeedbackType] = useState<"success" | "error" | "info">("info");
+  const [selectedChoice, setSelectedChoice] = useState<string | null>(null);
   const [childHint, setChildHint] = useState<ChildFriendlyHintData | null>(null);
+  function setFeedback(message: string | null, type: "success" | "error" | "info" = "info") {
+    setFeedbackMessage(message);
+    if (message) {
+      setFeedbackType(type);
+    }
+  }
+
   const [previewCountdownSeconds, setPreviewCountdownSeconds] = useState(0);
   const [celebrationTrigger, setCelebrationTrigger] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -713,7 +722,7 @@ function StudyContent() {
       );
     }
 
-    setFeedbackMessage(chineseMeaning
+    setFeedback(chineseMeaning
       ? `记住它！还剩 ${previewSeconds} 秒：${expectedWord}。中文意思：${chineseMeaning}`
       : `记住它！还剩 ${previewSeconds} 秒：${expectedWord}`);
     wordPreviewTimeoutRef.current = window.setTimeout(() => {
@@ -731,7 +740,7 @@ function StudyContent() {
         }
         return nextStatuses;
       });
-      setFeedbackMessage(chineseMeaning ? `现在请凭记忆重新拼写这个单词。中文意思：${chineseMeaning}` : "现在请凭记忆重新拼写这个单词。");
+      setFeedback(chineseMeaning ? `现在请凭记忆重新拼写这个单词。中文意思：${chineseMeaning}` : "现在请凭记忆重新拼写这个单词。");
       window.setTimeout(() => inputRefs.current[index]?.focus(), 0);
     }, WORD_PREVIEW_MS);
   }, [clearWordPreview]);
@@ -740,12 +749,12 @@ function StudyContent() {
     clearMistakePracticePreview();
     setPreviewMistakePracticeWord(true);
     setMistakePracticeAnswer("");
-    setFeedbackMessage(`看清这个单词 ${Math.round(WORD_PREVIEW_MS / 1000)} 秒：${expectedWord}。它会自动隐藏，然后请凭记忆完整拼写。`);
+    setFeedback(`看清这个单词 ${Math.round(WORD_PREVIEW_MS / 1000)} 秒：${expectedWord}。它会自动隐藏，然后请凭记忆完整拼写。`);
     mistakePracticePreviewTimeoutRef.current = window.setTimeout(() => {
       mistakePracticePreviewTimeoutRef.current = null;
       setPreviewMistakePracticeWord(false);
       setMistakePracticeStatus("idle");
-      setFeedbackMessage("现在请凭记忆重新拼写这个错词。");
+      setFeedback("现在请凭记忆重新拼写这个错词。");
       window.setTimeout(() => mistakePracticeInputRef.current?.focus(), 0);
     }, WORD_PREVIEW_MS);
   }, [clearMistakePracticePreview]);
@@ -866,7 +875,7 @@ function StudyContent() {
       setEncodingChineseText("");
       setEncodingContextExample(null);
       updateAnswerState("sentence-complete");
-      setFeedbackMessage("记忆编码完成！按空格进入下一题。");
+      setFeedback("记忆编码完成！按空格进入下一题。", "success");
       return;
     }
 
@@ -874,7 +883,7 @@ function StudyContent() {
       const syllables = (currentItem?.syllables && currentItem.syllables.length > 0)
         ? currentItem.syllables
         : splitIntoSyllables(word);
-      setFeedbackMessage("仔细听，这个单词分为 " + syllables.length + " 个音节：" + syllables.join(" — "));
+      setFeedback("仔细听，这个单词分为 " + syllables.length + " 个音节：" + syllables.join(" — "));
       if (!isDictationModeRef.current) {
         const wordByWord = buildWordByWordEnglishSpeechText(word);
         await speakInVoiceSequence(sequenceId, wordByWord, settings.ttsEnglishVoice, "en-US", settings, SLOW_ENGLISH_TTS_OPTIONS);
@@ -893,9 +902,9 @@ function StudyContent() {
         for (let i = 0; i < entries.length; i++) {
           hintParts.push(entries[i][0] + "=" + entries[i][1]);
         }
-        setFeedbackMessage("点击每个颜色块听发音。拼读提示：" + hintParts.join("，"));
+        setFeedback("点击每个颜色块听发音。拼读提示：" + hintParts.join("，"));
       } else {
-        setFeedbackMessage("点击每个颜色块听发音，也可以按字母逐音朗读。");
+        setFeedback("点击每个颜色块听发音，也可以按字母逐音朗读。");
       }
       encodingStageTimeoutRef.current = window.setTimeout(function () {
         void advanceEncodingStage("chunk_trace", word, chineseText);
@@ -906,7 +915,7 @@ function StudyContent() {
     if (nextStage === "whole_recall") {
       const previewMs = getAdaptivePreviewDuration(word);
       const previewSeconds = Math.round(previewMs / 1000);
-      setFeedbackMessage("记住它！还剩 " + previewSeconds + " 秒：" + word);
+      setFeedback("记住它！还剩 " + previewSeconds + " 秒：" + word);
       setPreviewCountdownSeconds(previewSeconds);
       if (previewCountdownIntervalRef.current !== null) {
         window.clearInterval(previewCountdownIntervalRef.current);
@@ -934,7 +943,7 @@ function StudyContent() {
           previewCountdownIntervalRef.current = null;
         }
         setPreviewCountdownSeconds(0);
-        setFeedbackMessage("现在请凭记忆拼写这个单词。");
+        setFeedback("现在请凭记忆拼写这个单词。");
         setWordAnswers(function (current) {
           const nextAnswers = current.slice();
           nextAnswers[0] = "";
@@ -951,7 +960,7 @@ function StudyContent() {
       const exampleEnglish = template.english(word);
       const exampleChinese = template.chinese(chineseText);
       setEncodingContextExample({ english: exampleEnglish, chinese: exampleChinese });
-      setFeedbackMessage("例句：" + exampleChinese);
+      setFeedback("例句：" + exampleChinese);
       if (!isDictationModeRef.current) {
         await speakInVoiceSequence(sequenceId, exampleChinese, settings.ttsChineseVoice, "zh-CN", settings);
         if (await waitInVoiceSequence(sequenceId, 800)) {
@@ -978,7 +987,7 @@ function StudyContent() {
     clearWordPreview();
     encodingStageRef.current = "meaning_intro";
 
-    setFeedbackMessage("先听中文意思和英文发音，不要看拼写。中文：" + chineseText);
+    setFeedback("先听中文意思和英文发音，不要看拼写。中文：" + chineseText);
 
     const settings = modelSettingsRef.current;
     const sequenceId = startVoiceSequence();
@@ -1392,7 +1401,8 @@ function StudyContent() {
     updateAnswerState("typing");
     isCompletingSentenceRef.current = false;
     respellWordIndexesRef.current = [];
-    setFeedbackMessage(null);
+    setFeedback(null);
+    setSelectedChoice(null);
     // Multi-modal encoding for new words (not review tasks)
     if (currentItem && !currentItem.review_task_type && currentItem.item_type === "word" && currentWords[0]) {
       const encWord = currentWords[0];
@@ -1441,7 +1451,7 @@ function StudyContent() {
         const safeIndex = dueReviewItems.length === 0 && Number.isInteger(savedIndex) && savedIndex >= 0 && savedIndex < mergedItems.length ? savedIndex : 0;
         setItems(mergedItems);
         setCurrentIndex(safeIndex);
-        setFeedbackMessage(dueReviewItems.length > 0 ? `先复习 ${dueReviewItems.length} 条历史错词/到期内容，再进入当前课程。` : null);
+        setFeedback(dueReviewItems.length > 0 ? `先复习 ${dueReviewItems.length} 条历史错词/到期内容，再进入当前课程。` : null);
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "读取学习内容失败");
       } finally {
@@ -1488,7 +1498,7 @@ function StudyContent() {
       nextItems.splice(Math.min(currentIndexRef.current + 1, nextItems.length), 0, ...insertItems);
       return nextItems;
     });
-    setFeedbackMessage(`已插入 ${freshReviewItems.length} 条新的到期复习内容，完成当前题后会优先复习。`);
+    setFeedback(`已插入 ${freshReviewItems.length} 条新的到期复习内容，完成当前题后会优先复习。`);
   }, [courseId]);
 
   useEffect(() => {
@@ -1567,7 +1577,8 @@ function StudyContent() {
     isCompletingSentenceRef.current = false;
     setCurrentStreak(0);
     setWordAnimations({});
-    setFeedbackMessage(null);
+    setFeedback(null);
+    setSelectedChoice(null);
     window.setTimeout(() => inputRefs.current[dynamicReviewWordIndexes[0] ?? 0]?.focus(), 0);
   }
 
@@ -1892,7 +1903,7 @@ function StudyContent() {
     setChildHint(null);
     setSentenceWordMeanings(loadingMeanings);
     updateAnswerState("word-meaning-review");
-    setFeedbackMessage("拼写完成！看一看每个单词的中文意思，5 秒后继续。");
+    setFeedback("拼写完成！看一看每个单词的中文意思，5 秒后继续。");
 
     const meanings = await buildSentenceWordMeaningMap(words);
     if (currentItemRef.current?.id !== itemId || (answerStateRef.current as AnswerState) !== "word-meaning-review") {
@@ -1934,17 +1945,18 @@ function StudyContent() {
         respellWordIndexesRef.current = [];
         updateAnswerState("sentence-complete");
         isCompletingSentenceRef.current = false;
-        setFeedbackMessage("错词重拼完成。按空格进入下一句。");
+        setFeedback("错词重拼完成。按空格进入下一句。", "success");
         await playCurrentReviewCompletionAudio();
         return;
       }
       setPendingMistakePractice(uniqueMistakenWords, {});
       updateAnswerState("sentence-complete");
       isCompletingSentenceRef.current = false;
-      setFeedbackMessage(
+      setFeedback(
         dynamicSentenceFeedback
           ? `${dynamicSentenceFeedback} 本句有错词，按空格进入错词复习。`
           : "本句有错词，按空格进入错词复习。",
+        "error",
       );
       await playCurrentReviewCompletionAudio();
       return;
@@ -1958,9 +1970,9 @@ function StudyContent() {
     }
     if (respellWordIndexesRef.current.length > 0) {
       respellWordIndexesRef.current = [];
-      setFeedbackMessage("错词重拼完全正确。按空格进入下一句。");
+      setFeedback("错词重拼完全正确。按空格进入下一句。", "success");
     } else {
-      setFeedbackMessage(dynamicSentenceFeedback ? `${dynamicSentenceFeedback} 按空格进入下一句。` : "整句拼写正确。按空格进入下一句。");
+      setFeedback(dynamicSentenceFeedback ? `${dynamicSentenceFeedback} 按空格进入下一句。` : "整句拼写正确。按空格进入下一句。", "success");
     }
     await playCurrentReviewCompletionAudio();
   }
@@ -1987,7 +1999,7 @@ function StudyContent() {
       return nextAnswers;
     });
     if (Date.now() - feedbackSetAtRef.current > 1500) {
-      setFeedbackMessage(null);
+      setFeedback(null);
     }
     if (wordStatuses[index] === "incorrect" || wordStatuses[index] === "skipped") {
       setWordStatuses((current) => {
@@ -2012,7 +2024,7 @@ function StudyContent() {
       nextStatuses[index] = "idle";
       return nextStatuses;
     });
-    setFeedbackMessage("请重新输入这个单词。");
+    setFeedback("请重新输入这个单词。", "error");
     window.setTimeout(() => inputRefs.current[index]?.focus(), 0);
   }
 
@@ -2023,10 +2035,10 @@ function StudyContent() {
   async function handleFirstLetterMistake(expectedWord: string) {
     const translatedWord = await translateWordForHint(expectedWord);
     if (isDictationModeRef.current) {
-      setFeedbackMessage(translatedWord ? `首字母不对，请参考中文意思重试。中文：${translatedWord}` : "首字母不对，请重试。");
+      setFeedback(translatedWord ? `首字母不对，请参考中文意思重试。中文：${translatedWord}` : "首字母不对，请重试。", "error");
       return;
     }
-    setFeedbackMessage(translatedWord ? `首字母不对，先听中文和英文读音。中文：${translatedWord}` : "首字母不对，先听英文读音再试一次。");
+    setFeedback(translatedWord ? `首字母不对，先听中文和英文读音。中文：${translatedWord}` : "首字母不对，先听英文读音再试一次。", "error");
     await playChineseThenEnglish(translatedWord, expectedWord);
   }
 
@@ -2036,7 +2048,7 @@ function StudyContent() {
     const translatedWord = await translateWordForHint(expectedWord);
     const hintText = translatedWord ? `${hint.text} 中文意思：${translatedWord}` : hint.text;
     setChildHint({ ...hint, text: hintText });
-    setFeedbackMessage(hintText);
+    setFeedback(hintText, "error");
     if (translatedWord) {
       await playChineseThenEnglish(translatedWord, expectedWord);
     }
@@ -2048,11 +2060,11 @@ function StudyContent() {
       return;
     }
     if (previewWordIndex === index) {
-      setFeedbackMessage("先看清单词，等它自动隐藏后再凭记忆输入。");
+      setFeedback("先看清单词，等它自动隐藏后再凭记忆输入。");
       return;
     }
     if (encodingStageRef.current === "whole_recall" && previewCountdownSeconds > 0) {
-      setFeedbackMessage("先看清单词，等它自动隐藏后再凭记忆输入。");
+      setFeedback("先看清单词，等它自动隐藏后再凭记忆输入。");
       return;
     }
     if (isDynamicFillBlankItem && !dynamicReviewWordIndexes.includes(index)) {
@@ -2122,7 +2134,7 @@ function StudyContent() {
         return;
       }
       if (getFirstLetter(typedValue) !== getFirstLetter(expectedWord)) {
-        setFeedbackMessage("首字母不对，正在准备中文和英文读音...");
+        setFeedback("首字母不对，正在准备中文和英文读音...", "error");
         void handleFirstLetterMistake(expectedWord);
       } else {
         void handleSpellingMistake(index, expectedWord, typedValue, nextErrorCount, errorType);
@@ -2142,7 +2154,7 @@ function StudyContent() {
 
       if (nextConsecutive < DIFFICULT_WORD_CONFIRMATION_COUNT) {
         playCorrectDing();
-        setFeedbackMessage(`拼对了 ${nextConsecutive} / ${DIFFICULT_WORD_CONFIRMATION_COUNT} 次，再拼一遍这个单词。`);
+        setFeedback(`拼对了 ${nextConsecutive} / ${DIFFICULT_WORD_CONFIRMATION_COUNT} 次，再拼一遍这个单词。`, "success");
         setWordAnswers((current) => {
           const nextAnswers = [...current];
           nextAnswers[index] = "";
@@ -2158,7 +2170,7 @@ function StudyContent() {
       }
 
       // Show celebration for previously-difficult words
-      setFeedbackMessage("这个单词已经连续拼对 3 次，太棒了！");
+      setFeedback("这个单词已经连续拼对 3 次，太棒了！", "success");
       setCelebrationTrigger((prev) => prev + 1);
 
       setWordConsecutiveCorrect((current) => {
@@ -2260,7 +2272,7 @@ function StudyContent() {
       return;
     }
     if (previewMistakePracticeWord) {
-      setFeedbackMessage("先看清单词，等它自动隐藏后再凭记忆输入。");
+      setFeedback("先看清单词，等它自动隐藏后再凭记忆输入。");
       return;
     }
 
@@ -2291,14 +2303,14 @@ function StudyContent() {
       }
 
       if (getFirstLetter(normalizedAnswer) !== getFirstLetter(expectedWord)) {
-        setFeedbackMessage(`首字母不对，先听中文和英文读音。已连续错误 ${nextErrorCount} 次。`);
+        setFeedback(`首字母不对，先听中文和英文读音。已连续错误 ${nextErrorCount} 次。`, "error");
         await playChineseThenEnglish(currentMistakePracticeTranslation, expectedWord);
         return;
       }
 
       const practiceHint = buildChildFriendlyHint(expectedWord, errorType, getMatchedPrefixLength(expectedWord, normalizedAnswer), currentItem?.syllables);
       setChildHint(practiceHint);
-      setFeedbackMessage(`${practiceHint.text} 已连续错误 ${nextErrorCount} 次。`);
+      setFeedback(`${practiceHint.text} 已连续错误 ${nextErrorCount} 次。`, "error");
       return;
     }
 
@@ -2311,7 +2323,7 @@ function StudyContent() {
         return;
       }
 
-      setFeedbackMessage("正确！做得好！");
+      setFeedback("正确！做得好！", "success");
 
       setMistakePracticeConsecutiveCorrect(0);
     }
@@ -2330,7 +2342,7 @@ function StudyContent() {
       setMistakePracticeErrorCount(0);
       setMistakePracticeConsecutiveCorrect(0);
       clearMistakePracticePreview();
-      setFeedbackMessage("正确。继续拼写下一个错词。");
+      setFeedback("正确。继续拼写下一个错词。", "success");
       const nextTranslation = mistakePracticeTranslations[nextWord];
       if (nextTranslation) {
         await playChineseThenEnglish(nextTranslation, nextWord);
@@ -2368,7 +2380,7 @@ function StudyContent() {
     isCompletingSentenceRef.current = false;
     const firstRespellIdx = respellIndexes[0] ?? 0;
     setActiveWordIndex(firstRespellIdx);
-    setFeedbackMessage("错词复习完成。请在黄色高亮的单词框中拼写刚才错过的词。");
+    setFeedback("错词复习完成。请在黄色高亮的单词框中拼写刚才错过的词。", "success");
     const respellSequenceId = startVoiceSequence();
     if (currentItem?.chinese_text && currentItem.english_text) {
       void playCurrentItemIntro(currentItem, respellSequenceId);
@@ -2376,10 +2388,12 @@ function StudyContent() {
     window.setTimeout(() => inputRefs.current[firstRespellIdx]?.focus(), 0);
   }
 
-  async function submitChoiceReviewTask(choice: string, isCorrect: boolean) {
-    if (!currentItem || !isChoiceReviewTask) {
+  async function confirmChoiceSelection() {
+    if (!currentItem || !isChoiceReviewTask || !selectedChoice) {
       return;
     }
+    const correctAnswer = hasChineseText(currentItem.review_answer) ? currentItem.review_answer : reviewTaskWordTranslation;
+    const isCorrect = isCorrectChoiceAnswer(selectedChoice, correctAnswer);
     const accessToken = getAccessToken();
     const learningItemId = getSourceLearningItemId(currentItem);
     const word = currentWords[0] ?? "";
@@ -2392,7 +2406,7 @@ function StudyContent() {
             word,
             score: isCorrect ? 4 : 1,
             review_mode: `word-${currentItem.review_task_type}`,
-            response_text: choice,
+            response_text: selectedChoice,
             error_type: isCorrect ? undefined : "meaning",
             duration_seconds: 0,
           },
@@ -2403,19 +2417,21 @@ function StudyContent() {
       }
     }
     if (!isCorrect) {
-      setFeedbackMessage("这个选项不对，已加入错词专项复习。");
+      setFeedback("这个选项不对，已加入错词专项复习。", "error");
+      setSelectedChoice(null);
       const correctMeaning = (hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "") || (hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "");
       if (word && correctMeaning) {
         void playEnglishThenChinese(word, correctMeaning);
       }
       return;
     }
-    const correctMeaning = (hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "") || (hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "") || choice;
+    const correctMeaning = (hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "") || (hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "") || selectedChoice;
     if (word && correctMeaning) {
       await playEnglishThenChinese(word, correctMeaning);
     }
+    setSelectedChoice(null);
     updateAnswerState("sentence-complete");
-    setFeedbackMessage("选择正确。按空格进入下一步。");
+    setFeedback("选择正确。按空格进入下一步。", "success");
   }
 
   function handleMistakePracticeKeyDown(event: KeyboardEvent<HTMLInputElement>) {
@@ -2449,7 +2465,7 @@ function StudyContent() {
     setMistakePracticeConsecutiveCorrect(0);
     clearMistakePracticePreview();
     updateAnswerState("mistake-word-practice");
-    setFeedbackMessage("现在进入错词单独拼写。");
+    setFeedback("现在进入错词单独拼写。");
     const firstTranslation = practiceTranslations[words[0]];
     if (firstTranslation) {
       await playChineseThenEnglish(firstTranslation, words[0]);
@@ -2465,6 +2481,16 @@ function StudyContent() {
 
       // Read latest state from refs to avoid stale-closure bugs
       const currentState = answerStateRef.current;
+      const item = currentItemRef.current;
+      const isChoiceTask = item?.review_task_type === "listen_choose_chinese" || item?.review_task_type === "english_to_chinese" || item?.review_task_type === "match_translation";
+      if (isChoiceTask && currentState === "typing") {
+        event.preventDefault();
+        const now = Date.now();
+        if (now - spaceCooldownRef.current < 400) return;
+        spaceCooldownRef.current = now;
+        void confirmChoiceSelection();
+        return;
+      }
       if (currentState === "typing" || currentState === "mistake-word-practice") {
         return;
       }
@@ -2496,7 +2522,7 @@ function StudyContent() {
 
     window.addEventListener("keydown", handleWindowKeyDown);
     return () => window.removeEventListener("keydown", handleWindowKeyDown);
-  }, [handleNextItem, beginPendingMistakePractice]);
+  }, [handleNextItem, beginPendingMistakePractice, confirmChoiceSelection]);
 
   const wordInputSizeClass = isStudyFullscreen
     ? "study-word-input study-word-input--immersive h-24 ipad:h-28 ipad-lg:h-32"
@@ -2686,18 +2712,21 @@ function StudyContent() {
                 <div className={isStudyFullscreen ? "mx-auto flex max-w-4xl flex-col items-center gap-6 ipad:gap-8" : "mx-auto flex max-w-xl flex-col items-center gap-4 rounded-lg border bg-slate-50 px-5 py-5 ipad:max-w-xl ipad:gap-4 ipad:px-6 ipad:py-5 ipad-lg:max-w-2xl ipad-lg:gap-5 ipad-lg:px-7 ipad-lg:py-6"}>
                   <p className="text-4xl font-bold text-slate-900 ipad:text-5xl ipad-lg:text-6xl">{isListeningChoiceReviewTask ? "听读音，选中文" : currentWords[0]}</p>
                   <div className="grid w-full max-w-xl grid-cols-2 gap-3">
-                    {(choiceReviewOptions.length > 0 ? choiceReviewOptions : ["中文释义准备中"]).map((choice, index) => (
-                      <Button
-                        className="justify-center px-4 py-5 text-base font-bold ipad:text-lg"
-                        disabled={answerState !== "typing" || choice === "中文释义准备中"}
-                        key={`${choice}-${index}`}
-                        onClick={() => void submitChoiceReviewTask(choice, isCorrectChoiceAnswer(choice, hasChineseText(currentItem.review_answer) ? currentItem.review_answer : reviewTaskWordTranslation))}
-                        type="button"
-                        variant="outline"
-                      >
-                        {choice}
-                      </Button>
-                    ))}
+                    {(choiceReviewOptions.length > 0 ? choiceReviewOptions : ["中文释义准备中"]).map((choice, index) => {
+                      const isSelected = selectedChoice === choice;
+                      return (
+                        <Button
+                          className={`justify-center px-4 py-5 text-base font-bold ipad:text-lg ${isSelected ? "border-2 border-emerald-500 bg-emerald-50 text-emerald-700 shadow-sm" : ""}`}
+                          disabled={answerState !== "typing" || choice === "中文释义准备中"}
+                          key={`${choice}-${index}`}
+                          onClick={() => { if (answerState === "typing") { setSelectedChoice(choice); setFeedback(null); } }}
+                          type="button"
+                          variant={isSelected ? "default" : "outline"}
+                        >
+                          {isSelected ? "✓ " : ""}{choice}
+                        </Button>
+                      );
+                    })}
                   </div>
                 </div>
               ) : answerState === "mistake-word-practice" ? (
@@ -2724,7 +2753,7 @@ function StudyContent() {
                       setChildHint(null);
                       setMistakePracticeAnswer(event.target.value.replace(/\s/g, ""));
                       setMistakePracticeStatus("idle");
-                      setFeedbackMessage(null);
+                      setFeedback(null);
                     }}
                     onKeyDown={handleMistakePracticeKeyDown}
                   />
@@ -2787,7 +2816,7 @@ function StudyContent() {
                   </div>
                 </div>
               ) : null}
-              {childHint ? ( <div className="flex flex-col items-center gap-2"> <p className={isStudyFullscreen ? "text-xl font-bold text-emerald-700 ipad:text-2xl ipad-lg:text-3xl" : answerState !== "typing" ? "text-base font-bold text-emerald-600 ipad:text-base ipad-lg:text-lg" : "text-base font-bold text-red-600 ipad:text-base ipad-lg:text-lg"}>{childHint.text}</p> <HintDisplay word={childHint.word} chunks={childHint.chunks} matchedPrefixLength={childHint.matchedPrefixLength} onPlayChunk={(i) => playSyllableAudio(childHint.word, i, currentItem?.syllables, (blob) => { void playAudioBlob(blob); })} onPlayPhonics={(i) => { void playPhonicsAudio(childHint.word, i, currentItem?.grapheme_phoneme_map, currentItem?.syllables, (blob) => { void playAudioBlob(blob); }); }} graphemePhonemeMap={currentItem?.grapheme_phoneme_map} cachedSyllables={currentItem?.syllables} /> </div> ) : feedbackMessage ? <p key={celebrationTrigger} className={`${isStudyFullscreen ? "text-xl font-bold text-emerald-700 ipad:text-2xl ipad-lg:text-3xl" : answerState !== "typing" ? "text-base font-bold text-emerald-600 ipad:text-base ipad-lg:text-lg" : "text-base font-bold text-red-600 ipad:text-base ipad-lg:text-lg"} ${celebrationTrigger > 0 ? "celebration-burst" : ""}`}>{feedbackMessage}</p> : null}
+              {childHint ? ( <div className="flex flex-col items-center gap-2"> <p className={isStudyFullscreen ? "text-xl font-bold text-red-600 ipad:text-2xl ipad-lg:text-3xl" : "text-base font-bold text-red-600 ipad:text-base ipad-lg:text-lg"}>{childHint.text}</p> <HintDisplay word={childHint.word} chunks={childHint.chunks} matchedPrefixLength={childHint.matchedPrefixLength} onPlayChunk={(i) => playSyllableAudio(childHint.word, i, currentItem?.syllables, (blob) => { void playAudioBlob(blob); })} onPlayPhonics={(i) => { void playPhonicsAudio(childHint.word, i, currentItem?.grapheme_phoneme_map, currentItem?.syllables, (blob) => { void playAudioBlob(blob); }); }} graphemePhonemeMap={currentItem?.grapheme_phoneme_map} cachedSyllables={currentItem?.syllables} /> </div> ) : feedbackMessage ? <p key={celebrationTrigger} className={`${isStudyFullscreen ? `text-xl font-bold ipad:text-2xl ipad-lg:text-3xl ${feedbackType === "error" ? "text-red-600" : feedbackType === "success" ? "text-emerald-700" : "text-slate-600"}` : `text-base font-bold ipad:text-base ipad-lg:text-lg ${feedbackType === "error" ? "text-red-600" : feedbackType === "success" ? "text-emerald-600" : "text-slate-600"}`} ${celebrationTrigger > 0 ? "celebration-burst" : ""}`}>{feedbackMessage}</p> : null}
               <div className={isStudyFullscreen ? "mx-auto flex w-full max-w-5xl flex-wrap items-center justify-center gap-4 px-0 py-0 ipad:gap-5 ipad-lg:gap-6" : "mx-auto flex w-full max-w-3xl flex-col items-center gap-4 rounded-lg border border-slate-200 bg-slate-50/90 px-4 py-4 ipad:max-w-3xl ipad:flex-col ipad:justify-center ipad:gap-4 ipad:px-5 ipad-lg:max-w-4xl ipad-lg:flex-row ipad-lg:gap-6 ipad-lg:px-6"}>
                 <div className="flex flex-wrap justify-center gap-3 ipad:gap-3 ipad-lg:gap-4">
                   {answerState === "mistake-word-practice" ? (
