@@ -475,6 +475,7 @@ function StudyContent() {
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
   const [feedbackType, setFeedbackType] = useState<"success" | "error" | "info">("info");
   const [selectedChoice, setSelectedChoice] = useState<string | null>(null);
+  const [choiceResult, setChoiceResult] = useState<"correct" | "incorrect" | null>(null);
   const [childHint, setChildHint] = useState<ChildFriendlyHintData | null>(null);
   function setFeedback(message: string | null, type: "success" | "error" | "info" = "info") {
     setFeedbackMessage(message);
@@ -875,7 +876,7 @@ function StudyContent() {
       setEncodingChineseText("");
       setEncodingContextExample(null);
       updateAnswerState("sentence-complete");
-      setFeedback("记忆编码完成！按空格进入下一题。", "success");
+      setFeedback("记忆编码完成！点击「下一题」按钮继续。", "success");
       return;
     }
 
@@ -1403,6 +1404,9 @@ function StudyContent() {
     respellWordIndexesRef.current = [];
     setFeedback(null);
     setSelectedChoice(null);
+    setChoiceResult(null);
+    setEncodingStage(null);
+    encodingStageRef.current = null;
     // Multi-modal encoding for new words (not review tasks)
     if (currentItem && !currentItem.review_task_type && currentItem.item_type === "word" && currentWords[0]) {
       const encWord = currentWords[0];
@@ -1579,6 +1583,7 @@ function StudyContent() {
     setWordAnimations({});
     setFeedback(null);
     setSelectedChoice(null);
+    setChoiceResult(null);
     window.setTimeout(() => inputRefs.current[dynamicReviewWordIndexes[0] ?? 0]?.focus(), 0);
   }
 
@@ -1945,7 +1950,7 @@ function StudyContent() {
         respellWordIndexesRef.current = [];
         updateAnswerState("sentence-complete");
         isCompletingSentenceRef.current = false;
-        setFeedback("错词重拼完成。按空格进入下一句。", "success");
+        setFeedback("错词重拼完成。点击「下一句」按钮继续。", "success");
         await playCurrentReviewCompletionAudio();
         return;
       }
@@ -1954,8 +1959,8 @@ function StudyContent() {
       isCompletingSentenceRef.current = false;
       setFeedback(
         dynamicSentenceFeedback
-          ? `${dynamicSentenceFeedback} 本句有错词，按空格进入错词复习。`
-          : "本句有错词，按空格进入错词复习。",
+          ? `${dynamicSentenceFeedback} 本句有错词，点击「进入错词复习」按钮。`
+          : "本句有错词，点击「进入错词复习」按钮。",
         "error",
       );
       await playCurrentReviewCompletionAudio();
@@ -1970,9 +1975,9 @@ function StudyContent() {
     }
     if (respellWordIndexesRef.current.length > 0) {
       respellWordIndexesRef.current = [];
-      setFeedback("错词重拼完全正确。按空格进入下一句。", "success");
+      setFeedback("错词重拼完全正确。点击「下一句」按钮继续。", "success");
     } else {
-      setFeedback(dynamicSentenceFeedback ? `${dynamicSentenceFeedback} 按空格进入下一句。` : "整句拼写正确。按空格进入下一句。", "success");
+      setFeedback(dynamicSentenceFeedback ? `${dynamicSentenceFeedback} 点击「下一句」按钮继续。` : "整句拼写正确。点击「下一句」按钮继续。", "success");
     }
     await playCurrentReviewCompletionAudio();
   }
@@ -2397,6 +2402,10 @@ function StudyContent() {
     const accessToken = getAccessToken();
     const learningItemId = getSourceLearningItemId(currentItem);
     const word = currentWords[0] ?? "";
+
+    // Visual feedback: show correct/incorrect on the choice button
+    setChoiceResult(isCorrect ? "correct" : "incorrect");
+
     if (accessToken && learningItemId && word) {
       try {
         await logWordReview(
@@ -2418,20 +2427,29 @@ function StudyContent() {
     }
     if (!isCorrect) {
       setFeedback("这个选项不对，已加入错词专项复习。", "error");
-      setSelectedChoice(null);
       const correctMeaning = (hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "") || (hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "");
       if (word && correctMeaning) {
         void playEnglishThenChinese(word, correctMeaning);
       }
+      // Clear incorrect highlight after a delay so user can see it, then allow re-selection
+      window.setTimeout(() => {
+        setSelectedChoice(null);
+        setChoiceResult(null);
+      }, 800);
       return;
     }
     const correctMeaning = (hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "") || (hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "") || selectedChoice;
+    // Play Chinese meaning audio FIRST, then advance
     if (word && correctMeaning) {
       await playEnglishThenChinese(word, correctMeaning);
     }
+    setFeedback("选择正确！", "success");
+    // Brief pause so user can see the green highlight, then advance
+    await new Promise((resolve) => window.setTimeout(resolve, 600));
     setSelectedChoice(null);
+    setChoiceResult(null);
     updateAnswerState("sentence-complete");
-    setFeedback("选择正确。按空格进入下一步。", "success");
+    setFeedback("选择正确！请点击「下一句」按钮继续。", "success");
   }
 
   function handleMistakePracticeKeyDown(event: KeyboardEvent<HTMLInputElement>) {
@@ -2508,6 +2526,7 @@ function StudyContent() {
       spaceCooldownRef.current = now;
 
       if (currentState === "sentence-complete") {
+        // Space no longer skips/advances — user must click the button
         if (event.repeat) {
           return;
         }
@@ -2515,8 +2534,8 @@ function StudyContent() {
           void beginPendingMistakePractice();
           return;
         }
-        answerStateRef.current = "typing";
-        handleNextItem({ completedCurrentItem: true });
+        // Do NOT auto-advance — user must click "下一句" / "跳过" buttons
+        return;
       }
     }
 
@@ -2625,7 +2644,7 @@ function StudyContent() {
               </div>
             </div>
             <div className="flex flex-wrap items-center justify-end gap-3 text-sm font-semibold text-slate-600 ipad:text-base">
-              <span>{device.isIPad ? "⌨ 空格判定单词 · 整句完成后空格查看逐词中文" : "单词输入完成按空格判定，整句完成后按空格查看逐词中文"}</span>
+              <span>{device.isIPad ? "⌨ 空格判定单词 · 完成后点击按钮继续" : "单词输入完成按空格判定，完成后点击按钮继续"}</span>
               <Button className={`h-9 px-3 text-sm ipad:h-9 ipad:px-3 ipad:text-sm ${isDictationMode ? "border-violet-500 bg-violet-50 text-violet-700" : ""}`} onClick={toggleDictationMode} onMouseDown={keepStudyInputFocus} type="button" variant="outline">
                 {isDictationMode ? "✎ 默写中" : "默写模式"}
               </Button>
@@ -2711,19 +2730,30 @@ function StudyContent() {
               {encodingStage && encodingStage !== "whole_recall" && answerState === "typing" ? null : isChoiceReviewTask ? (
                 <div className={isStudyFullscreen ? "mx-auto flex max-w-4xl flex-col items-center gap-6 ipad:gap-8" : "mx-auto flex max-w-xl flex-col items-center gap-4 rounded-lg border bg-slate-50 px-5 py-5 ipad:max-w-xl ipad:gap-4 ipad:px-6 ipad:py-5 ipad-lg:max-w-2xl ipad-lg:gap-5 ipad-lg:px-7 ipad-lg:py-6"}>
                   <p className="text-4xl font-bold text-slate-900 ipad:text-5xl ipad-lg:text-6xl">{isListeningChoiceReviewTask ? "听读音，选中文" : currentWords[0]}</p>
+                  <p className="text-sm font-medium text-slate-500 ipad:text-base">点击选择中文意思，按空格键确认</p>
                   <div className="grid w-full max-w-xl grid-cols-2 gap-3">
                     {(choiceReviewOptions.length > 0 ? choiceReviewOptions : ["中文释义准备中"]).map((choice, index) => {
                       const isSelected = selectedChoice === choice;
+                      const hasResult = choiceResult !== null;
+                      const isChosenResult = hasResult && isSelected;
+                      const showCorrect = isChosenResult && choiceResult === "correct";
+                      const showIncorrect = isChosenResult && choiceResult === "incorrect";
                       return (
                         <Button
-                          className={`justify-center px-4 py-5 text-base font-bold ipad:text-lg ${isSelected ? "border-2 border-emerald-500 bg-emerald-50 text-emerald-700 shadow-sm" : ""}`}
-                          disabled={answerState !== "typing" || choice === "中文释义准备中"}
+                          className={`justify-center px-4 py-5 text-base font-bold ipad:text-lg transition-colors ${
+                            showCorrect ? "border-2 border-emerald-500 bg-emerald-100 text-emerald-800 shadow-sm" : ""
+                          } ${
+                            showIncorrect ? "border-2 border-red-500 bg-red-100 text-red-800 shadow-sm" : ""
+                          } ${
+                            !hasResult && isSelected ? "border-2 border-emerald-500 bg-emerald-50 text-emerald-700 shadow-sm" : ""
+                          }`}
+                          disabled={hasResult || answerState !== "typing" || choice === "中文释义准备中"}
                           key={`${choice}-${index}`}
-                          onClick={() => { if (answerState === "typing") { setSelectedChoice(choice); setFeedback(null); } }}
+                          onClick={() => { if (answerState === "typing" && !hasResult) { setSelectedChoice(choice); setFeedback(null); } }}
                           type="button"
-                          variant={isSelected ? "default" : "outline"}
+                          variant={showCorrect || (!hasResult && isSelected) ? "default" : "outline"}
                         >
-                          {isSelected ? "✓ " : ""}{choice}
+                          {showCorrect ? "✓ " : showIncorrect ? "✗ " : isSelected ? "✓ " : ""}{choice}
                         </Button>
                       );
                     })}
