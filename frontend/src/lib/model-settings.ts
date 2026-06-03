@@ -27,6 +27,7 @@ export interface ModelSettings {
   cosyvoiceChineseSpeaker: string;
   llmApiKeyConfigured?: boolean;
   volcengineTtsApiKeyConfigured?: boolean;
+  useSlowLearnerProfile?: boolean;
 }
 
 type PublicModelSettings = Partial<ModelSettings>;
@@ -58,6 +59,7 @@ export const defaultModelSettings: ModelSettings = {
   cosyvoiceBaseUrl: "",
   cosyvoiceEnglishSpeaker: "英文女",
   cosyvoiceChineseSpeaker: "中文女",
+  useSlowLearnerProfile: false,
 };
 
 export const deepSeekModelSettings: Pick<ModelSettings, "llmProvider" | "llmBaseUrl" | "llmModel"> = {

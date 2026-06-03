@@ -78,7 +78,34 @@ CHILD_FSRS_WEIGHTS = (
     0.6621,     # w[18]
 )
 
-CHILD_TARGET_RETENTION = 0.85
+CHILD_TARGET_RETENTION = 0.90
+
+# Slow-learner FSRS weights: further reduced stability growth for children who
+# "remember slowly, forget quickly". Initial stabilities same as child profile,
+# but stability grows ~40% slower after correct reviews and drops more after lapses.
+# This results in shorter, more frequent review intervals for struggling learners.
+SLOW_LEARNER_FSRS_WEIGHTS = (
+    0.20,       # w[0]  — Again initial stability (same as child)
+    0.70,       # w[1]  — Hard initial stability (same as child)
+    1.50,       # w[2]  — Good initial stability (same as child)
+    5.00,       # w[3]  — Easy initial stability (same as child)
+    7.1949,     # w[4]  — initial difficulty baseline
+    0.5345,     # w[5]
+    1.4604,     # w[6]
+    0.0046,     # w[7]
+    0.90,       # w[8]  — stability growth log-intercept (child: 1.54575, -42%)
+    0.16,       # w[9]  — stability growth stability-exponent (child: 0.1192, +34%)
+    0.65,       # w[10] — stability growth retrievability factor (child: 1.01925, -36%)
+    1.10,       # w[11] — post-lapse stability factor (child: 1.9395, -43%)
+    0.15,       # w[12] — post-lapse difficulty exponent (child: 0.11, +36%)
+    0.38,       # w[13] — post-lapse stability exponent (child: 0.29605, +28%)
+    1.30,       # w[14] — post-lapse retrievability factor (child: 2.2698, -43%)
+    0.2315,     # w[15] — hard penalty multiplier
+    2.9898,     # w[16] — easy bonus multiplier
+    0.51655,    # w[17] — STS weight 1
+    0.6621,     # w[18] — STS weight 2
+)
+SLOW_LEARNER_TARGET_RETENTION = 0.92
 
 # Child STS (short-term stability) constants for intraday memory scheduling.
 # STS models the rapidly decaying working-memory trace that operates on a
@@ -196,12 +223,17 @@ def get_effective_fsrs_params(db: Session, user_id: UUID) -> tuple[tuple[float, 
 
     settings = stored_settings.settings or {}
     use_child_profile = settings.get("useChildProfile", True)
+    use_slow_learner = settings.get("useSlowLearnerProfile", False)
 
     personalized_weights = normalize_fsrs_weights(settings.get(FSRS_WEIGHTS_SETTING_KEY))
     if personalized_weights is not None:
+        if use_slow_learner:
+            return (personalized_weights, SLOW_LEARNER_TARGET_RETENTION)
         target_retention = CHILD_TARGET_RETENTION if use_child_profile else FSRS_TARGET_RETENTION
         return (personalized_weights, target_retention)
 
+    if use_slow_learner:
+        return (SLOW_LEARNER_FSRS_WEIGHTS, SLOW_LEARNER_TARGET_RETENTION)
     if use_child_profile:
         return (CHILD_FSRS_WEIGHTS, CHILD_TARGET_RETENTION)
     return (FSRS_WEIGHTS, FSRS_TARGET_RETENTION)

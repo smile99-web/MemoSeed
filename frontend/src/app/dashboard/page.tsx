@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
+import { getModelSettings, savePersistedModelSettings } from "@/lib/model-settings";
 import {
   DailyReport,
   ErrorBreakdown,
@@ -255,6 +256,8 @@ export default function DashboardPage() {
   const [isImporting, setIsImporting] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [fsrsFitMessage, setFsrsFitMessage] = useState<string | null>(null);
+  const [useSlowLearner, setUseSlowLearner] = useState(() => getModelSettings().useSlowLearnerProfile ?? false);
+  const [isTogglingSlowLearner, setIsTogglingSlowLearner] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const [dailyReport, setDailyReport] = useState<DailyReport | null>(null);
@@ -372,6 +375,26 @@ export default function DashboardPage() {
       setErrorMessage(error instanceof Error ? error.message : "FSRS 参数拟合失败");
     } finally {
       setIsFittingFsrs(false);
+    }
+  }
+
+  async function toggleSlowLearnerProfile() {
+    const accessToken = getAccessToken();
+    if (!accessToken) return;
+    setIsTogglingSlowLearner(true);
+    const nextValue = !useSlowLearner;
+    try {
+      const settings = getModelSettings();
+      settings.useSlowLearnerProfile = nextValue;
+      await savePersistedModelSettings(settings, accessToken);
+      setUseSlowLearner(nextValue);
+      setFsrsFitMessage(nextValue
+        ? "已开启慢学者模式：复习间隔更短、频率更高，适合记得慢忘得快的孩子。"
+        : "已关闭慢学者模式，恢复标准儿童复习调度。");
+    } catch {
+      setErrorMessage("慢学者模式切换失败");
+    } finally {
+      setIsTogglingSlowLearner(false);
     }
   }
 
@@ -599,7 +622,7 @@ export default function DashboardPage() {
               </CardHeader>
               <CardContent className="flex flex-wrap items-center justify-between gap-4">
                 <div className="space-y-1 text-sm text-muted-foreground">
-                  <p>当前模式：{dashboard.fsrs_parameters_source === "user_fitted" ? "个人拟合参数" : "内置权重"}</p>
+                  <p>当前模式：{dashboard.fsrs_parameters_source === "user_fitted" ? "个人拟合参数" : "内置权重"}{useSlowLearner ? " + 慢学者" : ""}</p>
                   <p>历史答题记录：{dashboard.total_reviews} / {dashboard.fsrs_min_training_reviews}</p>
                   <p>上次拟合：{formatDateTime(dashboard.fsrs_fitted_at)}</p>
                   {fsrsFitRecommendation ? (
@@ -617,13 +640,24 @@ export default function DashboardPage() {
                     </div>
                   ) : null}
                 </div>
-                <Button
-                  type="button"
-                  onClick={fitFsrsFromHistory}
-                  disabled={isFittingFsrs || dashboard.total_reviews < dashboard.fsrs_min_training_reviews}
-                >
-                  {isFittingFsrs ? "正在拟合" : dashboard.fsrs_parameters_source === "user_fitted" ? "重新拟合" : "拟合 FSRS 参数"}
-                </Button>
+                <div className="flex flex-col gap-2">
+                  <Button
+                    type="button"
+                    variant={useSlowLearner ? "default" : "outline"}
+                    onClick={toggleSlowLearnerProfile}
+                    disabled={isTogglingSlowLearner}
+                    className={useSlowLearner ? "bg-amber-600 hover:bg-amber-700" : ""}
+                  >
+                    {isTogglingSlowLearner ? "切换中..." : useSlowLearner ? "🐢 慢学者模式" : "慢学者模式"}
+                  </Button>
+                  <Button
+                    type="button"
+                    onClick={fitFsrsFromHistory}
+                    disabled={isFittingFsrs || dashboard.total_reviews < dashboard.fsrs_min_training_reviews}
+                  >
+                    {isFittingFsrs ? "正在拟合" : dashboard.fsrs_parameters_source === "user_fitted" ? "重新拟合" : "拟合 FSRS 参数"}
+                  </Button>
+                </div>
               </CardContent>
             </Card>
 

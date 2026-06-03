@@ -88,6 +88,7 @@ def sanitize_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "cosyvoiceChineseSpeaker",
         "llmApiKeyConfigured",
         "volcengineTtsApiKeyConfigured",
+        "useSlowLearnerProfile",
     }
     sanitized: dict[str, Any] = {}
     for key, value in settings.items():

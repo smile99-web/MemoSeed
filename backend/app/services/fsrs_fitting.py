@@ -22,7 +22,7 @@ from app.services.memory_scheduler import (
 )
 from app.utils import clamp
 
-MIN_FSRS_TRAINING_REVIEWS = 500
+MIN_FSRS_TRAINING_REVIEWS = 100
 
 
 @dataclass(frozen=True)
@@ -63,7 +63,7 @@ def fit_user_fsrs_parameters(db: Session, user_id: UUID) -> FsrsFitResult:
     fitted_weights = list(FSRS_WEIGHTS)
     for rating in range(1, 5):
         samples = stability_samples_by_rating.get(rating, [])
-        if len(samples) >= 15:
+        if len(samples) >= 5:
             sample_stability = median(samples)
             child_prior = CHILD_FSRS_WEIGHTS[rating - 1]
             fitted_weights[rating - 1] = constrain_stability(child_prior * 0.3 + sample_stability * 0.7)
