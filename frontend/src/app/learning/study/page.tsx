@@ -513,6 +513,7 @@ function StudyContent() {
   const pendingMistakePracticeTranslationsRef = useRef<Record<string, string>>({});
   const spaceCooldownRef = useRef(0);
   const queuedReviewItemIdsRef = useRef<Set<string>>(new Set());
+  const choiceOptionsRef = useRef<string[]>([]);
   const currentIndexRef = useRef(0);
   const currentItemRef = useRef<LearningItem | null>(null);
   const celebrationSummaryRef = useRef<CelebrationSummary | null>(null);
@@ -576,6 +577,8 @@ function StudyContent() {
     const translatedChoices = correctAnswer ? [correctAnswer, "老师", "学生", "学校", "书", "朋友"].filter((choice, index, values) => values.indexOf(choice) === index) : [];
     return rotateChoices(translatedChoices.length > 0 ? translatedChoices : choicesWithAnswer, `${currentItem.id}-${currentFocusedReviewWord}`);
   }, [currentFocusedReviewWord, currentItem, isChoiceReviewTask, reviewTaskWordTranslation]);
+  useEffect(() => { choiceOptionsRef.current = choiceReviewOptions; }, [choiceReviewOptions]);
+
   const reviewTaskInstruction = buildReviewTaskInstruction(currentItem?.review_task_type, currentFocusedReviewWord);
   const reviewTaskModeLabel = getReviewTaskModeLabel(currentItem?.review_task_type);
   const progressPercent = items.length > 0 ? ((currentIndex + 1) / items.length) * 100 : 0;
@@ -2492,52 +2495,82 @@ function StudyContent() {
   }, [clearMistakePracticePreview, playChineseThenEnglish, setPendingMistakePractice, translateMistakePracticeWords, updateAnswerState]);
 
   useEffect(() => {
-    function handleWindowKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key !== " ") {
-        return;
-      }
+	    function handleWindowKeyDown(event: globalThis.KeyboardEvent) {
+	      const isSpace = event.key === " ";
+	      const isEnter = event.key === "Enter";
+		      const isDigit = event.key >= "1" && event.key <= "6";
+		      if (!isSpace && !isEnter && !isDigit) {
+	        return;
+	      }
 
-      // Read latest state from refs to avoid stale-closure bugs
-      const currentState = answerStateRef.current;
-      const item = currentItemRef.current;
-      const isChoiceTask = item?.review_task_type === "listen_choose_chinese" || item?.review_task_type === "english_to_chinese" || item?.review_task_type === "match_translation";
-      if (isChoiceTask && currentState === "typing") {
-        event.preventDefault();
-        const now = Date.now();
-        if (now - spaceCooldownRef.current < 400) return;
-        spaceCooldownRef.current = now;
-        void confirmChoiceSelection();
-        return;
-      }
-      if (currentState === "typing" || currentState === "mistake-word-practice") {
-        return;
-      }
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
-        return;
-      }
+	      // Read latest state from refs to avoid stale-closure bugs
+	      const currentState = answerStateRef.current;
+	      const item = currentItemRef.current;
+	      const isChoiceTask = item?.review_task_type === "listen_choose_chinese" || item?.review_task_type === "english_to_chinese" || item?.review_task_type === "match_translation";
 
-      event.preventDefault();
+		      // Number keys 1-6: select choice (choice review tasks in typing state)
+		      if (isDigit && isChoiceTask && currentState === "typing") {
+		        event.preventDefault();
+		        const digitIdx = parseInt(event.key, 10) - 1;
+		        const choiceItems = choiceOptionsRef.current;
+		        if (choiceItems && digitIdx < choiceItems.length) {
+		          setSelectedChoice(choiceItems[digitIdx]);
+		          setFeedback(null);
+		        }
+		        return;
+		      }
 
-      // Cooldown lock: ignore rapid repeated spaces within 400ms
-      const now = Date.now();
-      if (now - spaceCooldownRef.current < 400) {
-        return;
-      }
-      spaceCooldownRef.current = now;
 
-      if (currentState === "sentence-complete") {
-        // Space no longer skips/advances — user must click the button
-        if (event.repeat) {
-          return;
-        }
-        if (pendingMistakePracticeWordsRef.current.length > 0) {
-          void beginPendingMistakePractice();
-          return;
-        }
-        // Do NOT auto-advance — user must click "下一句" / "跳过" buttons
-        return;
-      }
-    }
+	      // Space: confirm choice selection
+	      if (isSpace && isChoiceTask && currentState === "typing") {
+	        event.preventDefault();
+	        const now = Date.now();
+	        if (now - spaceCooldownRef.current < 400) return;
+	        spaceCooldownRef.current = now;
+	        void confirmChoiceSelection();
+	        return;
+	      }
+
+	      // Space in typing/mistake-practice: let per-input handlers process it
+	      if (isSpace && (currentState === "typing" || currentState === "mistake-word-practice")) {
+	        return;
+	      }
+
+	      // Ignore keys when focus is inside an input/textarea
+	      // Exception: Enter in sentence-complete state is allowed
+	      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+	        if (!(isEnter && currentState === "sentence-complete")) {
+	          return;
+	        }
+	      }
+
+	      event.preventDefault();
+
+	      // Cooldown lock: ignore rapid repeated presses within 400ms
+	      const now = Date.now();
+	      if (now - spaceCooldownRef.current < 400) {
+	        return;
+	      }
+	      spaceCooldownRef.current = now;
+
+	      if (currentState === "sentence-complete") {
+	        if (event.repeat) {
+	          return;
+	        }
+	        if (pendingMistakePracticeWordsRef.current.length > 0) {
+	          void beginPendingMistakePractice();
+	          return;
+	        }
+	        // Enter key: equivalent to clicking "下一句" button
+	        if (isEnter) {
+	          answerStateRef.current = "typing";
+	          handleNextItem({ completedCurrentItem: true });
+	          return;
+	        }
+	        // Space: do NOT auto-advance — press Enter or click button
+	        return;
+	      }
+	    }
 
     window.addEventListener("keydown", handleWindowKeyDown);
     return () => window.removeEventListener("keydown", handleWindowKeyDown);
@@ -2730,7 +2763,7 @@ function StudyContent() {
               {encodingStage && encodingStage !== "whole_recall" && answerState === "typing" ? null : isChoiceReviewTask ? (
                 <div className={isStudyFullscreen ? "mx-auto flex max-w-4xl flex-col items-center gap-6 ipad:gap-8" : "mx-auto flex max-w-xl flex-col items-center gap-4 rounded-lg border bg-slate-50 px-5 py-5 ipad:max-w-xl ipad:gap-4 ipad:px-6 ipad:py-5 ipad-lg:max-w-2xl ipad-lg:gap-5 ipad-lg:px-7 ipad-lg:py-6"}>
                   <p className="text-4xl font-bold text-slate-900 ipad:text-5xl ipad-lg:text-6xl">{isListeningChoiceReviewTask ? "听读音，选中文" : currentWords[0]}</p>
-                  <p className="text-sm font-medium text-slate-500 ipad:text-base">点击选择中文意思，按空格键确认</p>
+                  <p className="text-sm font-medium text-slate-500 ipad:text-base">按数字键 1-6 选择，空格键确认</p>
                   <div className="grid w-full max-w-xl grid-cols-2 gap-3">
                     {(choiceReviewOptions.length > 0 ? choiceReviewOptions : ["中文释义准备中"]).map((choice, index) => {
                       const isSelected = selectedChoice === choice;
@@ -2753,7 +2786,7 @@ function StudyContent() {
                           type="button"
                           variant={showCorrect || (!hasResult && isSelected) ? "default" : "outline"}
                         >
-                          {showCorrect ? "✓ " : showIncorrect ? "✗ " : isSelected ? "✓ " : ""}{choice}
+                          {showCorrect ? "✓ " : showIncorrect ? "✗ " : isSelected ? "✓ " : ""}{index + 1}. {choice}
                         </Button>
                       );
                     })}
