@@ -51,6 +51,8 @@ class WordStats:
     last_reviewed_at: datetime | None = None
     error_type_counts: dict[str, int] | None = None
     scheduled_task_count: int = 0
+    due_task_count: int = 0
+    queue_rank: int | None = None
 
 
 def error_count_value(value: object) -> int:
@@ -172,6 +174,26 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
     )
     for word, count in pending_task_counts.items():
         get_word_stats(word_stats, word).scheduled_task_count = int(count or 0)
+
+    due_task_rows = db.execute(
+        select(WordReviewTask.word)
+        .where(
+            WordReviewTask.user_id == user_id,
+            WordReviewTask.status == "pending",
+            WordReviewTask.due_at <= now,
+        )
+        .order_by(WordReviewTask.priority_score.desc(), WordReviewTask.due_at.asc())
+    ).all()
+    seen_due_words: set[str] = set()
+    for row in due_task_rows:
+        word = str(row[0] or "").strip().lower()
+        if not word:
+            continue
+        stats = get_word_stats(word_stats, word)
+        stats.due_task_count += 1
+        if word not in seen_due_words:
+            seen_due_words.add(word)
+            stats.queue_rank = len(seen_due_words)
 
     item_word_map = {learning_item.id: set(tokenize_words(learning_item.english_text)) for learning_item, _ in item_rows}
     direct_word_item_ids = {
@@ -348,6 +370,7 @@ def summarize_word(stats: WordStats, now: datetime) -> WordMasterySummary:
         no_hint_correct_date_count=stats.no_hint_correct_date_count,
         dominant_error_type=dominant_error_type,
         review_reason=build_review_reason(stats, risk, next_review_at, now, dominant_error_type),
+        review_status_note=build_review_status_note(stats, next_review_at, now),
         recommended_task=build_recommended_task(stats, dominant_error_type),
         scheduled_task_count=stats.scheduled_task_count,
         interval_days=round(interval, 1),
@@ -388,6 +411,29 @@ def build_review_reason(stats: WordStats, risk: float, next_review_at: datetime 
             return "连续无提示拼对，当前比较稳定。"
         return "需要继续巩固，等待更多无提示拼写记录。"
     return "，".join(reasons) + "。"
+
+
+def build_review_status_note(stats: WordStats, next_review_at: datetime | None, now: datetime) -> str:
+    if stats.queue_rank is not None:
+        due_count_text = f"，同词还有 {stats.due_task_count} 个到期任务" if stats.due_task_count > 1 else ""
+        return f"已到期，当前复习队列第 {stats.queue_rank} 位{due_count_text}。"
+
+    if stats.last_reviewed_at is not None:
+        local_review_date = stats.last_reviewed_at.astimezone(LOCAL_TIMEZONE).date()
+        local_today = now.astimezone(LOCAL_TIMEZONE).date()
+        if local_review_date == local_today and next_review_at is not None and next_review_at > now:
+            local_next = next_review_at.astimezone(LOCAL_TIMEZONE).strftime("%m/%d %H:%M")
+            return f"今天已复习，下一次安排在 {local_next}。"
+
+    if next_review_at is not None:
+        if next_review_at <= now:
+            return "已到期，但暂未生成专项任务；开始学习时会重新检查并插入。"
+        local_next = next_review_at.astimezone(LOCAL_TIMEZONE).strftime("%m/%d %H:%M")
+        return f"暂不需要复习，下一次安排在 {local_next}。"
+
+    if stats.scheduled_task_count > 0:
+        return f"已安排 {stats.scheduled_task_count} 个专项任务，等待到期。"
+    return "还没有形成明确的复习时间，需要更多答题记录。"
 
 
 def build_recommended_task(stats: WordStats, error_type: str | None) -> str:

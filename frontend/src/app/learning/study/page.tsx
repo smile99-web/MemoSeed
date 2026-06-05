@@ -64,6 +64,7 @@ const WORD_TRANSLATION_TIMEOUT_MS = 2500;
 const DIFFICULT_WORD_CONFIRMATION_COUNT = 3;
 const INITIAL_REVIEW_QUEUE_LIMIT = 30;
 const REFILL_REVIEW_QUEUE_LIMIT = 12;
+const SPELLING_REVIEW_TASK_TYPES = new Set(["listen_spell", "chinese_to_english", "missing_letter", "hidden_recall", "recall_word"]);
 const BASIC_WORD_MEANINGS: Record<string, string> = {
   a: "一个",
   an: "一个",
@@ -555,6 +556,7 @@ function StudyContent() {
   const isChoiceReviewTask = currentItem?.review_task_type === "listen_choose_chinese" || currentItem?.review_task_type === "english_to_chinese" || currentItem?.review_task_type === "match_translation";
   const isListeningChoiceReviewTask = currentItem?.review_task_type === "listen_choose_chinese";
   const isSingleWordReviewTask = Boolean(currentItem?.review_task_type && currentItem.review_task_type !== "cloze_sentence");
+  const isSpellingReviewTask = Boolean(currentItem?.review_task_type && SPELLING_REVIEW_TASK_TYPES.has(currentItem.review_task_type));
   const currentFocusedReviewWord = dynamicReviewWords[0] ?? (isSingleWordReviewTask || currentItem?.item_type === "word" ? currentWords[0] : "");
   const shouldUseSingleWordPrompt = Boolean(!isChoiceReviewTask && (isSingleWordReviewTask || currentItem?.item_type === "word"));
   const isFocusedWordReview = Boolean(shouldUseSingleWordPrompt && currentFocusedReviewWord);
@@ -1053,9 +1055,14 @@ function StudyContent() {
     let englishText = item.english_text;
     const focusedWords = getDynamicReviewWords(item);
     const isChoiceIntroTask = item.review_task_type === "listen_choose_chinese" || item.review_task_type === "english_to_chinese" || item.review_task_type === "match_translation";
+    const isListenSpellTask = item.review_task_type === "listen_spell";
     const shouldUseSingleWordIntro = Boolean(!isChoiceIntroTask && ((item.review_task_type && item.review_task_type !== "cloze_sentence") || item.item_type === "word"));
     const focusedWord = (isChoiceIntroTask || shouldUseSingleWordIntro) ? focusedWords[0] ?? tokenizeEnglish(item.english_text)[0] ?? "" : "";
-    if (isChoiceIntroTask && focusedWord) {
+    if (isListenSpellTask && focusedWord) {
+      chineseText = "听英文发音后拼写";
+      englishText = focusedWord;
+      setReviewTaskWordTranslation("");
+    } else if (isChoiceIntroTask && focusedWord) {
       chineseText = item.review_task_type === "listen_choose_chinese" ? "听英文发音，选择中文意思" : "请选择这个英文单词的中文意思";
       englishText = focusedWord;
       try {
@@ -1092,7 +1099,7 @@ function StudyContent() {
     if (!(await waitInVoiceSequence(sequenceId, 1000))) {
       return;
     }
-    if (item.review_task_type === "listen_choose_chinese") {
+    if (item.review_task_type === "listen_choose_chinese" || item.review_task_type === "listen_spell") {
       await speakClearEnglish(sequenceId, englishText, settings, false);
       return;
     }
@@ -1189,6 +1196,20 @@ function StudyContent() {
     window.setTimeout(focusCurrentUnfinishedWord, 80);
     window.setTimeout(focusCurrentUnfinishedWord, 250);
   }, [focusCurrentUnfinishedWord]);
+
+  useEffect(() => {
+    if (!isSpellingReviewTask || answerState !== "typing") {
+      return;
+    }
+    const targetIndex = dynamicReviewWordIndexes[0] ?? 0;
+    setActiveWordIndex(targetIndex);
+    const timers = [0, 120, 360, 900].map((delay) => window.setTimeout(() => {
+      focusInputAtEnd(inputRefs.current[targetIndex] ?? null);
+    }, delay));
+    return () => {
+      timers.forEach((timerId) => window.clearTimeout(timerId));
+    };
+  }, [answerState, currentItem?.id, dynamicReviewWordIndexes, focusInputAtEnd, isSpellingReviewTask]);
 
   function keepStudyInputFocus(event: MouseEvent<HTMLElement>) {
     event.preventDefault();
@@ -1683,13 +1704,13 @@ function StudyContent() {
     });
   }, [courseId, items.length, showCourseCompletion, startVoiceSequence]);
 
-  function isGeneratedItem(item: LearningItem): boolean {
+  const isGeneratedItem = useCallback(function isGeneratedItem(item: LearningItem): boolean {
     return item.id.startsWith("generated-") || Boolean(item.review_task_id);
-  }
+  }, []);
 
-  function getSourceLearningItemId(item: LearningItem): string | null {
+  const getSourceLearningItemId = useCallback(function getSourceLearningItemId(item: LearningItem): string | null {
     return item.source_item_id ?? (item.id.startsWith("generated-") ? null : item.id);
-  }
+  }, []);
 
   function recordWordMemoryReview(expectedWord: string, score: number, reviewMode: string, responseText = "", errorType?: string) {
     const accessToken = getAccessToken();
@@ -2396,7 +2417,7 @@ function StudyContent() {
     window.setTimeout(() => inputRefs.current[firstRespellIdx]?.focus(), 0);
   }
 
-  async function confirmChoiceSelection() {
+  const confirmChoiceSelection = useCallback(async function confirmChoiceSelection() {
     if (!currentItem || !isChoiceReviewTask || !selectedChoice) {
       return;
     }
@@ -2453,7 +2474,7 @@ function StudyContent() {
     setChoiceResult(null);
     updateAnswerState("sentence-complete");
     setFeedback("选择正确！请点击「下一句」按钮继续。", "success");
-  }
+  }, [currentItem, currentWords, getSourceLearningItemId, isChoiceReviewTask, playEnglishThenChinese, reviewTaskWordTranslation, selectedChoice, updateAnswerState]);
 
   function handleMistakePracticeKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     if (event.key === " " || event.key === "Enter") {
@@ -2587,6 +2608,8 @@ function StudyContent() {
     : "min-w-32 ipad:min-w-32 ipad:text-sm ipad-lg:min-w-36 ipad-lg:text-base";
   const displayChinesePrompt = isStudyFullscreen && answerState === "mistake-word-practice"
     ? currentMistakePracticeTranslation || currentItem?.chinese_text || ""
+    : currentItem?.review_task_type === "listen_spell"
+      ? "听英文发音后拼写"
     : isChoiceReviewTask
       ? "请选择这个英文单词的中文意思"
     : isFocusedWordReview

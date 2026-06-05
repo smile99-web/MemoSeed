@@ -157,6 +157,7 @@ function WordTable({ title, words, onWordClick }: { title: string; words: WordMa
                   <th className="px-3 py-2">错次</th>
                   <th className="px-3 py-2">推荐任务</th>
                   <th className="px-3 py-2">为什么复习</th>
+                  <th className="px-3 py-2">复习状态</th>
                   <th className="px-3 py-2">下次复习</th>
                 </tr>
               </thead>
@@ -172,6 +173,7 @@ function WordTable({ title, words, onWordClick }: { title: string; words: WordMa
                     <td className="px-3 py-2">{word.mistake_count}</td>
                     <td className="px-3 py-2">{word.recommended_task}{word.scheduled_task_count > 0 ? `（${word.scheduled_task_count} 个）` : ""}</td>
                     <td className="px-3 py-2 max-w-[14rem] text-muted-foreground">{word.review_reason}</td>
+                    <td className="px-3 py-2 max-w-[14rem] text-muted-foreground">{word.review_status_note}</td>
                     <td className="px-3 py-2">{formatDateTime(word.next_review_at)}</td>
                   </tr>
                 ))}

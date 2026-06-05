@@ -60,6 +60,7 @@ class WordMasterySummary(BaseModel):
     no_hint_correct_date_count: int = 0
     dominant_error_type: str | None = None
     review_reason: str
+    review_status_note: str
     recommended_task: str
     scheduled_task_count: int = 0
     interval_days: float

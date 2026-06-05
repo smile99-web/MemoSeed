@@ -72,6 +72,7 @@ const WordInput = memo(function WordInput({
       {shouldShowInput ? (
         <input
           ref={inputRef}
+          autoFocus={isActive}
           aria-label={isDynamicBlank ? `填空：${chineseText}` : `第 ${index + 1} 个单词`}
           autoComplete="off"
           autoCapitalize="none"

@@ -28,6 +28,7 @@ export interface WordMasterySummary {
   no_hint_correct_date_count: number;
   dominant_error_type: string | null;
   review_reason: string;
+  review_status_note: string;
   recommended_task: string;
   scheduled_task_count: number;
   interval_days: number;
