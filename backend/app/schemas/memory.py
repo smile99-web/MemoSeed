@@ -167,3 +167,27 @@ class ReviewForecastResponse(BaseModel):
     load_level: str
     suggested_actions: list[str]
     efficiency: ReviewForecastEfficiency
+
+
+# Points system schemas
+
+class PointsAwardRequest(BaseModel):
+    points_change: int
+    reason: str
+    detail: str | None = None
+    learning_item_id: UUID | None = None
+
+class PointsLogEntry(BaseModel):
+    points_changed: int
+    reason: str
+    detail: str | None = None
+    created_at: str | None = None
+
+class PointsSummaryResponse(BaseModel):
+    total_points: int
+    level: int
+    level_label: str
+    today_points: int
+    next_level_points: int | None = None
+    next_level_progress_pct: int
+    recent_logs: list[PointsLogEntry]

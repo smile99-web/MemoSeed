@@ -1172,6 +1172,22 @@ def create_word_review(
     complete_word_review_task(db, current_user.id, payload.review_task_id, result.review_log.is_correct)
     if result.review_log.is_correct:
         supersede_stale_pending_tasks_for_reviewed_words(db, current_user.id)
+        # Award points for correct word review
+        try:
+            from app.services.points_service import POINTS_CORRECT_HINTED, POINTS_CORRECT_NO_HINT, POINTS_CORRECT_PREVIEW, POINTS_PERFECT_SENTENCE, award_points
+            if review_mode.startswith("word-recall"):
+                award_points(db, current_user.id, POINTS_CORRECT_NO_HINT, "word_correct", f"无提示正确拼写 +{POINTS_CORRECT_NO_HINT}", word_item.id)
+            elif review_mode.startswith("word-hinted"):
+                award_points(db, current_user.id, POINTS_CORRECT_HINTED, "word_hinted", f"提示后正确拼写 +{POINTS_CORRECT_HINTED}", word_item.id)
+            elif review_mode.startswith("word-preview"):
+                award_points(db, current_user.id, POINTS_CORRECT_PREVIEW, "word_preview", f"预览后正确拼写 +{POINTS_CORRECT_PREVIEW}", word_item.id)
+            elif review_mode.startswith("sentence-spelling") and payload.score >= 5:
+                award_points(db, current_user.id, POINTS_PERFECT_SENTENCE, "perfect_sentence", f"整句完全正确 +{POINTS_PERFECT_SENTENCE}", word_item.id)
+            else:
+                award_points(db, current_user.id, POINTS_CORRECT_NO_HINT, "word_correct", f"正确拼写 +{POINTS_CORRECT_NO_HINT}", word_item.id)
+        except Exception:
+            pass  # points failure should never block learning
+    else:
     if not result.review_log.is_correct:
         schedule_micro_review_tasks_for_mistake(db, current_user.id, word_state, learning_item.chinese_text, learning_item.id, error_type or "spelling")
     db.commit()

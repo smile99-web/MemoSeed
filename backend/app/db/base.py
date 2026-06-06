@@ -15,6 +15,7 @@ from app.models.speech_asset import SpeechAsset
 from app.models.tts_usage_log import TtsUsageLog
 from app.models.user import User
 from app.models.user_model_settings import UserModelSettings
+from app.models.user_points import UserPoints, PointsLog
 from app.models.word_memory_state import WordMemoryState
 from app.models.word_review_task import WordReviewTask
 from app.models.word_translation import WordTranslation
@@ -37,6 +38,8 @@ __all__ = [
     "TtsUsageLog",
     "User",
     "UserModelSettings",
+    "UserPoints",
+    "PointsLog",
     "WordMemoryState",
     "WordReviewTask",
     "WordTranslation",

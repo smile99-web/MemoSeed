@@ -407,3 +407,36 @@ export async function getWordHistory(accessToken: string, word: string): Promise
   }
   return (await response.json()) as WordHistoryResponse;
 }
+
+// ── Points & Rewards ──
+
+export interface PointsLogEntry {
+  points_changed: number;
+  reason: string;
+  detail: string | null;
+  created_at: string | null;
+}
+
+export interface PointsSummary {
+  total_points: number;
+  level: number;
+  level_label: string;
+  today_points: number;
+  next_level_points: number | null;
+  next_level_progress_pct: number;
+  recent_logs: PointsLogEntry[];
+}
+
+export async function getPointsSummary(accessToken: string): Promise<PointsSummary> {
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/memory/points/summary`, { cache: "no-store" }, accessToken);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return (await response.json()) as PointsSummary;
+}
+
+export async function awardPoints(accessToken: string, pointsChange: number, reason: string, detail?: string, learningItemId?: string): Promise<void> {
+  await fetchWithAuth(`${getApiBaseUrl()}/memory/points/award`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ points_change: pointsChange, reason, detail, learning_item_id: learningItemId }),
+  }, accessToken);
+}

@@ -19,7 +19,9 @@ import {
   getMemoryDashboard,
   getMemoryDashboardWithCourse,
   getRetentionCurve,
+  getPointsSummary,
   getReviewForecast,
+  PointsSummary,
   ReviewForecast,
   getStudyStreak,
   getTodayPlan,
@@ -268,6 +270,7 @@ export default function DashboardPage() {
   const [todayPlan, setTodayPlan] = useState<TodayPlan | null>(null);
   const [retentionCurve, setRetentionCurve] = useState<RetentionCurve | null>(null);
   const [reviewForecast, setReviewForecast] = useState<ReviewForecast | null>(null);
+  const [pointsSummary, setPointsSummary] = useState<PointsSummary | null>(null);
   const [errorBreakdown, setErrorBreakdown] = useState<ErrorBreakdown | null>(null);
   const [studyStreak, setStudyStreak] = useState<StudyStreak | null>(null);
   const [selectedCourseId] = useState<string>("");
@@ -286,7 +289,7 @@ export default function DashboardPage() {
 
       try {
         const courseId = selectedCourseId || undefined;
-        const [dashboardData, reportData, planData, curveData, errorData, streakData, forecastData] = await Promise.all([
+        const [dashboardData, reportData, planData, curveData, errorData, streakData, forecastData, pointsData] = await Promise.all([
           getMemoryDashboardWithCourse(accessToken, courseId),
           getDailyReport(accessToken).catch(() => null),
           getTodayPlan(accessToken).catch(() => null),
@@ -294,6 +297,7 @@ export default function DashboardPage() {
           getErrorBreakdown(accessToken).catch(() => null),
           getStudyStreak(accessToken).catch(() => null),
           getReviewForecast(accessToken).catch(() => null),
+          getPointsSummary(accessToken).catch(() => null),
         ]);
         setDashboard(dashboardData);
         setDailyReport(reportData);
@@ -302,6 +306,7 @@ export default function DashboardPage() {
         setErrorBreakdown(errorData);
         setStudyStreak(streakData);
         setReviewForecast(forecastData);
+        setPointsSummary(pointsData);
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "读取数据看板失败");
       } finally {
@@ -617,6 +622,55 @@ export default function DashboardPage() {
               <StatCard label="平均遗忘风险" value={formatPercent(dashboard.average_forget_risk)} hint="越高越需要尽快复习" />
               <StatCard label="平均复习间隔" value={`${dashboard.average_interval_days} 天`} hint="由 FSRS 稳定度和英语难度修正共同决定" />
             </div>
+
+            {pointsSummary ? (
+              <Card className="border-2 border-amber-200 bg-gradient-to-r from-amber-50 to-yellow-50">
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center gap-2 text-lg">🏆 我的积分</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="flex flex-wrap items-center gap-4">
+                    <div className="text-center">
+                      <p className="text-3xl font-bold text-amber-600">{pointsSummary.total_points}</p>
+                      <p className="text-xs text-muted-foreground">总积分</p>
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-lg font-semibold">{pointsSummary.level_label}</p>
+                      <p className="text-xs text-muted-foreground">今日获得 +{pointsSummary.today_points}</p>
+                      {pointsSummary.next_level_points && (
+                        <div className="mt-1">
+                          <div className="flex justify-between text-[10px] text-muted-foreground">
+                            <span>距下一级</span>
+                            <span>{pointsSummary.total_points}/{pointsSummary.next_level_points}</span>
+                          </div>
+                          <div className="mt-0.5 h-2 overflow-hidden rounded-full bg-amber-100">
+                            <div
+                              className="h-full rounded-full bg-amber-500 transition-all"
+                              style={{ width: `${pointsSummary.next_level_progress_pct}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {pointsSummary.recent_logs.length > 0 && (
+                    <div className="mt-3 border-t pt-2">
+                      <p className="mb-1 text-xs font-medium text-muted-foreground">最近积分记录</p>
+                      <div className="max-h-24 space-y-0.5 overflow-y-auto">
+                        {pointsSummary.recent_logs.slice(0, 8).map((log, i) => (
+                          <div key={i} className="flex items-center justify-between text-xs">
+                            <span className="text-muted-foreground truncate max-w-[200px]">{log.detail || log.reason}</span>
+                            <span className={`ml-2 font-semibold tabular-nums ${log.points_changed > 0 ? "text-emerald-600" : "text-red-500"}`}>
+                              {log.points_changed > 0 ? "+" : ""}{log.points_changed}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            ) : null}
 
             <Card>
               <CardHeader>

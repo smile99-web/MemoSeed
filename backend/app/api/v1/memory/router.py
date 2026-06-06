@@ -13,7 +13,7 @@ from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
 from app.models.study_time_log import StudyTimeLog
 from app.models.user import User
-from app.schemas.memory import CourseCompletionRequest, CourseProgressStats, FsrsFitResponse, MemoryDashboardResponse, MemoryScheduleResponse, MemoryStateRead, ReviewForecastResponse, ReviewScoreRequest, StudyTimeLogRequest
+from app.schemas.memory import CourseCompletionRequest, CourseProgressStats, FsrsFitResponse, MemoryDashboardResponse, MemoryScheduleResponse, MemoryStateRead, PointsAwardRequest, PointsSummaryResponse, ReviewForecastResponse, ReviewScoreRequest, StudyTimeLogRequest
 from app.services.memory_dashboard import build_memory_dashboard, build_review_forecast, check_and_generate_daily_report
 from app.schemas.review import MistakeLogRead, ReviewLogRead
 from app.services.fsrs_fitting import fit_user_fsrs_parameters
@@ -176,3 +176,24 @@ def get_course_progress_stats(
         )
         for course_id in course_ids
     ]
+
+
+# ── Points & Rewards ──
+
+@router.get("/points/summary", response_model=PointsSummaryResponse)
+def get_points_summary_endpoint(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> PointsSummaryResponse:
+    from app.services.points_service import get_points_summary
+    return get_points_summary(db, current_user.id)
+
+
+@router.post("/points/award")
+def award_points_endpoint(
+    payload: PointsAwardRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    from app.services.points_service import award_points
+    return award_points(db, current_user.id, payload.points_change, payload.reason, payload.detail, payload.learning_item_id)
