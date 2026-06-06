@@ -532,7 +532,7 @@ def schedule_memory_review(
 
     if is_correct:
         memory_state.repetition_count += 1
-        if score >= 5:
+        if score >= 4:
             unresolved_mistakes = db.scalars(
                 select(MistakeLog).where(
                     MistakeLog.user_id == user_id,

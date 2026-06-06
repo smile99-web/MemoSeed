@@ -340,9 +340,11 @@ def summarize_word(stats: WordStats, now: datetime) -> WordMasterySummary:
     next_review_at = min(next_reviews) if next_reviews else None
     priority_score = calculate_word_priority(stats, strength, risk, next_review_at, now)
     dominant_error_type = get_dominant_error_type(stats)
-    if strength >= 0.82 and stats.recall_correct_count >= 3 and stats.no_hint_correct_date_count >= 3 and stats.consecutive_correct_count >= 3 and stats.mistake_count == 0:
+    # Mastered: strong memory + enough correct reviews + proven retention over time
+    if strength >= 0.80 and stats.recall_correct_count >= 3 and stats.no_hint_correct_date_count >= 3 and stats.consecutive_correct_count >= 5:
         status = "mastered"
-    elif strength >= 0.72 and stats.recall_correct_count >= 2 and stats.no_hint_correct_date_count >= 2 and stats.consecutive_error_count == 0:
+    # Near-mastered: good memory + some correct reviews + no recent errors
+    elif strength >= 0.68 and stats.recall_correct_count >= 2 and stats.no_hint_correct_date_count >= 2 and stats.consecutive_error_count == 0:
         status = "near_mastered"
     elif stats.consecutive_error_count >= 3 or priority_score >= 0.78:
         status = "difficult"
