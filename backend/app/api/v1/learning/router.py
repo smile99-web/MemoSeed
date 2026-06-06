@@ -712,7 +712,12 @@ def list_due_review_items(
             item_by_id.setdefault(item.id, item)
             add_focus_words(item.id, extract_mistake_words(mistake.mistake_type, mistake.expected_answer, mistake.actual_answer))
 
-    # Build sentence-level review items
+    # P1-2: Build item priority map from sorted due_rows for cross-course review prioritization
+    item_priority: dict[UUID, float] = {}
+    for item, mem_state in due_rows:
+        item_priority[item.id] = calculate_review_priority(mem_state, now)
+
+    # Build sentence-level review items, sorted by priority (highest first)
     sentence_review_items: list[LearningItemRead] = []
     for item in item_by_id.values():
         if item.item_type == "word" and item.source == WORD_MEMORY_SOURCE and normalize_word(item.english_text) in covered_task_words:
@@ -722,6 +727,8 @@ def list_due_review_items(
         if focus_words:
             item_read = item_read.model_copy(update={"source": f"AI 动态复习：{', '.join(focus_words)}"})
         sentence_review_items.append(item_read)
+    # Sort by priority: highest-risk cross-course items first
+    sentence_review_items.sort(key=lambda it: -item_priority.get(it.id, 0.0))
 
     if interleave and task_review_items and sentence_review_items:
         # Interleave: pattern of 1 review → 2 sentence items → 1 review → ...

@@ -543,6 +543,14 @@ function StudyContent() {
   const feedbackSetAtRef = useRef<number>(0);
   const wordAnimKeyRef = useRef(0);
 
+  // P1-3: Fatigue detection — sliding window of last 10 reviews
+  const recentResultsRef = useRef<boolean[]>([]);
+  const [fatigueWarning, setFatigueWarning] = useState(false);
+
+  // P2-2: Milestone tracking
+  const [milestoneMessage, setMilestoneMessage] = useState<string | null>(null);
+  const totalMasteredRef = useRef(0);
+
   const currentItem = items[currentIndex] ?? null;
   const currentWords = useMemo(() => tokenizeEnglish(currentItem?.english_text ?? ""), [currentItem]);
   const dynamicReviewWords = useMemo(() => getDynamicReviewWords(currentItem), [currentItem]);
@@ -2124,6 +2132,14 @@ function StudyContent() {
     if (!isCorrect) {
       playIncorrectTap();
       setCurrentStreak(0);
+      // P1-3: Fatigue detection — track last 10 results, warn if ≥3 wrong
+      recentResultsRef.current.push(false);
+      if (recentResultsRef.current.length > 10) recentResultsRef.current.shift();
+      const recentWrong = recentResultsRef.current.filter((r) => !r).length;
+      if (recentWrong >= 3 && recentResultsRef.current.length >= 10 && !fatigueWarning) {
+        setFatigueWarning(true);
+        setFeedback("今天学得很认真！有点累了就休息一下，休息好了再继续。", "info");
+      }
       wordAnimKeyRef.current += 1;
       setWordAnimations((current) => ({ ...current, [index]: { type: "incorrect", key: wordAnimKeyRef.current } }));
       setTimeout(() => {
@@ -2214,6 +2230,9 @@ function StudyContent() {
     }
 
     playCorrectDing();
+    // P1-3: Track correct result in fatigue window
+    recentResultsRef.current.push(true);
+    if (recentResultsRef.current.length > 10) recentResultsRef.current.shift();
     setCurrentStreak((s) => s + 1);
     setCorrectWordCount((c) => c + 1);
     wordAnimKeyRef.current += 1;
@@ -2227,6 +2246,15 @@ function StudyContent() {
     }, 400);
 
     recordSuccessfulWordSpelling(expectedWord, currentRawAnswer, prevErrorCount, prevErrorCount >= 3, currentItem?.item_type === "word");
+
+    // P2-2: Milestone celebration on round numbers
+    const milestones = [5, 10, 25, 50, 75, 100, 150, 200];
+    const newTotal = correctWordCount + 1;
+    if (milestones.includes(newTotal)) {
+      setMilestoneMessage(`🎉 太棒了！今天已经正确拼写 ${newTotal} 个词！`);
+      playLevelUpSound();
+      setTimeout(() => setMilestoneMessage(null), 4000);
+    }
 
     // After encoding whole_recall success, advance to contextual_use stage
     if (encodingStageRef.current === "whole_recall") {
@@ -2657,6 +2685,17 @@ function StudyContent() {
       <MiniCelebrationConfetti key={`milestone-${milestoneCelebrateKey}`} triggerKey={milestoneCelebrateKey} speakMessage="太厉害了！" />
       <main className={isStudyFullscreen ? "flex min-h-[100dvh] flex-col overflow-y-auto bg-white text-slate-950" : "flex min-h-[100dvh] flex-col overflow-y-auto bg-slate-50 text-slate-950"}>
       {celebrationSummary ? <CelebrationModal nextCourse={nextCourse} summary={celebrationSummary} /> : null}
+      {milestoneMessage ? (
+        <div className="fixed left-1/2 top-6 z-40 -translate-x-1/2 animate-bounce rounded-full bg-amber-400 px-6 py-3 text-base font-bold text-white shadow-lg ipad:px-8 ipad:py-4 ipad:text-lg">
+          {milestoneMessage}
+        </div>
+      ) : null}
+      {fatigueWarning ? (
+        <div className="fixed left-1/2 top-6 z-40 -translate-x-1/2 rounded-full bg-blue-400 px-6 py-3 text-sm font-semibold text-white shadow-lg ipad:text-base">
+          今天学得很认真！有点累了就休息一下 😊
+          <button className="ml-3 rounded-full bg-white/20 px-2 py-0.5 text-xs hover:bg-white/30" onClick={() => setFatigueWarning(false)}>知道了</button>
+        </div>
+      ) : null}
       {isStudyFullscreen ? (
         <>
           <div className="fixed left-4 top-4 z-30 flex items-center gap-2 ipad:left-6 ipad:top-6">

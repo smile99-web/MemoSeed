@@ -447,6 +447,33 @@ def adjust_delay_for_learning_item(delay: timedelta, learning_item: LearningItem
         delay *= 0.85
     elif learning_item.difficulty_level <= 2 and memory_state.lapse_count == 0:
         delay *= 1.1
+
+    # P0-1: Time-aware scheduling — adjust based on historical time-of-day efficiency.
+    # Data shows children perform best 22:00-23:00 (60%) and 10:00-11:00 (57%),
+    # worst 12:00-16:00 (40%) and 15:00-16:00 (10%).
+    now_local = datetime.now(LOCAL_TIMEZONE)
+    current_hour = now_local.hour
+    if current_hour in (10, 22, 23):
+        # Peak efficiency window — can handle harder words
+        delay *= 1.0  # keep as-is
+    elif current_hour in (11, 17, 18, 19, 21):
+        # Normal window — slight boost for high-risk items
+        if (memory_state.forget_risk or 0) >= 0.7:
+            delay *= 0.85  # shorten for risky words
+    elif current_hour in (12, 13, 14, 15, 16, 20):
+        # Low efficiency window — easier review, shorter intervals
+        delay *= 0.75  # only serve easy/review words
+    # (hours 0-9: no adjustment, assume not studying)
+
+    # P0-2: Hint-dependency penalty — if child consistently needs hints,
+    # force more frequent reviews to break the dependency.
+    total_no_preview = (memory_state.recall_correct_count or 0) + (memory_state.hinted_correct_count or 0)
+    if total_no_preview >= 5:
+        hint_ratio = (memory_state.hinted_correct_count or 0) / total_no_preview
+        if hint_ratio >= 0.5:
+            # Word is heavily hint-dependent — review 30% sooner
+            delay *= 0.7
+
     return max(timedelta(days=1), delay)
 
 

@@ -786,6 +786,21 @@ export default function DashboardPage() {
                 })
                 .join(" ");
 
+              // P2-1: Detect steep recall drops (>20% between consecutive bins)
+              const dropWarnings: { from: string; to: string; drop: number }[] = [];
+              for (let i = 1; i < bins.length; i++) {
+                if (bins[i - 1].total_reviews > 0 && bins[i].total_reviews > 0) {
+                  const drop = bins[i - 1].recall_rate - bins[i].recall_rate;
+                  if (drop >= 0.20) {
+                    dropWarnings.push({
+                      from: bins[i - 1].elapsed_days_label + "天",
+                      to: bins[i].elapsed_days_label + "天",
+                      drop: Math.round(drop * 100),
+                    });
+                  }
+                }
+              }
+
               // Bar chart: bar height = review count, curve line = accuracy rate
               return (
                 <Card>
@@ -794,6 +809,13 @@ export default function DashboardPage() {
                     <CardDescription>
                       横轴为距离上次复习的天数，柱高表示复习次数，曲线表示正确率。
                       {retentionCurve.course_id ? "（已按课程筛选）" : ""}
+                      {dropWarnings.length > 0 && (
+                        <span className="mt-1 block text-amber-600">
+                          ⚠ {dropWarnings.map((w, i) => (
+                            <span key={i}>{i > 0 ? "；" : ""}{w.from}→{w.to} 正确率骤降 {w.drop}%{i === dropWarnings.length - 1 ? "，建议在此时间窗口前提前复习" : ""}</span>
+                          ))}
+                        </span>
+                      )}
                     </CardDescription>
                   </CardHeader>
                   <CardContent>
