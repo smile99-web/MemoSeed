@@ -386,8 +386,11 @@ def calculate_failure_delay(score: int, lapse_count: int, now: datetime, memory_
 
     delay = same_day_next_interval(reduced_sts, failure_target)
 
-    # For many failures, schedule within the same learning day.
-    if lapse_count > 3:
+    # Stuck-loop escape: when a child keeps failing the same word (3+ lapses),
+    # give it a much longer timeout so other words get a chance.
+    if lapse_count >= 3:
+        delay = max(delay, timedelta(hours=2))
+    else:
         local_now = now.astimezone(LOCAL_TIMEZONE)
         end_of_day = local_now.replace(hour=20, minute=0, second=0, microsecond=0)
         if end_of_day <= local_now:
