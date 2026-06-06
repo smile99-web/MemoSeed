@@ -145,6 +145,7 @@ def calculate_word_memory_priority(word_state: WordMemoryState, now: datetime) -
             "preview_correct_count": word_state.preview_correct_count,
             "recall_correct_count": word_state.recall_correct_count,
             "last_reviewed_at": word_state.last_reviewed_at,
+            "error_type_counts": word_state.error_type_counts or {},
         },
     )()
     return calculate_word_priority(stats, word_state.memory_strength, word_state.forget_risk, word_state.next_micro_review_at, now)

@@ -441,6 +441,7 @@ def calculate_due_word_task_priority(word_state: WordMemoryState, memory_state: 
             "preview_correct_count": word_state.preview_correct_count,
             "recall_correct_count": word_state.recall_correct_count,
             "last_reviewed_at": word_state.last_reviewed_at,
+            "error_type_counts": word_state.error_type_counts or {},
         },
     )()
     return calculate_word_priority(stats, strength, risk, next_review_at, now)

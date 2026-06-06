@@ -468,7 +468,7 @@ def calculate_word_priority(stats: WordStats, strength: float, risk: float, next
 
     # Error-type boost: words with meaning errors get higher priority since
     # they represent the most common failure mode for young learners.
-    error_type_counts = stats.error_type_counts or {}
+    error_type_counts = getattr(stats, "error_type_counts", None) or {}
     meaning_errors = error_count_value(error_type_counts.get("meaning"))
     meaning_error_score = min(meaning_errors / 3, 1.0) * 0.15
     spelling_errors = sum(
