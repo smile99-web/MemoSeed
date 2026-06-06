@@ -338,6 +338,7 @@ export interface ReviewForecastEfficiency {
 }
 
 export interface ReviewForecast {
+  backlog_count: number;
   today: ReviewForecastToday;
   tomorrow: ReviewForecastTomorrow;
   week: ReviewForecastWeek;

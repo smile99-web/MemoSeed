@@ -920,12 +920,15 @@ export default function DashboardPage() {
                   <div className="grid gap-4 md:grid-cols-2">
                     {/* Today */}
                     <div className="rounded-lg border bg-slate-50 p-3">
-                      <p className="text-xs font-medium text-muted-foreground">今日剩余</p>
+                      <p className="text-xs font-medium text-muted-foreground">今日到期</p>
                       <p className="text-2xl font-bold text-slate-900">
                         {reviewForecast.today.remaining_count} <span className="text-sm font-normal text-muted-foreground">词</span>
                       </p>
                       <p className="text-xs text-muted-foreground">
                         预计 {reviewForecast.today.remaining_minutes_low}~{reviewForecast.today.remaining_minutes_high} 分钟
+                        {reviewForecast.backlog_count > reviewForecast.today.remaining_count * 2 && (
+                          <span className="ml-1 text-red-500">（总积压 {reviewForecast.backlog_count} 词）</span>
+                        )}
                       </p>
                     </div>
                     {/* Tomorrow */}

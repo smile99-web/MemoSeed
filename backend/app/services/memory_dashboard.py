@@ -1122,9 +1122,13 @@ def build_review_forecast(db: Session, user_id: UUID) -> dict[str, object]:
         )
     ).all()
 
-    # Today's remaining reviews
-    today_remaining = [s for s in states if s.next_review_at <= now]
+    # Today's remaining: only items scheduled FOR today (not the entire backlog)
+    today_start = datetime(today.year, today.month, today.day, tzinfo=LOCAL_TIMEZONE).astimezone(UTC)
+    today_remaining = [s for s in states if today_start <= s.next_review_at <= now]
     today_count = len(today_remaining)
+
+    # Total backlog: all overdue items (from any time in the past)
+    total_backlog = len([s for s in states if s.next_review_at <= now])
 
     # Tomorrow's due
     tomorrow_due = [
@@ -1191,20 +1195,23 @@ def build_review_forecast(db: Session, user_id: UUID) -> dict[str, object]:
 
     # Smart suggestions
     actions: list[str] = []
-    if load_level == "overload":
+    if total_backlog > 50:
+        actions.append(f"复习积压{total_backlog}词（{today_count}词今日到期），建议每天坚持复习清理积压")
+    elif load_level == "overload":
         actions.append(f"明日{week_count}词到期压力较大，建议今天提前复习一部分分散压力")
     elif load_level == "heavy":
         actions.append(f"明日{tomorrow_count}词到期，建议今天多复习15分钟减轻明天负担")
     if tomorrow_high_risk > 0:
         actions.append(f"有{tomorrow_high_risk}个词遗忘风险高，建议优先复习")
-    if today_count > 10:
-        actions.append(f"今天还剩{today_count}词待复习，预计还需{max(1, round(today_count * seconds_per_item * 0.7 / 60))}~{max(1, round(today_count * seconds_per_item * 1.2 / 60))}分钟")
+    if today_count > 0:
+        actions.append(f"今日到期{today_count}词，预计还需{max(1, round(today_count * seconds_per_item * 0.7 / 60))}~{max(1, round(today_count * seconds_per_item * 1.2 / 60))}分钟")
     if avg_daily_minutes > 0 and recent_accuracy < 0.7:
         actions.append("近期正确率偏低，建议降低新词量，增加复习频率")
     if len(actions) == 0:
         actions.append("复习节奏良好，保持当前学习计划即可")
 
     return {
+        "backlog_count": total_backlog,
         "today": {
             "remaining_count": today_count,
             "remaining_minutes_low": max(1, round(today_count * seconds_per_item * 0.7 / 60)),
