@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { AuthUser, clearAuthSession, getAccessToken, getAuthUser, isAuthenticated } from "@/lib/auth";
 import { translateLearningText } from "@/lib/learning";
+import { getPointsSummary, PointsSummary } from "@/lib/memory";
 import {
   ModelSettings,
   defaultModelSettings,
@@ -117,6 +118,7 @@ const workflowCards = [
 export default function HomePage() {
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [hasLoadedSession, setHasLoadedSession] = useState(false);
+  const [pointsSummary, setPointsSummary] = useState<PointsSummary | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
@@ -131,6 +133,7 @@ export default function HomePage() {
     setHasLoadedSession(true);
     if (user) {
       void loadPersistedModelSettings().then(setModelSettings);
+      void getPointsSummary(getAccessToken()!).then(setPointsSummary).catch(() => null);
     }
   }, []);
 
@@ -601,9 +604,20 @@ export default function HomePage() {
         {hasLoadedSession ? (
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-white px-4 py-3 shadow-sm">
             {currentUser ? (
-              <div>
-                <p className="font-medium text-foreground">已登录：{currentUser.username}</p>
-                <p>{currentUser.email}</p>
+              <div className="flex flex-wrap items-center gap-4">
+                <div>
+                  <p className="font-medium text-foreground">已登录：{currentUser.username}</p>
+                  <p>{currentUser.email}</p>
+                </div>
+                {pointsSummary ? (
+                  <div className="flex items-center gap-2 rounded-full bg-amber-50 px-3 py-1.5 border border-amber-200">
+                    <span className="text-sm">{pointsSummary.level_label}</span>
+                    <span className="text-sm font-bold text-amber-600">🏆 {pointsSummary.total_points}</span>
+                    {pointsSummary.today_points > 0 && (
+                      <span className="text-xs text-emerald-600">+{pointsSummary.today_points}</span>
+                    )}
+                  </div>
+                ) : null}
               </div>
             ) : (
               <div>
