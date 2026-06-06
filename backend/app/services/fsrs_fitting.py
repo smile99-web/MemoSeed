@@ -22,7 +22,7 @@ from app.services.memory_scheduler import (
 )
 from app.utils import clamp
 
-MIN_FSRS_TRAINING_REVIEWS = 100
+MIN_FSRS_TRAINING_REVIEWS = 3000
 
 
 @dataclass(frozen=True)

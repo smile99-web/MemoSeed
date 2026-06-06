@@ -1101,3 +1101,131 @@ def check_and_generate_daily_report(db: Session, user_id: UUID) -> bool:
 
     generate_ai_daily_report(db, user_id, today)
     return True
+
+
+def build_review_forecast(db: Session, user_id: UUID) -> dict[str, object]:
+    """Predict review workload and suggest optimal study schedule."""
+    now = datetime.now(UTC)
+    now_local = datetime.now(LOCAL_TIMEZONE)
+    today = now_local.date()
+    tomorrow = today + timedelta(days=1)
+    tomorrow_start = datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=LOCAL_TIMEZONE)
+    tomorrow_end = tomorrow_start + timedelta(days=1)
+    week_end = today + timedelta(days=7)
+    week_end_dt = datetime(week_end.year, week_end.month, week_end.day, tzinfo=LOCAL_TIMEZONE)
+
+    # All memory states with next_review_at
+    states = db.scalars(
+        select(MemoryState).join(LearningItem, MemoryState.learning_item_id == LearningItem.id).where(
+            LearningItem.user_id == user_id,
+            MemoryState.next_review_at.isnot(None),
+        )
+    ).all()
+
+    # Today's remaining reviews
+    today_remaining = [s for s in states if s.next_review_at <= now]
+    today_count = len(today_remaining)
+
+    # Tomorrow's due
+    tomorrow_due = [
+        s for s in states
+        if tomorrow_start.astimezone(UTC) <= s.next_review_at < tomorrow_end.astimezone(UTC)
+    ]
+    tomorrow_count = len(tomorrow_due)
+    tomorrow_high_risk = len([s for s in tomorrow_due if (s.forget_risk or 1.0) >= 0.7])
+
+    # Weekly forecast
+    week_due = [s for s in states if now <= s.next_review_at < week_end_dt.astimezone(UTC)]
+    week_count = len(week_due)
+
+    # Peak day
+    day_counts: dict[str, int] = {}
+    for s in week_due:
+        day_key = s.next_review_at.astimezone(LOCAL_TIMEZONE).strftime("%m-%d")
+        day_counts[day_key] = day_counts.get(day_key, 0) + 1
+    peak_day = max(day_counts.items(), key=lambda x: x[1]) if day_counts else ("-", 0)
+
+    # Efficiency: compute from real study time (not review_log.duration_seconds which is usually 0)
+    week_ago = now - timedelta(days=7)
+    recent_study = db.scalars(
+        select(StudyTimeLog.duration_seconds).where(
+            StudyTimeLog.user_id == user_id,
+            StudyTimeLog.recorded_at >= week_ago,
+        )
+    ).all()
+    total_study_seconds = sum(recent_study) if recent_study else 0
+    avg_daily_seconds = round(total_study_seconds / 7)
+    avg_daily_minutes = round(avg_daily_seconds / 60)
+
+    # Count reviews in the same period
+    total_recent = db.scalar(
+        select(func.count(ReviewLog.id)).where(
+            ReviewLog.user_id == user_id,
+            ReviewLog.reviewed_at >= week_ago,
+        )
+    ) or 0
+    correct_recent = db.scalar(
+        select(func.count(ReviewLog.id)).where(
+            ReviewLog.user_id == user_id,
+            ReviewLog.reviewed_at >= week_ago,
+            ReviewLog.is_correct.is_(True),
+        )
+    ) or 0
+    recent_accuracy = round(correct_recent / total_recent, 2) if total_recent else 0.0
+
+    # Real seconds per item from study time / review count
+    seconds_per_item = round(total_study_seconds / total_recent) if total_recent > 0 else 20
+    seconds_per_item = max(seconds_per_item, 8)  # floor: at least 8s per word
+    optimistic_min = max(1, round(tomorrow_count * seconds_per_item * 0.7 / 60))
+    conservative_min = max(1, round(tomorrow_count * seconds_per_item * 1.2 / 60))
+
+    # Load level
+    if tomorrow_count <= 10:
+        load_level = "light"
+    elif tomorrow_count <= 25:
+        load_level = "moderate"
+    elif tomorrow_count <= 50:
+        load_level = "heavy"
+    else:
+        load_level = "overload"
+
+    # Smart suggestions
+    actions: list[str] = []
+    if load_level == "overload":
+        actions.append(f"明日{week_count}词到期压力较大，建议今天提前复习一部分分散压力")
+    elif load_level == "heavy":
+        actions.append(f"明日{tomorrow_count}词到期，建议今天多复习15分钟减轻明天负担")
+    if tomorrow_high_risk > 0:
+        actions.append(f"有{tomorrow_high_risk}个词遗忘风险高，建议优先复习")
+    if today_count > 10:
+        actions.append(f"今天还剩{today_count}词待复习，预计还需{max(1, round(today_count * seconds_per_item * 0.7 / 60))}~{max(1, round(today_count * seconds_per_item * 1.2 / 60))}分钟")
+    if avg_daily_minutes > 0 and recent_accuracy < 0.7:
+        actions.append("近期正确率偏低，建议降低新词量，增加复习频率")
+    if len(actions) == 0:
+        actions.append("复习节奏良好，保持当前学习计划即可")
+
+    return {
+        "today": {
+            "remaining_count": today_count,
+            "remaining_minutes_low": max(1, round(today_count * seconds_per_item * 0.7 / 60)),
+            "remaining_minutes_high": max(1, round(today_count * seconds_per_item * 1.2 / 60)),
+        },
+        "tomorrow": {
+            "due_count": tomorrow_count,
+            "estimated_minutes": [optimistic_min, conservative_min],
+            "high_risk_count": tomorrow_high_risk,
+        },
+        "week": {
+            "due_count": week_count,
+            "daily_average": round(week_count / 7, 1),
+            "peak_day": peak_day[0],
+            "peak_count": peak_day[1],
+        },
+        "load_level": load_level,
+        "suggested_actions": actions,
+        "efficiency": {
+            "avg_seconds_per_item": seconds_per_item,
+            "recent_accuracy": recent_accuracy,
+            "avg_daily_minutes": avg_daily_minutes,
+        },
+    }

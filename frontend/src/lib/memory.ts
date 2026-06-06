@@ -312,6 +312,48 @@ export async function getTodayPlan(accessToken: string): Promise<TodayPlan> {
   return (await response.json()) as TodayPlan;
 }
 
+export interface ReviewForecastToday {
+  remaining_count: number;
+  remaining_minutes_low: number;
+  remaining_minutes_high: number;
+}
+
+export interface ReviewForecastTomorrow {
+  due_count: number;
+  estimated_minutes: [number, number];
+  high_risk_count: number;
+}
+
+export interface ReviewForecastWeek {
+  due_count: number;
+  daily_average: number;
+  peak_day: string;
+  peak_count: number;
+}
+
+export interface ReviewForecastEfficiency {
+  avg_seconds_per_item: number;
+  recent_accuracy: number;
+  avg_daily_minutes: number;
+}
+
+export interface ReviewForecast {
+  today: ReviewForecastToday;
+  tomorrow: ReviewForecastTomorrow;
+  week: ReviewForecastWeek;
+  load_level: string;
+  suggested_actions: string[];
+  efficiency: ReviewForecastEfficiency;
+}
+
+export async function getReviewForecast(accessToken: string): Promise<ReviewForecast> {
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/memory/review-forecast`, { cache: "no-store" }, accessToken);
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as ReviewForecast;
+}
+
 export async function getRetentionCurve(accessToken: string, courseId?: string): Promise<RetentionCurve> {
   const searchParams = new URLSearchParams();
   if (courseId) {

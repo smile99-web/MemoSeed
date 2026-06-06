@@ -1,0 +1,16 @@
+﻿return (
+    differentIndexes.length === 2
+    && differentIndexes[1] === differentIndexes[0] + 1
+    && normalizedExpected[differentIndexes[0]] === normalizedTyped[differentIndexes[1]]
+    && normalizedExpected[differentIndexes[1]] === normalizedTyped[differentIndexes[0]]
+  );
+}
+
+function classifySpellingError(expectedWord: string, typedWord: string): string {
+  const normalizedExpected = normalizeEnglishKey(expectedWord);
+  const normalizedTyped = normalizeEnglishKey(typedWord);
+  const sharedLetterRatio = normalizedExpected.length === 0 ? 0 : countSharedLetters(normalizedExpected, normalizedTyped) / normalizedExpected.length;
+  if (normalizedTyped.length >= 2 && sharedLetterRatio < 0.35) {
+    return "unknown";
+  }
+  if (getFirstLetter(normalizedExpected) !== getFirstLett

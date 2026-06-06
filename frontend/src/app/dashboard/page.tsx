@@ -19,6 +19,8 @@ import {
   getMemoryDashboard,
   getMemoryDashboardWithCourse,
   getRetentionCurve,
+  getReviewForecast,
+  ReviewForecast,
   getStudyStreak,
   getTodayPlan,
   getWordHistory,
@@ -265,6 +267,7 @@ export default function DashboardPage() {
   const [dailyReport, setDailyReport] = useState<DailyReport | null>(null);
   const [todayPlan, setTodayPlan] = useState<TodayPlan | null>(null);
   const [retentionCurve, setRetentionCurve] = useState<RetentionCurve | null>(null);
+  const [reviewForecast, setReviewForecast] = useState<ReviewForecast | null>(null);
   const [errorBreakdown, setErrorBreakdown] = useState<ErrorBreakdown | null>(null);
   const [studyStreak, setStudyStreak] = useState<StudyStreak | null>(null);
   const [selectedCourseId] = useState<string>("");
@@ -283,13 +286,14 @@ export default function DashboardPage() {
 
       try {
         const courseId = selectedCourseId || undefined;
-        const [dashboardData, reportData, planData, curveData, errorData, streakData] = await Promise.all([
+        const [dashboardData, reportData, planData, curveData, errorData, streakData, forecastData] = await Promise.all([
           getMemoryDashboardWithCourse(accessToken, courseId),
           getDailyReport(accessToken).catch(() => null),
           getTodayPlan(accessToken).catch(() => null),
           getRetentionCurve(accessToken, courseId).catch(() => null),
           getErrorBreakdown(accessToken).catch(() => null),
           getStudyStreak(accessToken).catch(() => null),
+          getReviewForecast(accessToken).catch(() => null),
         ]);
         setDashboard(dashboardData);
         setDailyReport(reportData);
@@ -297,6 +301,7 @@ export default function DashboardPage() {
         setRetentionCurve(curveData);
         setErrorBreakdown(errorData);
         setStudyStreak(streakData);
+        setReviewForecast(forecastData);
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "读取数据看板失败");
       } finally {
@@ -699,31 +704,235 @@ export default function DashboardPage() {
               </CardContent>
             </Card>
 
-            {retentionCurve ? (
+            {retentionCurve ? (() => {
+              const bins = retentionCurve.bins;
+              const maxReviews = Math.max(...bins.map((b) => b.total_reviews), 1);
+              const CHART_W = 680;
+              const CHART_H = 220;
+              const PAD_L = 44;
+              const PAD_R = 14;
+              const PAD_T = 14;
+              const PAD_B = 32;
+              const plotW = CHART_W - PAD_L - PAD_R;
+              const plotH = CHART_H - PAD_T - PAD_B;
+              const barW = Math.max(14, plotW / bins.length - 10);
+              const gapX = plotW / bins.length;
+
+              // Y ticks for review count (left axis) — 0 to maxReviews
+              const yTicks = [0, Math.round(maxReviews * 0.5), maxReviews];
+              // Y ticks for recall rate (right axis) — 0% to 100%
+              const recallYTicks = [0, 25, 50, 75, 100];
+
+              // Build polyline points for the recall rate curve
+              const curvePoints = bins
+                .map((bin, i) => {
+                  const x = PAD_L + gapX * i + gapX / 2;
+                  const y = PAD_T + plotH - (bin.total_reviews > 0 ? bin.recall_rate : 0) * plotH;
+                  return `${x},${y}`;
+                })
+                .join(" ");
+
+              // Bar chart: bar height = review count, curve line = accuracy rate
+              return (
+                <Card>
+                  <CardHeader>
+                    <CardTitle>记忆保持曲线</CardTitle>
+                    <CardDescription>
+                      横轴为距离上次复习的天数，柱高表示复习次数，曲线表示正确率。
+                      {retentionCurve.course_id ? "（已按课程筛选）" : ""}
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="overflow-x-auto">
+                      <svg
+                        viewBox={`0 0 ${CHART_W} ${CHART_H}`}
+                        className="w-full"
+                        style={{ minWidth: "560px", maxHeight: "260px" }}
+                      >
+                        {/* Horizontal grid lines + left Y labels (review count) */}
+                        {yTicks.map((v) => {
+                          const y = PAD_T + plotH - (v / maxReviews) * plotH;
+                          return (
+                            <g key={`y-${v}`}>
+                              <line x1={PAD_L} y1={y} x2={CHART_W - PAD_R} y2={y} stroke="#f1f5f9" strokeWidth="1" />
+                              <text x={PAD_L - 6} y={y + 4} textAnchor="end" fontSize="10" fill="#94a3b8">
+                                {v}
+                              </text>
+                            </g>
+                          );
+                        })}
+                        {/* Right Y labels (recall rate %) */}
+                        {recallYTicks.map((pct) => {
+                          const y = PAD_T + plotH - (pct / 100) * plotH;
+                          return (
+                            <text key={`ry-${pct}`} x={CHART_W - PAD_R + 2} y={y + 4} textAnchor="start" fontSize="10" fill="#64748b">
+                              {pct > 0 ? `${pct}%` : ""}
+                            </text>
+                          );
+                        })}
+
+                        {/* Bars — height = review count */}
+                        {bins.map((bin, i) => {
+                          const barH = Math.max(bin.total_reviews > 0 ? (bin.total_reviews / maxReviews) * plotH : 0, bin.total_reviews > 0 ? 2 : 0);
+                          const x = PAD_L + gapX * i + (gapX - barW) / 2;
+                          const y = PAD_T + plotH - barH;
+                          return (
+                            <g key={`bar-${i}`}>
+                              <rect
+                                x={x} y={y} width={barW} height={barH}
+                                rx="2" fill="#93c5fd" opacity="0.7"
+                              />
+                              {bin.total_reviews > 0 && (
+                                <text x={x + barW / 2} y={y - 4} textAnchor="middle" fontSize="10" fill="#64748b">
+                                  {bin.total_reviews}
+                                </text>
+                              )}
+                            </g>
+                          );
+                        })}
+
+                        {/* Recall rate curve (polyline) */}
+                        {bins.some((b) => b.total_reviews > 0) && (
+                          <polyline
+                            points={curvePoints}
+                            fill="none"
+                            stroke="#2563eb"
+                            strokeWidth="2.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        )}
+
+                        {/* Curve data points */}
+                        {bins.map((bin, i) => {
+                          if (bin.total_reviews === 0) return null;
+                          const cx = PAD_L + gapX * i + gapX / 2;
+                          const cy = PAD_T + plotH - bin.recall_rate * plotH;
+                          return (
+                            <g key={`dot-${i}`}>
+                              <circle cx={cx} cy={cy} r="4" fill="white" stroke="#2563eb" strokeWidth="2" />
+                              <text x={cx} y={cy - 8} textAnchor="middle" fontSize="10" fontWeight="600" fill="#1e40af">
+                                {Math.round(bin.recall_rate * 100)}%
+                              </text>
+                            </g>
+                          );
+                        })}
+
+                        {/* X-axis labels */}
+                        {bins.map((bin, i) => {
+                          const x = PAD_L + gapX * i + gapX / 2;
+                          return (
+                            <text key={`xl-${i}`} x={x} y={CHART_H - 6} textAnchor="middle" fontSize="11" fill="#64748b">
+                              {bin.elapsed_days_label}天
+                            </text>
+                          );
+                        })}
+
+                        {/* Axis lines */}
+                        <line x1={PAD_L} y1={PAD_T} x2={PAD_L} y2={PAD_T + plotH} stroke="#e2e8f0" strokeWidth="1" />
+                        <line x1={PAD_L} y1={PAD_T + plotH} x2={CHART_W - PAD_R} y2={PAD_T + plotH} stroke="#e2e8f0" strokeWidth="1" />
+
+                        {/* Axis labels */}
+                        <text x={10} y={PAD_T + plotH / 2} textAnchor="middle" fontSize="9" fill="#94a3b8" transform={`rotate(-90, 10, ${PAD_T + plotH / 2})`}>
+                          复习次数
+                        </text>
+                        <text x={CHART_W - 4} y={PAD_T + plotH / 2} textAnchor="middle" fontSize="9" fill="#94a3b8" transform={`rotate(90, ${CHART_W - 4}, ${PAD_T + plotH / 2})`}>
+                          正确率
+                        </text>
+                      </svg>
+                    </div>
+                    {/* Legend */}
+                    <div className="flex justify-center gap-5 pt-2 text-[11px] text-muted-foreground">
+                      <span className="flex items-center gap-1.5">
+                        <span className="inline-block h-3 w-3 rounded-sm bg-blue-300 opacity-70" /> 复习次数
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <svg width="20" height="12"><line x1="2" y1="6" x2="18" y2="6" stroke="#2563eb" strokeWidth="2.5" strokeLinecap="round" /></svg>
+                        正确率曲线
+                      </span>
+                    </div>
+                  </CardContent>
+                </Card>
+              );
+            })() : null}
+
+            {reviewForecast ? (
               <Card>
                 <CardHeader>
-                  <CardTitle>记忆保持曲线</CardTitle>
-                  <CardDescription>
-                    横轴为距离上次复习的天数，纵轴为实际正确率。柱高表示该间隔下的复习次数。
-                    {retentionCurve.course_id ? "（已按课程筛选）" : ""}
-                  </CardDescription>
+                  <CardTitle>📅 智能复习建议</CardTitle>
+                  <CardDescription>基于历史学习数据和到期预测，帮助合理安排复习时间</CardDescription>
                 </CardHeader>
-                <CardContent className="space-y-2">
-                  {retentionCurve.bins.map((bin) => (
-                    <div className="grid grid-cols-[5rem_1fr_4rem_3rem] items-center gap-3" key={bin.elapsed_days_label}>
-                      <span className="text-sm text-muted-foreground">{bin.elapsed_days_label} 天</span>
-                      <div className="relative h-4 overflow-hidden rounded-sm bg-muted">
-                        <div
-                          className="absolute inset-y-0 left-0 rounded-sm bg-blue-400"
-                          style={{ width: `${bin.total_reviews > 0 ? Math.max((bin.total_reviews / maxRetentionCount) * 100, 2) : 0}%` }}
-                        />
-                      </div>
-                      <span className="text-right text-sm font-medium tabular-nums">
-                        {bin.total_reviews > 0 ? `${Math.round(bin.recall_rate * 100)}%` : "-"}
-                      </span>
-                      <span className="text-right text-xs text-muted-foreground tabular-nums">{bin.total_reviews}</span>
+                <CardContent>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    {/* Today */}
+                    <div className="rounded-lg border bg-slate-50 p-3">
+                      <p className="text-xs font-medium text-muted-foreground">今日剩余</p>
+                      <p className="text-2xl font-bold text-slate-900">
+                        {reviewForecast.today.remaining_count} <span className="text-sm font-normal text-muted-foreground">词</span>
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        预计 {reviewForecast.today.remaining_minutes_low}~{reviewForecast.today.remaining_minutes_high} 分钟
+                      </p>
                     </div>
-                  ))}
+                    {/* Tomorrow */}
+                    <div className="rounded-lg border bg-slate-50 p-3">
+                      <p className="text-xs font-medium text-muted-foreground">明日到期</p>
+                      <p className="text-2xl font-bold text-slate-900">
+                        {reviewForecast.tomorrow.due_count} <span className="text-sm font-normal text-muted-foreground">词</span>
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        预计 {reviewForecast.tomorrow.estimated_minutes[0]}~{reviewForecast.tomorrow.estimated_minutes[1]} 分钟
+                        {reviewForecast.tomorrow.high_risk_count > 0 && (
+                          <span className="ml-1 text-amber-600">⚠ {reviewForecast.tomorrow.high_risk_count} 词高风险</span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                  {/* Weekly */}
+                  <div className="mt-3 flex items-center gap-3 rounded-lg border bg-slate-50 p-3">
+                    <div className="flex-1">
+                      <p className="text-xs font-medium text-muted-foreground">本周未来 7 天</p>
+                      <p className="text-lg font-semibold text-slate-900">
+                        {reviewForecast.week.due_count} 词到期 · 日均 {reviewForecast.week.daily_average} 词
+                      </p>
+                    </div>
+                    {reviewForecast.week.peak_count > 0 && (
+                      <div className="text-right">
+                        <p className="text-xs text-muted-foreground">最忙一天</p>
+                        <p className="text-sm font-semibold text-slate-700">
+                          {reviewForecast.week.peak_day} · {reviewForecast.week.peak_count} 词
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                  {/* Load level badge */}
+                  <div className="mt-3 flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">复习负载</span>
+                    <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                      reviewForecast.load_level === "light" ? "bg-emerald-100 text-emerald-700" :
+                      reviewForecast.load_level === "moderate" ? "bg-blue-100 text-blue-700" :
+                      reviewForecast.load_level === "heavy" ? "bg-amber-100 text-amber-700" :
+                      "bg-red-100 text-red-700"
+                    }`}>
+                      {reviewForecast.load_level === "light" ? "🟢 轻松" :
+                       reviewForecast.load_level === "moderate" ? "🟡 适中" :
+                       reviewForecast.load_level === "heavy" ? "🟠 繁重" : "🔴 超载"}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      每词均 {reviewForecast.efficiency.avg_seconds_per_item}s · 近7天正确率 {Math.round(reviewForecast.efficiency.recent_accuracy * 100)}%
+                    </span>
+                  </div>
+                  {/* Suggestions */}
+                  {reviewForecast.suggested_actions.length > 0 && (
+                    <div className="mt-3 space-y-1.5">
+                      {reviewForecast.suggested_actions.map((action, i) => (
+                        <p key={i} className="flex items-start gap-1.5 text-xs text-slate-600">
+                          <span className="mt-0.5 shrink-0">💡</span>
+                          {action}
+                        </p>
+                      ))}
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             ) : null}

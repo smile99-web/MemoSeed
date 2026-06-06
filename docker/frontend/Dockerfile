@@ -3,7 +3,7 @@ WORKDIR /app/frontend
 
 FROM base AS deps
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
+RUN npm install
 
 FROM base AS development
 COPY --from=deps /app/frontend/node_modules ./node_modules

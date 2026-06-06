@@ -133,3 +133,37 @@ class FsrsFitResponse(BaseModel):
     training_pair_count: int
     accuracy_rate: float
     weights: list[float]
+
+
+class ReviewForecastToday(BaseModel):
+    remaining_count: int
+    remaining_minutes_low: int
+    remaining_minutes_high: int
+
+
+class ReviewForecastTomorrow(BaseModel):
+    due_count: int
+    estimated_minutes: list[int]
+    high_risk_count: int
+
+
+class ReviewForecastWeek(BaseModel):
+    due_count: int
+    daily_average: float
+    peak_day: str
+    peak_count: int
+
+
+class ReviewForecastEfficiency(BaseModel):
+    avg_seconds_per_item: int
+    recent_accuracy: float
+    avg_daily_minutes: int
+
+
+class ReviewForecastResponse(BaseModel):
+    today: ReviewForecastToday
+    tomorrow: ReviewForecastTomorrow
+    week: ReviewForecastWeek
+    load_level: str
+    suggested_actions: list[str]
+    efficiency: ReviewForecastEfficiency
