@@ -398,6 +398,52 @@ def calculate_failure_delay(score: int, lapse_count: int, now: datetime, memory_
     return delay
 
 
+def recompute_item_difficulty(learning_item: LearningItem, memory_state: MemoryState) -> int:
+    """Dynamically estimate item difficulty (1-5) based on actual child performance.
+
+    Previously all items defaulted to difficulty=1, which incorrectly treated
+    every word as easy (boosting intervals by 1.1x).  Now difficulty reflects
+    real struggle patterns: lapse count, memory weakness, and error persistence.
+    """
+    base_score = 2.0  # start at moderate
+
+    # Lapse penalty: each lapse raises difficulty
+    lapse_count = memory_state.lapse_count or 0
+    base_score += min(lapse_count * 0.8, 2.0)
+
+    # Low memory strength = harder
+    strength = memory_state.memory_strength or 0.0
+    if strength < 0.4:
+        base_score += 1.5
+    elif strength < 0.6:
+        base_score += 0.8
+    elif strength < 0.8:
+        base_score += 0.2
+
+    # Word-length heuristic
+    words = tokenize_words(learning_item.english_text)
+    if learning_item.item_type == "word" and words:
+        word = normalize_word(words[0])
+        if len(word) >= 8:
+            base_score += 0.8
+        elif len(word) >= 6:
+            base_score += 0.3
+        if word in EASY_FUNCTION_WORDS:
+            base_score -= 1.0
+
+    # Item type
+    if learning_item.item_type == "sentence":
+        base_score += 1.0
+    elif learning_item.item_type == "phrase":
+        base_score += 0.5
+
+    # High error count = harder
+    if (memory_state.consecutive_error_count or 0) >= 2:
+        base_score += 1.0
+
+    return max(1, min(5, round(base_score)))
+
+
 def estimate_item_difficulty_adjustment(learning_item: LearningItem, rating: int) -> float:
     words = tokenize_words(learning_item.english_text)
     adjustment = (learning_item.difficulty_level - 3) * 0.35
@@ -652,6 +698,12 @@ def schedule_memory_review(
         )
         db.add(mistake_log)
 
+    # Dynamic difficulty estimation — updates learning_item.difficulty_level
+    # based on actual child performance so the scheduler can adjust intervals.
+    new_difficulty = recompute_item_difficulty(learning_item, memory_state)
+    if new_difficulty != learning_item.difficulty_level:
+        learning_item.difficulty_level = new_difficulty
+        db.add(learning_item)
     db.add(memory_state)
     db.commit()
     db.refresh(memory_state)

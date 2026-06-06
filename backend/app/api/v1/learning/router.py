@@ -177,12 +177,20 @@ def validate_ai_cloze_sentence(word: str, english_text: str, chinese_text: str) 
     return normalized_english, normalized_chinese
 
 
-def generate_ai_cloze_sentence(word: str, settings: LlmTranslationSettings) -> tuple[str, str]:
+def generate_ai_cloze_sentence(word: str, settings: LlmTranslationSettings, error_type: str = "", mistake_count: int = 0) -> tuple[str, str]:
+    error_hint = ""
+    if error_type and error_type != "spelling":
+        error_hint = f"The child often struggles with '{error_type}' errors for this word. "
+    if mistake_count >= 3:
+        error_hint += f"This word has been missed {mistake_count} times. Make the sentence especially memorable and vivid. "
+
     prompt = (
-        "Generate one simple English sentence for a child to practice a review word. "
+        "Generate one simple English sentence for a Chinese child learning English. "
         "Return only compact JSON with keys english_text and chinese_text. "
-        "Rules: english_text must contain the exact review word once, use 7 English words or fewer, "
-        "be natural and different from fixed phrases like 'I can spell ...'. "
+        "Rules: english_text must contain the exact review word once, use 7 English words or fewer. "
+        "Make the sentence fun, relatable to a child's daily life (school, family, play, food, animals). "
+        "Do NOT use fixed phrases like 'I can spell...' or 'I see...'. Be creative. "
+        f"{error_hint}"
         "chinese_text must be a natural Simplified Chinese translation of english_text. "
         f"Review word: {word}"
     )
@@ -190,14 +198,27 @@ def generate_ai_cloze_sentence(word: str, settings: LlmTranslationSettings) -> t
     return validate_ai_cloze_sentence(word, str(body.get("english_text") or ""), str(body.get("chinese_text") or ""))
 
 
-def build_cloze_sentence_pair(task: WordReviewTask, settings: LlmTranslationSettings | None) -> tuple[str, str, bool]:
+def build_cloze_sentence_pair(task: WordReviewTask, settings: LlmTranslationSettings | None, db: Session | None = None) -> tuple[str, str, bool]:
     cached_pair = get_cached_ai_cloze_sentence(task)
     if cached_pair is not None:
         return cached_pair[0], cached_pair[1], False
 
     if settings is not None:
         try:
-            english_text, chinese_text = generate_ai_cloze_sentence(task.word, settings)
+            # Look up error context for personalized AI sentence
+            err_type = ""
+            err_count = 0
+            if db is not None:
+                word_state = db.scalar(select(WordMemoryState).where(
+                    WordMemoryState.user_id == task.user_id,
+                    WordMemoryState.word == task.word,
+                ))
+                if word_state:
+                    err_counts = word_state.error_type_counts or {}
+                    err_type = max(err_counts.items(), key=lambda x: x[1])[0] if err_counts else ""
+                    err_count = sum(err_counts.values())
+
+            english_text, chinese_text = generate_ai_cloze_sentence(task.word, settings, err_type, err_count)
             task.choices = [{"type": AI_CLOZE_CACHE_TYPE, "english_text": english_text, "chinese_text": chinese_text}]
             return english_text, chinese_text, True
         except ValueError:
@@ -216,7 +237,7 @@ def build_micro_task_learning_item(
 ) -> tuple[LearningItemRead, bool]:
     task_updated = False
     if task.task_type == "cloze_sentence":
-        english_text, chinese_text, task_updated = build_cloze_sentence_pair(task, cloze_settings)
+        english_text, chinese_text, task_updated = build_cloze_sentence_pair(task, cloze_settings, db)
         review_prompt = chinese_text
         source = f"AI 动态复习：{task.word}"
         item_type = "sentence"
