@@ -1187,7 +1187,6 @@ def create_word_review(
                 award_points(db, current_user.id, POINTS_CORRECT_NO_HINT, "word_correct", f"正确拼写 +{POINTS_CORRECT_NO_HINT}", word_item.id)
         except Exception:
             pass  # points failure should never block learning
-    else:
     if not result.review_log.is_correct:
         schedule_micro_review_tasks_for_mistake(db, current_user.id, word_state, learning_item.chinese_text, learning_item.id, error_type or "spelling")
     db.commit()
