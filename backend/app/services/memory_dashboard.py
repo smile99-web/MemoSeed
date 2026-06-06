@@ -465,6 +465,18 @@ def calculate_word_priority(stats: WordStats, strength: float, risk: float, next
     consecutive_error_score = min(stats.consecutive_error_count / 3, 1.0)
     low_strength_score = 1 - strength
     hint_dependency_score = 1.0 if stats.preview_correct_count > 0 and stats.recall_correct_count == 0 else 0.0
+
+    # Error-type boost: words with meaning errors get higher priority since
+    # they represent the most common failure mode for young learners.
+    error_type_counts = stats.error_type_counts or {}
+    meaning_errors = error_count_value(error_type_counts.get("meaning"))
+    meaning_error_score = min(meaning_errors / 3, 1.0) * 0.15
+    spelling_errors = sum(
+        error_count_value(error_type_counts.get(k))
+        for k in ("spelling", "first-letter", "middle", "ending", "missing-letter", "extra-letter", "sequence")
+    )
+    spelling_error_score = min(spelling_errors / 5, 1.0) * 0.10
+
     recent_practice_penalty = 0.0
     if stats.last_reviewed_at is not None:
         minutes_since_review = max((now - stats.last_reviewed_at).total_seconds() / 60, 0.0)
@@ -477,10 +489,12 @@ def calculate_word_priority(stats: WordStats, strength: float, risk: float, next
     if stats.consecutive_error_count > 0:
         recent_practice_penalty *= 0.35
     priority = (
-        risk * 0.34
-        + overdue_score * 0.2
-        + mistake_score * 0.2
-        + consecutive_error_score * 0.14
+        risk * 0.30
+        + overdue_score * 0.18
+        + mistake_score * 0.15
+        + consecutive_error_score * 0.10
+        + meaning_error_score
+        + spelling_error_score
         + low_strength_score * 0.06
         + hint_dependency_score * 0.06
         - recent_practice_penalty
