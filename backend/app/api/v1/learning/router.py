@@ -506,6 +506,10 @@ def refresh_pending_word_review_task_priorities(db: Session, user_id: UUID, now:
         if word_state is None:
             continue
         priority = calculate_due_word_task_priority(word_state, memory_state, now)
+        # P2-1: Stale task boost — tasks pending >24h get +0.15 priority
+        task_age_hours = (now - task.created_at).total_seconds() / 3600
+        stale_boost = min(task_age_hours / 24 * 0.15, 0.20) if task_age_hours > 24 else 0
+        priority = min(priority + stale_boost, 1.0)
         if abs(float(task.priority_score) - priority) < 0.0001:
             continue
         task.priority_score = priority

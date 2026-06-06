@@ -44,6 +44,9 @@ ERROR_TYPE_TASK_STRATEGIES = {
     "missing-letter": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
     "extra-letter": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
     "unknown": ["english_to_chinese", "hidden_recall", "chinese_to_english", "listen_spell", "missing_letter", "cloze_sentence"],
+    # P2-2: Spelling errors → sentence-based review for contextual reinforcement
+    "spelling": ["cloze_sentence", "english_to_chinese", "missing_letter", "listen_spell", "recall_word"],
+    "spelling-spelling": ["cloze_sentence", "english_to_chinese", "missing_letter", "listen_spell", "recall_word"],
 }
 
 TEACHING_TIPS = {
@@ -312,8 +315,17 @@ def build_micro_review_plan(
     end_of_day_utc = end_of_day.astimezone(UTC)
 
     task_sequence = choose_task_sequence(word_state, error_type)
-    num_same_day = min(6, len(task_sequence))
-    long_term_count = min(4, len(task_sequence) - num_same_day)
+    # P0-2: Meaning comprehension boost — for meaning errors (63% of child's errors),
+    # prepend extra meaning-focused tasks to the sequence.
+    if error_type == "meaning":
+        meaning_tasks = ["english_to_chinese", "listen_choose_chinese"]
+        for mt in meaning_tasks:
+            if mt not in task_sequence:
+                task_sequence.insert(1, mt)
+    # P0-1: Reduce task count — 16,432 tasks were being superseded (96% waste).
+    # Lower from 6+4 to 3+2 to give each task a real chance of being completed.
+    num_same_day = min(3, len(task_sequence))
+    long_term_count = min(2, len(task_sequence) - num_same_day)
     if long_term_count < 1:
         long_term_count = 1
 

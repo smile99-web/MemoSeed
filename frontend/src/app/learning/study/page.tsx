@@ -1439,8 +1439,16 @@ function StudyContent() {
     setChoiceResult(null);
     setEncodingStage(null);
     encodingStageRef.current = null;
-    // Multi-modal encoding for new words (not review tasks)
-    if (currentItem && !currentItem.review_task_type && currentItem.item_type === "word" && currentWords[0]) {
+    // P1-2: Multi-modal encoding — trigger for new words AND weak review words.
+    // Previously only triggered for non-review-task word items (almost never).
+    // Now also triggers for word review items that are single-word and new/weak.
+    const isNewWord = Boolean(currentItem && !currentItem.review_task_type && currentItem.item_type === "word" && currentWords[0]);
+    const isWeakReviewWord = Boolean(
+      currentItem && currentItem.review_task_type && currentItem.item_type === "word"
+      && currentWords.length === 1 && currentWords[0]
+      && (currentItem.difficulty_level >= 4 || currentItem.source?.includes("复习"))
+    );
+    if (isNewWord || isWeakReviewWord) {
       const encWord = currentWords[0];
       const encChinese = currentItem.chinese_text;
       void startEncodingFn(encWord, encChinese);

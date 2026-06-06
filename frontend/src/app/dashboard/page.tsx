@@ -984,6 +984,14 @@ export default function DashboardPage() {
                       </div>
                     )}
                   </div>
+                  {/* Suggested daily target */}
+                  <div className="mt-3 flex items-center gap-2 rounded-lg bg-blue-50 px-3 py-2">
+                    <span className="text-lg">🎯</span>
+                    <div>
+                      <span className="text-sm font-semibold text-blue-700">今日建议学习 {reviewForecast.suggested_daily_minutes} 分钟</span>
+                      <p className="text-xs text-blue-500">基于今日到期词数和历史效率计算</p>
+                    </div>
+                  </div>
                   {/* Load level badge */}
                   <div className="mt-3 flex items-center gap-2">
                     <span className="text-xs text-muted-foreground">复习负载</span>

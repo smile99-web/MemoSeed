@@ -1223,11 +1223,20 @@ def build_review_forecast(db: Session, user_id: UUID) -> dict[str, object]:
         actions.append(f"今日到期{today_count}词，预计还需{max(1, round(today_count * seconds_per_item * 0.7 / 60))}~{max(1, round(today_count * seconds_per_item * 1.2 / 60))}分钟")
     if avg_daily_minutes > 0 and recent_accuracy < 0.7:
         actions.append("近期正确率偏低，建议降低新词量，增加复习频率")
+    # P1-1: Daily target suggestion based on due items and efficiency
+    suggested_daily_minutes = max(10, round(today_count * seconds_per_item * 0.7 / 60))
+    if suggested_daily_minutes > 60:
+        suggested_daily_minutes = 60  # cap at 60 min for young learners
+    if total_backlog > 30:
+        suggested_daily_minutes = min(suggested_daily_minutes + 10, 60)
+
     if len(actions) == 0:
         actions.append("复习节奏良好，保持当前学习计划即可")
+    actions.append(f"建议今日目标 {suggested_daily_minutes} 分钟")
 
     return {
         "backlog_count": total_backlog,
+        "suggested_daily_minutes": suggested_daily_minutes,
         "today": {
             "remaining_count": today_count,
             "remaining_minutes_low": max(1, round(today_count * seconds_per_item * 0.7 / 60)),
