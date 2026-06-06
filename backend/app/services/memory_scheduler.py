@@ -479,6 +479,8 @@ def get_or_create_memory_state(db: Session, learning_item: LearningItem, now: da
     if memory_state is not None:
         return memory_state
 
+    # New items get a 2-hour grace window before appearing as "due"
+    # so they don't immediately count as overdue on import.
     memory_state = MemoryState(
         learning_item_id=learning_item.id,
         interval_days=0,
@@ -487,7 +489,7 @@ def get_or_create_memory_state(db: Session, learning_item: LearningItem, now: da
         forget_risk=1.0,
         repetition_count=0,
         lapse_count=0,
-        next_review_at=now,
+        next_review_at=now + timedelta(hours=2),
         short_term_stability=1.0,
         last_short_term_updated_at=now,
     )

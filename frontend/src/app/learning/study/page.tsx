@@ -62,8 +62,8 @@ const WORD_PREVIEW_MS = 10000;
 const WORD_MEANING_REVIEW_MS = 5000;
 const WORD_TRANSLATION_TIMEOUT_MS = 2500;
 const DIFFICULT_WORD_CONFIRMATION_COUNT = 3;
-const INITIAL_REVIEW_QUEUE_LIMIT = 30;
-const REFILL_REVIEW_QUEUE_LIMIT = 12;
+const INITIAL_REVIEW_QUEUE_LIMIT = 100;
+const REFILL_REVIEW_QUEUE_LIMIT = 50;
 const SPELLING_REVIEW_TASK_TYPES = new Set(["listen_spell", "chinese_to_english", "missing_letter", "hidden_recall", "recall_word"]);
 const BASIC_WORD_MEANINGS: Record<string, string> = {
   a: "一个",

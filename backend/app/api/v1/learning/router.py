@@ -586,10 +586,20 @@ def list_learning_items(
     course_id: UUID | None = None,
     limit: int | None = None,
 ) -> list[LearningItemRead]:
-    statement = select(LearningItem).where(LearningItem.user_id == current_user.id)
+    statement = (
+        select(LearningItem)
+        .outerjoin(MemoryState, MemoryState.learning_item_id == LearningItem.id)
+        .where(LearningItem.user_id == current_user.id)
+    )
     if course_id is not None:
         statement = statement.where(LearningItem.course_id == course_id)
-    statement = statement.order_by(LearningItem.sort_order.asc(), LearningItem.created_at.asc())
+    # Sort overdue items first (nulls last = never-reviewed/new items go after due items)
+    statement = statement.order_by(
+        MemoryState.next_review_at.is_(None),
+        MemoryState.next_review_at.asc(),
+        LearningItem.sort_order.asc(),
+        LearningItem.created_at.asc(),
+    )
     if limit is not None and limit > 0:
         statement = statement.limit(limit)
     items = db.scalars(statement).all()
@@ -610,7 +620,7 @@ def list_due_review_items(
     When interleave=True, review tasks and new items are interleaved (1:2 ratio)
     and review tasks are capped to avoid front-loading fatigue.
     """
-    capped_limit = max(1, min(limit, 30))
+    capped_limit = max(1, min(limit, 200))
     effective_review_cap = review_cap if review_cap is not None else capped_limit
     now = datetime.now(UTC)
     item_by_id: dict[UUID, LearningItem] = {}
