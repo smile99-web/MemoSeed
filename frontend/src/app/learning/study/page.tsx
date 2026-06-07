@@ -1458,9 +1458,8 @@ function StudyContent() {
       if (currentItem?.chinese_text && currentItem.english_text) {
         void playCurrentItemIntro(currentItem, seqId);
       }
-      if (currentItem?.review_task_type === "hidden_recall" && currentWords[0]) {
-        window.setTimeout(function () { showWordPreview(0, currentWords[0]); }, 1200);
-      }
+      // hidden_recall: child should try to spell from Chinese meaning first.
+      // No preview — English word only shown as hint after wrong answer.
     }
   }, [clearMistakePracticePreview, clearWordPreview, currentItem, currentWords, dynamicReviewWordIndexes, playCurrentItemIntro, setPendingMistakePractice, showWordPreview, startVoiceSequence, updateAnswerState, startEncodingFn]);
 
