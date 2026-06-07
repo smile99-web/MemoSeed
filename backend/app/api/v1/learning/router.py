@@ -1,6 +1,6 @@
 import json
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID
@@ -606,6 +606,43 @@ def build_llm_translation_settings(
 
 
 @router.get("/items", response_model=list[LearningItemRead])
+def _recent_accuracy(db: Session, user_id: UUID, days: int = 3) -> float:
+    """Return accuracy rate over the last N days."""
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    total = db.scalar(select(func.count(ReviewLog.id)).where(
+        ReviewLog.user_id == user_id, ReviewLog.reviewed_at >= cutoff
+    )) or 0
+    if total == 0:
+        return 0.5  # default: assume moderate
+    correct = db.scalar(select(func.count(ReviewLog.id)).where(
+        ReviewLog.user_id == user_id, ReviewLog.reviewed_at >= cutoff, ReviewLog.is_correct.is_(True)
+    )) or 0
+    return round(correct / total, 2)
+
+
+# Phonics pattern groups for batch teaching
+PHONICS_GROUPS = {
+    "ight": ["ight", "light", "night", "right", "bright", "fight"],
+    "ing": ["ing", "king", "ring", "sing", "bring", "thing", "morning", "evening"],
+    "ake": ["ake", "make", "take", "cake", "lake", "wake", "shake"],
+    "all": ["all", "call", "fall", "ball", "small", "wall", "tall"],
+    "ook": ["ook", "look", "book", "cook", "took", "good"],
+    "ere": ["ere", "here", "there", "where"],
+    "ame": ["ame", "name", "game", "same", "came"],
+    "eat": ["eat", "meat", "seat", "beat", "heat", "great"],
+    "ear": ["ear", "hear", "near", "dear", "year", "clear"],
+    "our": ["our", "hour", "four", "your", "colour"],
+}
+
+
+def _get_phonics_group(word: str) -> str | None:
+    w = word.lower().strip()
+    for group, members in PHONICS_GROUPS.items():
+        if w in members or w.endswith(group):
+            return group
+    return None
+
+
 def list_learning_items(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
@@ -766,11 +803,37 @@ def list_due_review_items(
     sentence_review_items.sort(key=lambda it: -item_priority.get(it.id, 0.0))
 
     if focus and sentence_review_items:
-        # Focus mode: top 7 highest-priority words, each with 3 review modes
-        # for deep multi-modal practice. Total = 7 words x 3 modes = 21 items.
+        # Focus mode: top 7-9 words, warm-up order, phonics grouping.
         FOCUS_WORD_COUNT = 7
         FOCUS_MODES = ["recall_word", "english_to_chinese", "listen_spell"]
+
+        # P0-1: Warm-up — sort by strength (highest first = easiest words first)
+        def _item_strength(item: LearningItemRead) -> float:
+            ms_item = next((ms for li, ms in due_rows if li.id == item.id), None)
+            return float(ms_item.memory_strength or 0.0) if ms_item and hasattr(ms_item, 'memory_strength') else 0.0
+        sentence_review_items.sort(key=_item_strength, reverse=True)
+
         top_items = sentence_review_items[:FOCUS_WORD_COUNT]
+
+        # P1-1: Phonics grouping — bring in pattern-siblings
+        seen_patterns: set[str] = set()
+        extra_items: list[LearningItemRead] = []
+        for item in top_items:
+            for w in tokenize_words(item.english_text):
+                group = _get_phonics_group(w)
+                if group and group not in seen_patterns:
+                    seen_patterns.add(group)
+                    for sibling in sentence_review_items[FOCUS_WORD_COUNT:]:
+                        if sibling.id in {i.id for i in top_items}:
+                            continue
+                        for sw in tokenize_words(sibling.english_text):
+                            if _get_phonics_group(sw) == group:
+                                extra_items.append(sibling)
+                                break
+                        if len(extra_items) >= 3:
+                            break
+        top_items = (top_items + extra_items)[:FOCUS_WORD_COUNT + 2]
+
         focus_items: list[LearningItemRead] = []
         for item in top_items:
             words = tokenize_words(item.english_text)

@@ -552,6 +552,25 @@ function StudyContent() {
   const focusCorrectCountRef = useRef<Map<string, number>>(new Map());
   const [focusRotatedMessage, setFocusRotatedMessage] = useState<string | null>(null);
 
+  // P1-0: Daily review tracking for cap protection
+  const sessionReviewCountRef = useRef(0);
+  const [dailyCapWarning, setDailyCapWarning] = useState(false);
+
+  // Encouragement messages
+  const encourageTimerRef = useRef<number | null>(null);
+  const ENCOURAGEMENTS = [
+    "太厉害了！继续加油！🌟",
+    "你是最棒的！英语小达人！💪",
+    "又答对了！越来越熟练了！🎯",
+    "真棒！记忆力越来越好了！🧠",
+    "厉害！这个词已经记牢了！⭐",
+    "非常好！保持这个节奏！🔥",
+    "优秀！你比昨天更厉害了！📈",
+    "了不起！单词小能手！🏆",
+    "很好！你让家长感到骄傲！❤️",
+    "太强了！英语越来越简单了吧！😊",
+  ];
+
   // P2-2: Milestone tracking
   const [milestoneMessage, setMilestoneMessage] = useState<string | null>(null);
   const totalMasteredRef = useRef(0);
@@ -2258,6 +2277,32 @@ function StudyContent() {
     recentResultsRef.current.push(true);
     if (recentResultsRef.current.length > 10) recentResultsRef.current.shift();
     setCurrentStreak((s) => s + 1);
+
+    // Encouragement: random cheer every 5 correct answers
+    sessionReviewCountRef.current += 1;
+    if (sessionReviewCountRef.current % 5 === 0) {
+      const msg = ENCOURAGEMENTS[Math.floor(Math.random() * ENCOURAGEMENTS.length)];
+      setFeedback(msg, "success");
+      playCorrectDing();
+    }
+
+    // P1-0: Daily review cap — warn after 300, force stop after 500
+    if (sessionReviewCountRef.current === 300) {
+      setFeedback("今天已经学了很多了！适当休息效果更好 💤", "info");
+    }
+    if (sessionReviewCountRef.current >= 500 && !dailyCapWarning) {
+      setDailyCapWarning(true);
+      setFeedback("🏆 今天学习了500+次，非常努力！建议休息，明天继续。", "success");
+    }
+
+    // P1-2: Smart stop — declining accuracy in last 50 reviews
+    if (sessionReviewCountRef.current >= 50 && sessionReviewCountRef.current % 25 === 0) {
+      const recent50 = recentResultsRef.current.slice(-50);
+      const recentAcc = recent50.filter(Boolean).length / recent50.length;
+      if (recentAcc < 0.45 && !dailyCapWarning) {
+        setFeedback("最近正确率有点低，累了就休息一下，休息好了效率更高！💪", "info");
+      }
+    }
     setCorrectWordCount((c) => c + 1);
     wordAnimKeyRef.current += 1;
     setWordAnimations((current) => ({ ...current, [index]: { type: "correct", key: wordAnimKeyRef.current } }));

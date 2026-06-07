@@ -523,6 +523,12 @@ def adjust_delay_for_learning_item(delay: timedelta, learning_item: LearningItem
             # Word is heavily hint-dependent — review 30% sooner
             delay *= 0.7
 
+    # P2-1: Personalized danger-zone check — 3-14 day window is when forgetting
+    # accelerates for most children. Shorten intervals by 15% to catch them early.
+    if timedelta(days=3) <= delay <= timedelta(days=14):
+        if (memory_state.forget_risk or 0) >= 0.5:
+            delay *= 0.85
+
     return max(timedelta(days=1), delay)
 
 
