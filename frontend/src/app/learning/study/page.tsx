@@ -1443,12 +1443,15 @@ function StudyContent() {
     // Previously only triggered for non-review-task word items (almost never).
     // Now also triggers for word review items that are single-word and new/weak.
     const isNewWord = Boolean(currentItem && !currentItem.review_task_type && currentItem.item_type === "word" && currentWords[0]);
-    const isWeakReviewWord = Boolean(
+    // Only trigger encoding for spelling recall tasks — NOT choice review tasks.
+    const isSpellingReview = Boolean(
       currentItem && currentItem.review_task_type && currentItem.item_type === "word"
       && currentWords.length === 1 && currentWords[0]
+      && SPELLING_REVIEW_TASK_TYPES.has(currentItem.review_task_type)
+      && !isChoiceReviewTask
       && (currentItem.difficulty_level >= 4 || currentItem.source?.includes("复习"))
     );
-    if (isNewWord || isWeakReviewWord) {
+    if (isNewWord || isSpellingReview) {
       const encWord = currentWords[0];
       const encChinese = currentItem.chinese_text;
       void startEncodingFn(encWord, encChinese);
