@@ -284,7 +284,12 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
         mastered_words=mastered_words,
         learning_words=learning_words,
         weak_words=weak_words,
-        due_now_count=len([state for state in memory_states if state.next_review_at <= now]),
+        # Count unique words due, not per-item states (one word in 5 sentences = 1 due, not 5)
+        due_now_words = len([
+            s for s in summaries
+            if s.next_review_at is not None and s.next_review_at <= now
+        ])
+        due_now_count=due_now_words,
         overdue_count=len([state for state in memory_states if state.next_review_at < now - timedelta(hours=1)]),
         average_memory_strength=round(average(current_memory_strengths), 2),
         average_forget_risk=round(average(current_forget_risks), 2),
@@ -1119,6 +1124,26 @@ def check_and_generate_daily_report(db: Session, user_id: UUID) -> bool:
     return True
 
 
+def _build_word_due_map(db: Session, user_id: UUID, now: datetime) -> tuple[dict[str, datetime], dict[str, float]]:
+    """Build a word-level due map: one word in 5 sentences = 1 entry, not 5."""
+    state_rows = db.execute(
+        select(MemoryState, LearningItem).join(LearningItem, MemoryState.learning_item_id == LearningItem.id).where(
+            LearningItem.user_id == user_id,
+            MemoryState.next_review_at.isnot(None),
+        )
+    ).all()
+    word_due: dict[str, datetime] = {}
+    word_forget_risks: dict[str, float] = {}
+    for state, item in state_rows:
+        for word in tokenize_words(item.english_text):
+            w = word.lower()
+            existing = word_due.get(w)
+            if existing is None or state.next_review_at < existing:
+                word_due[w] = state.next_review_at
+                word_forget_risks[w] = state.forget_risk or 1.0
+    return word_due, word_forget_risks
+
+
 def build_review_forecast(db: Session, user_id: UUID) -> dict[str, object]:
     """Predict review workload and suggest optimal study schedule."""
     now = datetime.now(UTC)
@@ -1130,38 +1155,28 @@ def build_review_forecast(db: Session, user_id: UUID) -> dict[str, object]:
     week_end = today + timedelta(days=7)
     week_end_dt = datetime(week_end.year, week_end.month, week_end.day, tzinfo=LOCAL_TIMEZONE)
 
-    # All memory states with next_review_at
-    states = db.scalars(
-        select(MemoryState).join(LearningItem, MemoryState.learning_item_id == LearningItem.id).where(
-            LearningItem.user_id == user_id,
-            MemoryState.next_review_at.isnot(None),
-        )
-    ).all()
+    # Use word-level deduplication
+    word_due, word_forget_risks = _build_word_due_map(db, user_id, now)
 
-    # Today's remaining: only items scheduled FOR today (not the entire backlog)
+    # Today's remaining: words scheduled FOR today (not the entire backlog)
     today_start = datetime(today.year, today.month, today.day, tzinfo=LOCAL_TIMEZONE).astimezone(UTC)
-    today_remaining = [s for s in states if today_start <= s.next_review_at <= now]
-    today_count = len(today_remaining)
+    today_count = len([t for t in word_due.values() if today_start <= t <= now])
 
-    # Total backlog: all overdue items (from any time in the past)
-    total_backlog = len([s for s in states if s.next_review_at <= now])
+    # Total backlog: all overdue unique words
+    total_backlog = len([t for t in word_due.values() if t <= now])
 
-    # Tomorrow's due
-    tomorrow_due = [
-        s for s in states
-        if tomorrow_start.astimezone(UTC) <= s.next_review_at < tomorrow_end.astimezone(UTC)
-    ]
-    tomorrow_count = len(tomorrow_due)
-    tomorrow_high_risk = len([s for s in tomorrow_due if (s.forget_risk or 1.0) >= 0.7])
+    # Tomorrow's due words
+    tomorrow_count = len([t for t in word_due.values() if tomorrow_start.astimezone(UTC) <= t < tomorrow_end.astimezone(UTC)])
+    tomorrow_high_risk = len([w for w, t in word_due.items() if tomorrow_start.astimezone(UTC) <= t < tomorrow_end.astimezone(UTC) and word_forget_risks.get(w, 1.0) >= 0.7])
 
     # Weekly forecast
-    week_due = [s for s in states if now <= s.next_review_at < week_end_dt.astimezone(UTC)]
-    week_count = len(week_due)
+    week_due_times = [t for t in word_due.values() if now <= t < week_end_dt.astimezone(UTC)]
+    week_count = len(week_due_times)
 
     # Peak day
     day_counts: dict[str, int] = {}
-    for s in week_due:
-        day_key = s.next_review_at.astimezone(LOCAL_TIMEZONE).strftime("%m-%d")
+    for t in week_due_times:
+        day_key = t.astimezone(LOCAL_TIMEZONE).strftime("%m-%d")
         day_counts[day_key] = day_counts.get(day_key, 0) + 1
     peak_day = max(day_counts.items(), key=lambda x: x[1]) if day_counts else ("-", 0)
 
@@ -1268,12 +1283,9 @@ def build_today_progress(db: Session, user_id: UUID) -> dict[str, object]:
     now = datetime.now(UTC)
     today_start = datetime.now(LOCAL_TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
 
-    # Planned: due reviews
-    planned_reviews = db.scalar(
-        select(func.count(MemoryState.id))
-        .join(LearningItem, MemoryState.learning_item_id == LearningItem.id)
-        .where(LearningItem.user_id == user_id, MemoryState.next_review_at <= now)
-    ) or 0
+    # Planned: unique words due (deduplicated by word, not per-item)
+    word_due_map = _build_word_due_map(db, user_id, now)
+    planned_reviews = len([t for t in word_due_map.values() if t <= now])
 
     # Completed reviews today
     completed_reviews = db.scalar(
