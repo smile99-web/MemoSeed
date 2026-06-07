@@ -1285,7 +1285,7 @@ def build_today_progress(db: Session, user_id: UUID) -> dict[str, object]:
     today_start = datetime.now(LOCAL_TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
 
     # Planned: unique words due (deduplicated by word, not per-item)
-    word_due_map = _build_word_due_map(db, user_id, now)
+    word_due_map, _ = _build_word_due_map(db, user_id, now)
     planned_reviews = len([t for t in word_due_map.values() if t <= now])
 
     # Completed word reviews today
