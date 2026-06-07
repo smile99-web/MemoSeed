@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
@@ -29,6 +30,29 @@ def get_memory_dashboard(
     course_id: UUID | None = None,
 ) -> MemoryDashboardResponse:
     return build_memory_dashboard(db, current_user.id, course_id=course_id)
+
+
+@router.post("/focus-rotate")
+def rotate_focus_word(
+    learning_item_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """Rotate a mastered focus word out — push next_review_at to tomorrow."""
+    memory_state = db.scalar(
+        select(MemoryState).where(
+            MemoryState.learning_item_id == learning_item_id,
+            MemoryState.learning_item_id.in_(
+                select(LearningItem.id).where(LearningItem.user_id == current_user.id)
+            ),
+        )
+    )
+    if memory_state is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory state not found")
+    memory_state.next_review_at = datetime.now(UTC) + timedelta(days=1)
+    db.add(memory_state)
+    db.commit()
+    return {"rotated": True, "next_review_at": memory_state.next_review_at.isoformat()}
 
 
 @router.get("/today-progress", response_model=TodayProgressResponse)

@@ -10,7 +10,7 @@ import { getAccessToken } from "@/lib/auth";
 import { addCourseCompletion } from "@/lib/course-progress";
 import { Course, listCoursePackages, listCourses } from "@/lib/courses";
 import { generateDynamicSentence, generateLearningEncouragement, getWordTranslations, LearningItem, listDueReviewItems, listLearningItems, logWordMistake, logWordReview, translateLearningText } from "@/lib/learning";
-import { recordCourseCompletion, recordStudyTime, scheduleMemoryReview } from "@/lib/memory";
+import { recordCourseCompletion, recordStudyTime, rotateFocusWord, scheduleMemoryReview } from "@/lib/memory";
 import { ModelSettings, defaultModelSettings, getModelSettings, loadPersistedModelSettings } from "@/lib/model-settings";
 import { playAudioBlob, prefetchCourseAudio, stopAudioPlayback, synthesizeCosyVoiceSpeech, synthesizeKokoroSpeech, synthesizeVolcengineSpeech, TtsSynthesisOptions } from "@/lib/tts";
 
@@ -547,6 +547,10 @@ function StudyContent() {
   // P1-3: Fatigue detection — sliding window of last 10 reviews
   const recentResultsRef = useRef<boolean[]>([]);
   const [fatigueWarning, setFatigueWarning] = useState(false);
+
+  // Focus mode rotation tracking
+  const focusCorrectCountRef = useRef<Map<string, number>>(new Map());
+  const [focusRotatedMessage, setFocusRotatedMessage] = useState<string | null>(null);
 
   // P2-2: Milestone tracking
   const [milestoneMessage, setMilestoneMessage] = useState<string | null>(null);
@@ -2147,6 +2151,11 @@ function StudyContent() {
     if (!isCorrect) {
       playIncorrectTap();
       setCurrentStreak(0);
+      // Focus mode: reset consecutive correct counter on wrong answer
+      if (isFocusMode && currentItem) {
+        const wordKey = normalizeEnglishKey(expectedWord);
+        focusCorrectCountRef.current.set(wordKey, 0);
+      }
       // P1-3: Fatigue detection — track last 10 results, warn if ≥3 wrong
       recentResultsRef.current.push(false);
       if (recentResultsRef.current.length > 10) recentResultsRef.current.shift();
@@ -2261,6 +2270,24 @@ function StudyContent() {
     }, 400);
 
     recordSuccessfulWordSpelling(expectedWord, currentRawAnswer, prevErrorCount, prevErrorCount >= 3, currentItem?.item_type === "word");
+
+    // Focus mode rotation: track consecutive correct, auto-rotate after 3
+    if (isFocusMode && currentItem) {
+      const wordKey = normalizeEnglishKey(expectedWord);
+      const prevCount = focusCorrectCountRef.current.get(wordKey) || 0;
+      const newCount = prevCount + 1;
+      focusCorrectCountRef.current.set(wordKey, newCount);
+      if (newCount >= 3 && currentItem.id) {
+        const token = getAccessToken();
+        if (token) {
+          void rotateFocusWord(token, currentItem.id).then(() => {
+            setFocusRotatedMessage(`${expectedWord} 已掌握！下一批`);
+            setTimeout(() => setFocusRotatedMessage(null), 3000);
+          }).catch(() => {});
+        }
+        focusCorrectCountRef.current.delete(wordKey);
+      }
+    }
 
     // P2-2: Milestone celebration on round numbers
     const milestones = [5, 10, 25, 50, 75, 100, 150, 200];
@@ -2700,6 +2727,11 @@ function StudyContent() {
       <MiniCelebrationConfetti key={`milestone-${milestoneCelebrateKey}`} triggerKey={milestoneCelebrateKey} speakMessage="太厉害了！" />
       <main className={isStudyFullscreen ? "flex min-h-[100dvh] flex-col overflow-y-auto bg-white text-slate-950" : "flex min-h-[100dvh] flex-col overflow-y-auto bg-slate-50 text-slate-950"}>
       {celebrationSummary ? <CelebrationModal nextCourse={nextCourse} summary={celebrationSummary} /> : null}
+      {focusRotatedMessage ? (
+        <div className="fixed left-1/2 top-6 z-40 -translate-x-1/2 animate-bounce rounded-full bg-emerald-500 px-6 py-3 text-base font-bold text-white shadow-lg ipad:px-8 ipad:py-4 ipad:text-lg">
+          ✅ {focusRotatedMessage}
+        </div>
+      ) : null}
       {milestoneMessage ? (
         <div className="fixed left-1/2 top-6 z-40 -translate-x-1/2 animate-bounce rounded-full bg-amber-400 px-6 py-3 text-base font-bold text-white shadow-lg ipad:px-8 ipad:py-4 ipad:text-lg">
           {milestoneMessage}

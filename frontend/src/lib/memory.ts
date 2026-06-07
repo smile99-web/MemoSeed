@@ -367,6 +367,12 @@ export interface TodayProgress {
   mistakes: TodayProgressRow;
 }
 
+export async function rotateFocusWord(accessToken: string, learningItemId: string): Promise<void> {
+  await fetchWithAuth(`${getApiBaseUrl()}/memory/focus-rotate?learning_item_id=${learningItemId}`, {
+    method: "POST",
+  }, accessToken);
+}
+
 export async function getTodayProgress(accessToken: string): Promise<TodayProgress> {
   const response = await fetchWithAuth(`${getApiBaseUrl()}/memory/today-progress`, { cache: "no-store" }, accessToken);
   if (!response.ok) throw new Error(await parseApiError(response));
