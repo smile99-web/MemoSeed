@@ -348,6 +348,31 @@ export interface ReviewForecast {
   efficiency: ReviewForecastEfficiency;
 }
 
+export interface TodayProgressRow {
+  planned: number;
+  completed: number;
+  remaining: number;
+}
+
+export interface TodayProgressReviews {
+  planned: number;
+  completed_items: number;
+  completed_reviews: number;
+  remaining: number;
+}
+
+export interface TodayProgress {
+  review: TodayProgressReviews;
+  new_words: TodayProgressRow;
+  mistakes: TodayProgressRow;
+}
+
+export async function getTodayProgress(accessToken: string): Promise<TodayProgress> {
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/memory/today-progress`, { cache: "no-store" }, accessToken);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return (await response.json()) as TodayProgress;
+}
+
 export async function getReviewForecast(accessToken: string): Promise<ReviewForecast> {
   const response = await fetchWithAuth(`${getApiBaseUrl()}/memory/review-forecast`, { cache: "no-store" }, accessToken);
   if (!response.ok) {

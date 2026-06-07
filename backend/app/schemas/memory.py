@@ -191,3 +191,19 @@ class PointsSummaryResponse(BaseModel):
     next_level_points: int | None = None
     next_level_progress_pct: int
     recent_logs: list[PointsLogEntry]
+
+
+class TodayProgressRow(BaseModel):
+    planned: int
+    completed: int
+    remaining: int
+
+
+class TodayProgressReviews(TodayProgressRow):
+    completed_reviews: int
+
+
+class TodayProgressResponse(BaseModel):
+    review: TodayProgressReviews
+    new_words: TodayProgressRow
+    mistakes: TodayProgressRow

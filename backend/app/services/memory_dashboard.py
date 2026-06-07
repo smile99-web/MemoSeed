@@ -1261,3 +1261,93 @@ def build_review_forecast(db: Session, user_id: UUID) -> dict[str, object]:
             "avg_daily_minutes": avg_daily_minutes,
         },
     }
+
+
+def build_today_progress(db: Session, user_id: UUID) -> dict[str, object]:
+    """Compare today's planned vs actual study progress."""
+    now = datetime.now(UTC)
+    today_start = datetime.now(LOCAL_TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+
+    # Planned: due reviews
+    planned_reviews = db.scalar(
+        select(func.count(MemoryState.id))
+        .join(LearningItem, MemoryState.learning_item_id == LearningItem.id)
+        .where(LearningItem.user_id == user_id, MemoryState.next_review_at <= now)
+    ) or 0
+
+    # Completed reviews today
+    completed_reviews = db.scalar(
+        select(func.count(ReviewLog.id)).where(
+            ReviewLog.user_id == user_id,
+            ReviewLog.reviewed_at >= today_start,
+        )
+    ) or 0
+
+    # Unique items reviewed today
+    unique_items_reviewed = db.scalar(
+        select(func.count(func.distinct(ReviewLog.learning_item_id))).where(
+            ReviewLog.user_id == user_id,
+            ReviewLog.reviewed_at >= today_start,
+        )
+    ) or 0
+
+    # New words planned (never-reviewed items)
+    planned_new = db.scalar(
+        select(func.count(LearningItem.id))
+        .outerjoin(MemoryState, MemoryState.learning_item_id == LearningItem.id)
+        .where(
+            LearningItem.user_id == user_id,
+            LearningItem.item_type == "word",
+            (MemoryState.id.is_(None)) | (MemoryState.repetition_count == 0),
+        )
+    ) or 0
+
+    # New words actually studied today (first-time review)
+    completed_new = db.scalar(
+        select(func.count(func.distinct(ReviewLog.learning_item_id))).where(
+            ReviewLog.user_id == user_id,
+            ReviewLog.reviewed_at >= today_start,
+            ReviewLog.learning_item_id.in_(
+                select(LearningItem.id).outerjoin(MemoryState, MemoryState.learning_item_id == LearningItem.id).where(
+                    LearningItem.user_id == user_id,
+                    LearningItem.item_type == "word",
+                    (MemoryState.id.is_(None)) | (MemoryState.repetition_count == 0),
+                )
+            ),
+        )
+    ) or 0
+
+    # Mistake practice
+    planned_mistakes = db.scalar(
+        select(func.count(MistakeLog.id)).where(
+            MistakeLog.user_id == user_id,
+            MistakeLog.is_resolved.is_(False),
+        )
+    ) or 0
+
+    completed_mistakes = db.scalar(
+        select(func.count(MistakeLog.id)).where(
+            MistakeLog.user_id == user_id,
+            MistakeLog.is_resolved.is_(True),
+            MistakeLog.occurred_at >= today_start,
+        )
+    ) or 0
+
+    return {
+        "review": {
+            "planned": planned_reviews,
+            "completed_items": unique_items_reviewed,
+            "completed_reviews": completed_reviews,
+            "remaining": max(0, planned_reviews - unique_items_reviewed),
+        },
+        "new_words": {
+            "planned": planned_new,
+            "completed": completed_new,
+            "remaining": max(0, planned_new - completed_new),
+        },
+        "mistakes": {
+            "planned": planned_mistakes,
+            "completed": completed_mistakes,
+            "remaining": max(0, planned_mistakes - completed_mistakes),
+        },
+    }

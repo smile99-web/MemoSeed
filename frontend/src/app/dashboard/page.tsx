@@ -21,8 +21,10 @@ import {
   getRetentionCurve,
   getPointsSummary,
   getReviewForecast,
+  getTodayProgress,
   PointsSummary,
   ReviewForecast,
+  TodayProgress,
   getStudyStreak,
   getTodayPlan,
   getWordHistory,
@@ -271,6 +273,7 @@ export default function DashboardPage() {
   const [retentionCurve, setRetentionCurve] = useState<RetentionCurve | null>(null);
   const [reviewForecast, setReviewForecast] = useState<ReviewForecast | null>(null);
   const [pointsSummary, setPointsSummary] = useState<PointsSummary | null>(null);
+  const [todayProgress, setTodayProgress] = useState<TodayProgress | null>(null);
   const [errorBreakdown, setErrorBreakdown] = useState<ErrorBreakdown | null>(null);
   const [studyStreak, setStudyStreak] = useState<StudyStreak | null>(null);
   const [selectedCourseId] = useState<string>("");
@@ -289,7 +292,7 @@ export default function DashboardPage() {
 
       try {
         const courseId = selectedCourseId || undefined;
-        const [dashboardData, reportData, planData, curveData, errorData, streakData, forecastData, pointsData] = await Promise.all([
+        const [dashboardData, reportData, planData, curveData, errorData, streakData, forecastData, pointsData, progressData] = await Promise.all([
           getMemoryDashboardWithCourse(accessToken, courseId),
           getDailyReport(accessToken).catch(() => null),
           getTodayPlan(accessToken).catch(() => null),
@@ -298,6 +301,7 @@ export default function DashboardPage() {
           getStudyStreak(accessToken).catch(() => null),
           getReviewForecast(accessToken).catch(() => null),
           getPointsSummary(accessToken).catch(() => null),
+          getTodayProgress(accessToken).catch(() => null),
         ]);
         setDashboard(dashboardData);
         setDailyReport(reportData);
@@ -307,6 +311,7 @@ export default function DashboardPage() {
         setStudyStreak(streakData);
         setReviewForecast(forecastData);
         setPointsSummary(pointsData);
+        setTodayProgress(progressData);
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "读取数据看板失败");
       } finally {
@@ -622,6 +627,67 @@ export default function DashboardPage() {
               <StatCard label="平均遗忘风险" value={formatPercent(dashboard.average_forget_risk)} hint="越高越需要尽快复习" />
               <StatCard label="平均复习间隔" value={`${dashboard.average_interval_days} 天`} hint="由 FSRS 稳定度和英语难度修正共同决定" />
             </div>
+
+            {todayProgress ? (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base">📋 今日学习进度</CardTitle>
+                  <CardDescription>计划与实际完成对比</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-3">
+                    {/* Review words */}
+                    <div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="font-medium">复习词汇</span>
+                        <span className="tabular-nums">
+                          <span className="text-emerald-600 font-semibold">{todayProgress.review.completed_items}</span>
+                          <span className="text-muted-foreground"> / {todayProgress.review.planned}</span>
+                          {todayProgress.review.remaining > 0 && (
+                            <span className="ml-1 text-amber-600">（剩 {todayProgress.review.remaining}）</span>
+                          )}
+                        </span>
+                      </div>
+                      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
+                        <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${todayProgress.review.planned > 0 ? Math.min((todayProgress.review.completed_items / todayProgress.review.planned) * 100, 100) : 0}%` }} />
+                      </div>
+                    </div>
+                    {/* New words */}
+                    <div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="font-medium">新词学习</span>
+                        <span className="tabular-nums">
+                          <span className="text-blue-600 font-semibold">{todayProgress.new_words.completed}</span>
+                          <span className="text-muted-foreground"> / {todayProgress.new_words.planned}</span>
+                          {todayProgress.new_words.remaining > 0 && (
+                            <span className="ml-1 text-amber-600">（剩 {todayProgress.new_words.remaining}）</span>
+                          )}
+                        </span>
+                      </div>
+                      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
+                        <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${todayProgress.new_words.planned > 0 ? Math.min((todayProgress.new_words.completed / todayProgress.new_words.planned) * 100, 100) : 0}%` }} />
+                      </div>
+                    </div>
+                    {/* Mistake practice */}
+                    <div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="font-medium">错词强化</span>
+                        <span className="tabular-nums">
+                          <span className="text-red-600 font-semibold">{todayProgress.mistakes.completed}</span>
+                          <span className="text-muted-foreground"> / {todayProgress.mistakes.planned}</span>
+                          {todayProgress.mistakes.remaining > 0 && (
+                            <span className="ml-1 text-amber-600">（剩 {todayProgress.mistakes.remaining}）</span>
+                          )}
+                        </span>
+                      </div>
+                      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
+                        <div className="h-full rounded-full bg-red-400 transition-all" style={{ width: `${todayProgress.mistakes.planned > 0 ? Math.min((todayProgress.mistakes.completed / todayProgress.mistakes.planned) * 100, 100) : 0}%` }} />
+                      </div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            ) : null}
 
             {pointsSummary ? (
               <Card className="border-2 border-amber-200 bg-gradient-to-r from-amber-50 to-yellow-50">

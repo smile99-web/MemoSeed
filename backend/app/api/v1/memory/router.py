@@ -13,8 +13,8 @@ from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
 from app.models.study_time_log import StudyTimeLog
 from app.models.user import User
-from app.schemas.memory import CourseCompletionRequest, CourseProgressStats, FsrsFitResponse, MemoryDashboardResponse, MemoryScheduleResponse, MemoryStateRead, PointsAwardRequest, PointsSummaryResponse, ReviewForecastResponse, ReviewScoreRequest, StudyTimeLogRequest
-from app.services.memory_dashboard import build_memory_dashboard, build_review_forecast, check_and_generate_daily_report
+from app.schemas.memory import CourseCompletionRequest, CourseProgressStats, FsrsFitResponse, MemoryDashboardResponse, MemoryScheduleResponse, MemoryStateRead, PointsAwardRequest, PointsSummaryResponse, ReviewForecastResponse, ReviewScoreRequest, StudyTimeLogRequest, TodayProgressResponse
+from app.services.memory_dashboard import build_memory_dashboard, build_review_forecast, build_today_progress, check_and_generate_daily_report
 from app.schemas.review import MistakeLogRead, ReviewLogRead
 from app.services.fsrs_fitting import fit_user_fsrs_parameters
 from app.services.memory_scheduler import schedule_memory_review
@@ -29,6 +29,14 @@ def get_memory_dashboard(
     course_id: UUID | None = None,
 ) -> MemoryDashboardResponse:
     return build_memory_dashboard(db, current_user.id, course_id=course_id)
+
+
+@router.get("/today-progress", response_model=TodayProgressResponse)
+def get_today_progress(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> TodayProgressResponse:
+    return build_today_progress(db, current_user.id)
 
 
 @router.get("/review-forecast", response_model=ReviewForecastResponse)
