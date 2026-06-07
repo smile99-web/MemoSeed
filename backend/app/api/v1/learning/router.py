@@ -640,11 +640,16 @@ def list_due_review_items(
     limit: int = 12,
     review_cap: int | None = None,
     interleave: bool = False,
+    focus: bool = False,
 ) -> list[LearningItemRead]:
     """List due review items.
 
     When interleave=True, review tasks and new items are interleaved (1:2 ratio)
     and review tasks are capped to avoid front-loading fatigue.
+
+    When focus=True (recommended for struggling learners), only the top 7
+    highest-priority words are returned, each with 3 different review modes
+    for thorough multi-modal practice. Total items = focus_word_count × 3.
     """
     capped_limit = max(1, min(limit, 200))
     effective_review_cap = review_cap if review_cap is not None else capped_limit
@@ -759,6 +764,24 @@ def list_due_review_items(
         sentence_review_items.append(item_read)
     # Sort by priority: highest-risk cross-course items first
     sentence_review_items.sort(key=lambda it: -item_priority.get(it.id, 0.0))
+
+    if focus and sentence_review_items:
+        # Focus mode: top 7 highest-priority words, each with 3 review modes
+        # for deep multi-modal practice. Total = 7 words x 3 modes = 21 items.
+        FOCUS_WORD_COUNT = 7
+        FOCUS_MODES = ["recall_word", "english_to_chinese", "listen_spell"]
+        top_items = sentence_review_items[:FOCUS_WORD_COUNT]
+        focus_items: list[LearningItemRead] = []
+        for item in top_items:
+            words = tokenize_words(item.english_text)
+            if not words:
+                continue
+            for mode in FOCUS_MODES:
+                focus_items.append(item.model_copy(update={
+                    "review_task_type": mode,
+                    "source": f"聚焦 {words[0]}",
+                }))
+        return task_review_items[:3] + focus_items
 
     if interleave and task_review_items and sentence_review_items:
         # Interleave: pattern of 1 review → 2 sentence items → 1 review → ...

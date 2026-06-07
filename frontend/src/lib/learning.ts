@@ -573,6 +573,7 @@ export async function listDueReviewItems(
   limit = 12,
   interleave = false,
   reviewCap?: number,
+  focus = false,
 ): Promise<LearningItem[]> {
   const params = new URLSearchParams();
   params.set("limit", String(limit));
@@ -581,6 +582,9 @@ export async function listDueReviewItems(
   }
   if (interleave) {
     params.set("interleave", "true");
+  }
+  if (focus) {
+    params.set("focus", "true");
   }
   if (reviewCap !== undefined) {
     params.set("review_cap", String(reviewCap));
