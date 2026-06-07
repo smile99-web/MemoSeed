@@ -1443,11 +1443,14 @@ function StudyContent() {
     // Previously only triggered for non-review-task word items (almost never).
     // Now also triggers for word review items that are single-word and new/weak.
     const isNewWord = Boolean(currentItem && !currentItem.review_task_type && currentItem.item_type === "word" && currentWords[0]);
-    // Only trigger encoding for spelling recall tasks — NOT choice review tasks.
+    // Only trigger encoding for hidden_recall and recall_word tasks
+    // where the child needs to memorize the word before spelling it.
+    // listen_spell, chinese_to_english, missing_letter should NOT show the word first.
+    const ENCODING_REVIEW_TYPES = new Set(["hidden_recall", "recall_word"]);
     const isSpellingReview = Boolean(
       currentItem && currentItem.review_task_type && currentItem.item_type === "word"
       && currentWords.length === 1 && currentWords[0]
-      && SPELLING_REVIEW_TASK_TYPES.has(currentItem.review_task_type)
+      && ENCODING_REVIEW_TYPES.has(currentItem.review_task_type)
       && !isChoiceReviewTask
       && (currentItem.difficulty_level >= 4 || currentItem.source?.includes("复习"))
     );
