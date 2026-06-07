@@ -199,8 +199,11 @@ class TodayProgressRow(BaseModel):
     remaining: int
 
 
-class TodayProgressReviews(TodayProgressRow):
+class TodayProgressReviews(BaseModel):
+    planned: int
+    completed_items: int
     completed_reviews: int
+    remaining: int
 
 
 class TodayProgressResponse(BaseModel):
