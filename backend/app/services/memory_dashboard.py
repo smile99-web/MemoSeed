@@ -278,9 +278,13 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
     next_review_at = min((state.next_review_at for state in memory_states), default=None)
     study_time = build_study_time_summary(db, user_id)
 
+    # Word-centric: count only word-type items and unique tracked words
+    word_item_count = len([item for item, _ in item_rows if item.item_type == "word"])
+    word_state_count = db.scalar(select(func.count(WordMemoryState.id)).where(WordMemoryState.user_id == user_id)) or 0
+
     return MemoryDashboardResponse(
-        total_items=len(item_rows),
-        total_words=len(summaries),
+        total_items=word_item_count,
+        total_words=word_state_count,
         mastered_words=mastered_words,
         learning_words=learning_words,
         weak_words=weak_words,
@@ -1121,10 +1125,12 @@ def check_and_generate_daily_report(db: Session, user_id: UUID) -> bool:
 
 def _build_word_due_map(db: Session, user_id: UUID, now: datetime) -> tuple[dict[str, datetime], dict[str, float]]:
     """Build a word-level due map: one word in 5 sentences = 1 entry, not 5."""
+    # Word-centric: only count word-type items (not sentences/phrases)
     state_rows = db.execute(
         select(MemoryState, LearningItem).join(LearningItem, MemoryState.learning_item_id == LearningItem.id).where(
             LearningItem.user_id == user_id,
             MemoryState.next_review_at.isnot(None),
+            LearningItem.item_type == "word",
         )
     ).all()
     word_due: dict[str, datetime] = {}
@@ -1282,19 +1288,25 @@ def build_today_progress(db: Session, user_id: UUID) -> dict[str, object]:
     word_due_map = _build_word_due_map(db, user_id, now)
     planned_reviews = len([t for t in word_due_map.values() if t <= now])
 
-    # Completed reviews today
+    # Completed word reviews today
     completed_reviews = db.scalar(
         select(func.count(ReviewLog.id)).where(
             ReviewLog.user_id == user_id,
             ReviewLog.reviewed_at >= today_start,
+            ReviewLog.learning_item_id.in_(
+                select(LearningItem.id).where(LearningItem.user_id == user_id, LearningItem.item_type == "word")
+            ),
         )
     ) or 0
 
-    # Unique items reviewed today
+    # Unique WORD items reviewed today (exclude sentences)
     unique_items_reviewed = db.scalar(
         select(func.count(func.distinct(ReviewLog.learning_item_id))).where(
             ReviewLog.user_id == user_id,
             ReviewLog.reviewed_at >= today_start,
+            ReviewLog.learning_item_id.in_(
+                select(LearningItem.id).where(LearningItem.user_id == user_id, LearningItem.item_type == "word")
+            ),
         )
     ) or 0
 

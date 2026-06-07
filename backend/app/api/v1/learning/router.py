@@ -668,11 +668,15 @@ def list_due_review_items(
     cloze_settings = build_llm_translation_settings(None, None, None, None, stored_settings)
     has_task_updates = supersede_stale_pending_tasks_for_reviewed_words(db, current_user.id, now)
 
+    # Word-centric: prioritize word-type items first, then sentences as context
     due_statement = (
         select(LearningItem, MemoryState)
         .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
         .where(LearningItem.user_id == current_user.id, MemoryState.next_review_at <= now)
-        .order_by(MemoryState.next_review_at.asc())
+        .order_by(
+            LearningItem.item_type.desc(),  # "word" > "sentence" > "phrase"
+            MemoryState.next_review_at.asc(),
+        )
     )
     if exclude_course_id is not None:
         due_statement = due_statement.where(or_(LearningItem.course_id.is_(None), LearningItem.course_id != exclude_course_id))
