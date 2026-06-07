@@ -284,12 +284,7 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
         mastered_words=mastered_words,
         learning_words=learning_words,
         weak_words=weak_words,
-        # Count unique words due, not per-item states (one word in 5 sentences = 1 due, not 5)
-        due_now_words = len([
-            s for s in summaries
-            if s.next_review_at is not None and s.next_review_at <= now
-        ])
-        due_now_count=due_now_words,
+        due_now_count=len([s for s in summaries if s.next_review_at is not None and s.next_review_at <= now]),
         overdue_count=len([state for state in memory_states if state.next_review_at < now - timedelta(hours=1)]),
         average_memory_strength=round(average(current_memory_strengths), 2),
         average_forget_risk=round(average(current_forget_risks), 2),
