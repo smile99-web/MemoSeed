@@ -40,12 +40,12 @@ import {
   calculateSentenceScore,
   getTtsSpeechRate,
   getAdaptivePreviewDuration,
-  CONTEXT_EXAMPLE_TEMPLATES,
   commonPartLabels,
   ChildFriendlyHintData,
 } from "@/lib/study-utils";
 
 import HintDisplay from "./components/HintDisplay";
+import { WORD_DICTIONARY } from "@/lib/word-dictionary";
 import MiniCelebrationConfetti from "./components/MiniCelebrationConfetti";
 import CelebrationModal, { type CelebrationSummary, type NextCourseTarget } from "./components/CelebrationModal";
 import WordInput from "./components/WordInput";
@@ -64,46 +64,9 @@ const WORD_TRANSLATION_TIMEOUT_MS = 2500;
 const DIFFICULT_WORD_CONFIRMATION_COUNT = 3;
 const INITIAL_REVIEW_QUEUE_LIMIT = 100;
 const REFILL_REVIEW_QUEUE_LIMIT = 50;
-const SPELLING_REVIEW_TASK_TYPES = new Set(["listen_spell", "chinese_to_english", "missing_letter", "hidden_recall", "recall_word"]);
+const SPELLING_REVIEW_TASK_TYPES = new Set(["listen_spell", "chinese_to_english", "missing_letter", "hidden_recall"]);
 const BASIC_WORD_MEANINGS: Record<string, string> = {
-  a: "一个",
-  an: "一个",
-  am: "是",
-  are: "是",
-  be: "是",
-  book: "书",
-  can: "能",
-  day: "天",
-  do: "做",
-  does: "做",
-  every: "每个",
-  go: "去",
-  good: "好的",
-  has: "有",
-  have: "有",
-  he: "他",
-  i: "我",
-  in: "在里面",
-  is: "是",
-  it: "它",
-  like: "喜欢",
-  me: "我",
-  my: "我的",
-  new: "新的",
-  not: "不",
-  of: "的",
-  on: "在上面",
-  school: "学校",
-  she: "她",
-  student: "学生",
-  teacher: "老师",
-  the: "这个",
-  to: "去",
-  us: "我们",
-  we: "我们",
-  what: "什么",
-  you: "你",
-  your: "你的",
+  ...WORD_DICTIONARY,
 };
 const NATURAL_ENGLISH_TTS_OPTIONS: TtsSynthesisOptions = {
   speechRate: 0,
@@ -130,7 +93,7 @@ function isCorrectChoiceAnswer(choice: string, answer: string | null | undefined
 }
 
 type AnswerState = "typing" | "mistake-word-practice" | "word-meaning-review" | "sentence-complete";
-type EncodingStage = "meaning_intro" | "listen" | "chunk_trace" | "whole_recall" | "contextual_use";
+type EncodingStage = "meaning_intro" | "listen" | "chunk_trace" | "whole_recall";
 type WordStatus = "idle" | "correct" | "incorrect" | "skipped";
 type MistakePracticeStatus = "idle" | "incorrect";
 
@@ -532,7 +495,6 @@ function StudyContent() {
   const [encodingStage, setEncodingStage] = useState<EncodingStage | null>(null);
   const [encodingWord, setEncodingWord] = useState("");
   const [, setEncodingChineseText] = useState("");
-  const [encodingContextExample, setEncodingContextExample] = useState<{ english: string; chinese: string } | null>(null);
 
   const [currentStreak, setCurrentStreak] = useState(0);
   const [correctWordCount, setCorrectWordCount] = useState(0);
@@ -544,32 +506,12 @@ function StudyContent() {
   const feedbackSetAtRef = useRef<number>(0);
   const wordAnimKeyRef = useRef(0);
 
-  // P1-3: Fatigue detection — sliding window of last 10 reviews
-  const recentResultsRef = useRef<boolean[]>([]);
-  const [fatigueWarning, setFatigueWarning] = useState(false);
 
   // Focus mode rotation tracking
   const focusCorrectCountRef = useRef<Map<string, number>>(new Map());
   const [focusRotatedMessage, setFocusRotatedMessage] = useState<string | null>(null);
 
-  // P1-0: Daily review tracking for cap protection
-  const sessionReviewCountRef = useRef(0);
-  const [dailyCapWarning, setDailyCapWarning] = useState(false);
 
-  // Encouragement messages
-  const encourageTimerRef = useRef<number | null>(null);
-  const ENCOURAGEMENTS = [
-    "太厉害了！继续加油！🌟",
-    "你是最棒的！英语小达人！💪",
-    "又答对了！越来越熟练了！🎯",
-    "真棒！记忆力越来越好了！🧠",
-    "厉害！这个词已经记牢了！⭐",
-    "非常好！保持这个节奏！🔥",
-    "优秀！你比昨天更厉害了！📈",
-    "了不起！单词小能手！🏆",
-    "很好！你让家长感到骄傲！❤️",
-    "太强了！英语越来越简单了吧！😊",
-  ];
 
   // P2-2: Milestone tracking
   const [milestoneMessage, setMilestoneMessage] = useState<string | null>(null);
@@ -589,6 +531,7 @@ function StudyContent() {
   const isListeningChoiceReviewTask = currentItem?.review_task_type === "listen_choose_chinese";
   const isSingleWordReviewTask = Boolean(currentItem?.review_task_type && currentItem.review_task_type !== "cloze_sentence");
   const isSpellingReviewTask = Boolean(currentItem?.review_task_type && SPELLING_REVIEW_TASK_TYPES.has(currentItem.review_task_type));
+  const isSentenceCloze = currentItem?.review_task_type === "cloze_sentence";
   const currentFocusedReviewWord = dynamicReviewWords[0] ?? (isSingleWordReviewTask || currentItem?.item_type === "word" ? currentWords[0] : "");
   const shouldUseSingleWordPrompt = Boolean(!isChoiceReviewTask && (isSingleWordReviewTask || currentItem?.item_type === "word"));
   const isFocusedWordReview = Boolean(shouldUseSingleWordPrompt && currentFocusedReviewWord);
@@ -900,7 +843,7 @@ function StudyContent() {
     if (stage === "meaning_intro") { nextStage = "listen"; }
     else if (stage === "listen") { nextStage = "chunk_trace"; }
     else if (stage === "chunk_trace") { nextStage = "whole_recall"; }
-    else if (stage === "whole_recall") { nextStage = "contextual_use"; }
+    else if (stage === "whole_recall") { nextStage = null; }
 
     encodingStageStartTimeRef.current = Date.now();
     encodingStageRef.current = nextStage;
@@ -911,7 +854,6 @@ function StudyContent() {
       encodingStartTimeRef.current = 0;
       setEncodingWord("");
       setEncodingChineseText("");
-      setEncodingContextExample(null);
       updateAnswerState("sentence-complete");
       setFeedback("记忆编码完成！点击「下一题」按钮继续。", "success");
       return;
@@ -992,24 +934,6 @@ function StudyContent() {
       return;
     }
 
-    if (nextStage === "contextual_use") {
-      const templateIndex = word.length % CONTEXT_EXAMPLE_TEMPLATES.length;
-      const template = CONTEXT_EXAMPLE_TEMPLATES[templateIndex];
-      const exampleEnglish = template.english(word);
-      const exampleChinese = template.chinese(chineseText);
-      setEncodingContextExample({ english: exampleEnglish, chinese: exampleChinese });
-      setFeedback("例句：" + exampleChinese);
-      if (!isDictationModeRef.current) {
-        await speakInVoiceSequence(sequenceId, exampleChinese, settings.ttsChineseVoice, "zh-CN", settings);
-        if (await waitInVoiceSequence(sequenceId, 800)) {
-          await speakClearEnglish(sequenceId, exampleEnglish, settings, true);
-        }
-      }
-      encodingStageTimeoutRef.current = window.setTimeout(function () {
-        void advanceEncodingStage("contextual_use", word, chineseText);
-      }, 4000);
-      return;
-    }
   }, [clearEncodingTimeout, currentItem, speakClearEnglish, speakInVoiceSequence, startVoiceSequence, updateAnswerState, waitInVoiceSequence]);
 
   const startEncodingFn = useCallback(async function startEncoding(word: string, chineseText: string) {
@@ -1019,7 +943,6 @@ function StudyContent() {
     setEncodingStage("meaning_intro");
     setEncodingWord(word);
     setEncodingChineseText(chineseText);
-    setEncodingContextExample(null);
     setPreviewCountdownSeconds(0);
     clearEncodingTimeout();
     clearWordPreview();
@@ -1091,9 +1014,16 @@ function StudyContent() {
     const shouldUseSingleWordIntro = Boolean(!isChoiceIntroTask && ((item.review_task_type && item.review_task_type !== "cloze_sentence") || item.item_type === "word"));
     const focusedWord = (isChoiceIntroTask || shouldUseSingleWordIntro) ? focusedWords[0] ?? tokenizeEnglish(item.english_text)[0] ?? "" : "";
     if (isListenSpellTask && focusedWord) {
-      chineseText = "听英文发音后拼写";
+      // Focus mode items have pre-cached Chinese meanings in chinese_text
+      const hasCachedMeaning = item.focus_words && item.focus_words.length > 0 && hasChineseText(item.chinese_text);
+      if (hasCachedMeaning) {
+        chineseText = item.chinese_text;
+        setReviewTaskWordTranslation(item.chinese_text);
+      } else {
+        chineseText = "听英文发音后拼写";
+        setReviewTaskWordTranslation("");
+      }
       englishText = focusedWord;
-      setReviewTaskWordTranslation("");
     } else if (isChoiceIntroTask && focusedWord) {
       chineseText = item.review_task_type === "listen_choose_chinese" ? "听英文发音，选择中文意思" : "请选择这个英文单词的中文意思";
       englishText = focusedWord;
@@ -1107,6 +1037,13 @@ function StudyContent() {
         setReviewTaskWordTranslation("");
       }
     } else if (shouldUseSingleWordIntro && focusedWord) {
+      // Focus mode items have pre-cached Chinese meanings in chinese_text
+      const hasCachedMeaning = item.focus_words && item.focus_words.length > 0 && hasChineseText(item.chinese_text);
+      if (hasCachedMeaning) {
+        chineseText = item.chinese_text;
+        setReviewTaskWordTranslation(item.chinese_text);
+        englishText = focusedWord;
+      } else {
       try {
         const accessToken = getAccessToken();
         if (accessToken) {
@@ -1115,12 +1052,13 @@ function StudyContent() {
           setReviewTaskWordTranslation(response.chinese_text);
           englishText = focusedWord;
         } else {
-          chineseText = "中文释义准备中";
+          chineseText = "";
           englishText = focusedWord;
         }
       } catch {
-        chineseText = "中文释义准备中";
+        chineseText = "";
         englishText = focusedWord;
+      }
       }
     }
 
@@ -1128,10 +1066,27 @@ function StudyContent() {
       return;
     }
 
+    // P1-6: Auto-skip items without a valid Chinese translation.
+    // No child should ever see a word without Chinese context.
+    if (shouldUseSingleWordIntro && focusedWord && !hasChineseText(chineseText)) {
+      handleNextItem({ completedCurrentItem: true });
+      return;
+    }
+
     if (!(await waitInVoiceSequence(sequenceId, 1000))) {
       return;
     }
     if (item.review_task_type === "listen_choose_chinese" || item.review_task_type === "listen_spell") {
+      // Focus mode: speak Chinese meaning first, then English
+      const isFocusListenSpell = item.review_task_type === "listen_spell" && item.focus_words && item.focus_words.length > 0 && hasChineseText(chineseText);
+      if (isFocusListenSpell) {
+        if (!(await speakInVoiceSequence(sequenceId, chineseText, settings.ttsChineseVoice, "zh-CN", settings))) {
+          return;
+        }
+        if (!(await waitInVoiceSequence(sequenceId, 600))) {
+          return;
+        }
+      }
       await speakClearEnglish(sequenceId, englishText, settings, false);
       return;
     }
@@ -1467,10 +1422,10 @@ function StudyContent() {
     // Previously only triggered for non-review-task word items (almost never).
     // Now also triggers for word review items that are single-word and new/weak.
     const isNewWord = Boolean(currentItem && !currentItem.review_task_type && currentItem.item_type === "word" && currentWords[0]);
-    // Only trigger encoding for hidden_recall and recall_word tasks
+    // Only trigger encoding for hidden_recall tasks
     // where the child needs to memorize the word before spelling it.
     // listen_spell, chinese_to_english, missing_letter should NOT show the word first.
-    const ENCODING_REVIEW_TYPES = new Set(["hidden_recall", "recall_word"]);
+    const ENCODING_REVIEW_TYPES = new Set(["hidden_recall"]);
     const isSpellingReview = Boolean(
       currentItem && currentItem.review_task_type && currentItem.item_type === "word"
       && currentWords.length === 1 && currentWords[0]
@@ -2057,7 +2012,7 @@ function StudyContent() {
       return;
     }
     if (isFocusedWordReview && currentFocusedReviewWord) {
-      await playChineseThenEnglish(reviewTaskWordTranslation || "中文释义准备中", currentFocusedReviewWord);
+      await playChineseThenEnglish(reviewTaskWordTranslation || "", currentFocusedReviewWord);
       return;
     }
     await playChineseThenEnglish(currentItem.chinese_text, currentItem.english_text);
@@ -2175,14 +2130,6 @@ function StudyContent() {
         const wordKey = normalizeEnglishKey(expectedWord);
         focusCorrectCountRef.current.set(wordKey, 0);
       }
-      // P1-3: Fatigue detection — track last 10 results, warn if ≥3 wrong
-      recentResultsRef.current.push(false);
-      if (recentResultsRef.current.length > 10) recentResultsRef.current.shift();
-      const recentWrong = recentResultsRef.current.filter((r) => !r).length;
-      if (recentWrong >= 3 && recentResultsRef.current.length >= 10 && !fatigueWarning) {
-        setFatigueWarning(true);
-        setFeedback("今天学得很认真！有点累了就休息一下，休息好了再继续。", "info");
-      }
       wordAnimKeyRef.current += 1;
       setWordAnimations((current) => ({ ...current, [index]: { type: "incorrect", key: wordAnimKeyRef.current } }));
       setTimeout(() => {
@@ -2273,36 +2220,10 @@ function StudyContent() {
     }
 
     playCorrectDing();
-    // P1-3: Track correct result in fatigue window
-    recentResultsRef.current.push(true);
-    if (recentResultsRef.current.length > 10) recentResultsRef.current.shift();
     setCurrentStreak((s) => s + 1);
 
-    // Encouragement: random cheer every 5 correct answers
-    sessionReviewCountRef.current += 1;
-    if (sessionReviewCountRef.current % 5 === 0) {
-      const msg = ENCOURAGEMENTS[Math.floor(Math.random() * ENCOURAGEMENTS.length)];
-      setFeedback(msg, "success");
-      playCorrectDing();
-    }
 
-    // P1-0: Daily review cap — warn after 300, force stop after 500
-    if (sessionReviewCountRef.current === 300) {
-      setFeedback("今天已经学了很多了！适当休息效果更好 💤", "info");
-    }
-    if (sessionReviewCountRef.current >= 500 && !dailyCapWarning) {
-      setDailyCapWarning(true);
-      setFeedback("🏆 今天学习了500+次，非常努力！建议休息，明天继续。", "success");
-    }
 
-    // P1-2: Smart stop — declining accuracy in last 50 reviews
-    if (sessionReviewCountRef.current >= 50 && sessionReviewCountRef.current % 25 === 0) {
-      const recent50 = recentResultsRef.current.slice(-50);
-      const recentAcc = recent50.filter(Boolean).length / recent50.length;
-      if (recentAcc < 0.45 && !dailyCapWarning) {
-        setFeedback("最近正确率有点低，累了就休息一下，休息好了效率更高！💪", "info");
-      }
-    }
     setCorrectWordCount((c) => c + 1);
     wordAnimKeyRef.current += 1;
     setWordAnimations((current) => ({ ...current, [index]: { type: "correct", key: wordAnimKeyRef.current } }));
@@ -2343,7 +2264,7 @@ function StudyContent() {
       setTimeout(() => setMilestoneMessage(null), 4000);
     }
 
-    // After encoding whole_recall success, advance to contextual_use stage
+    // After encoding whole_recall success, complete encoding
     if (encodingStageRef.current === "whole_recall") {
       setWordErrorCounts((current) => {
         const nextCounts = [...current];
@@ -2723,12 +2644,14 @@ function StudyContent() {
     : "min-w-32 ipad:min-w-32 ipad:text-sm ipad-lg:min-w-36 ipad-lg:text-base";
   const displayChinesePrompt = isStudyFullscreen && answerState === "mistake-word-practice"
     ? currentMistakePracticeTranslation || currentItem?.chinese_text || ""
-    : currentItem?.review_task_type === "listen_spell"
-      ? "听英文发音后拼写"
+    : isFocusedWordReview && currentItem?.source?.startsWith("聚焦 ") && hasChineseText(currentItem?.chinese_text)
+      ? currentItem.chinese_text  // focus mode: pre-cached meaning from backend
     : isChoiceReviewTask
       ? "请选择这个英文单词的中文意思"
+    : currentItem?.review_task_type === "listen_spell" && !hasChineseText(currentItem?.chinese_text)
+      ? "听英文发音后拼写"
     : isFocusedWordReview
-      ? reviewTaskWordTranslation || "中文释义准备中"
+      ? (hasChineseText(currentItem?.chinese_text) ? currentItem.chinese_text : reviewTaskWordTranslation) || ""
       : currentItem?.chinese_text || "";
 
   return (
@@ -2780,12 +2703,6 @@ function StudyContent() {
       {milestoneMessage ? (
         <div className="fixed left-1/2 top-6 z-40 -translate-x-1/2 animate-bounce rounded-full bg-amber-400 px-6 py-3 text-base font-bold text-white shadow-lg ipad:px-8 ipad:py-4 ipad:text-lg">
           {milestoneMessage}
-        </div>
-      ) : null}
-      {fatigueWarning ? (
-        <div className="fixed left-1/2 top-6 z-40 -translate-x-1/2 rounded-full bg-blue-400 px-6 py-3 text-sm font-semibold text-white shadow-lg ipad:text-base">
-          今天学得很认真！有点累了就休息一下 😊
-          <button className="ml-3 rounded-full bg-white/20 px-2 py-0.5 text-xs hover:bg-white/30" onClick={() => setFatigueWarning(false)}>知道了</button>
         </div>
       ) : null}
       {isStudyFullscreen ? (
@@ -2873,7 +2790,7 @@ function StudyContent() {
                   音标: {currentItem.phonetic}
                 </p>
               ) : null}
-              {encodingStage && encodingStage !== "whole_recall" && encodingStage !== "contextual_use" && answerState === "typing" ? (
+              {encodingStage && encodingStage !== "whole_recall" && answerState === "typing" ? (
                 <div className="mx-auto flex max-w-3xl flex-col items-center gap-4">
                   {encodingStage === "listen" ? (
                     <div className="flex flex-col items-center gap-4">
@@ -2903,13 +2820,6 @@ function StudyContent() {
                     </div>
                   ) : null}
                 </div>
-              ) : encodingStage === "contextual_use" && encodingContextExample ? (
-                <div className="mx-auto flex max-w-3xl flex-col items-center gap-3 rounded-lg border-2 border-emerald-200 bg-emerald-50 px-6 py-5 ipad:px-8 ipad:py-6">
-                  <p className="text-base font-bold text-emerald-700 ipad:text-lg">例句练习</p>
-                  <p className="text-2xl font-semibold text-slate-900 ipad:text-3xl">{encodingContextExample.english}</p>
-                  <p className="text-lg text-slate-600 ipad:text-xl">{encodingContextExample.chinese}</p>
-                  <p className="text-sm font-bold text-emerald-600">已成功记忆：{encodingWord}</p>
-                </div>
               ) : null}
               {encodingStage === "whole_recall" && previewCountdownSeconds > 0 ? (
                 <div className="mx-auto rounded-md bg-amber-100 px-6 py-3 text-4xl font-bold text-amber-950 ipad:text-5xl ipad-lg:text-6xl">{encodingWord}</div>
@@ -2930,7 +2840,7 @@ function StudyContent() {
                   <p className="text-4xl font-bold text-slate-900 ipad:text-5xl ipad-lg:text-6xl">{isListeningChoiceReviewTask ? "听读音，选中文" : currentWords[0]}</p>
                   <p className="text-sm font-medium text-slate-500 ipad:text-base">按数字键 1-6 选择，空格键确认</p>
                   <div className="grid w-full max-w-xl grid-cols-2 gap-3">
-                    {(choiceReviewOptions.length > 0 ? choiceReviewOptions : ["中文释义准备中"]).map((choice, index) => {
+                    {(choiceReviewOptions.length > 0 ? choiceReviewOptions : []).map((choice, index) => {
                       const isSelected = selectedChoice === choice;
                       const hasResult = choiceResult !== null;
                       const isChosenResult = hasResult && isSelected;
@@ -2945,7 +2855,7 @@ function StudyContent() {
                           } ${
                             !hasResult && isSelected ? "border-2 border-emerald-500 bg-emerald-50 text-emerald-700 shadow-sm" : ""
                           }`}
-                          disabled={hasResult || answerState !== "typing" || choice === "中文释义准备中"}
+                          disabled={hasResult || answerState !== "typing" }
                           key={`${choice}-${index}`}
                           onClick={() => { if (answerState === "typing" && !hasResult) { setSelectedChoice(choice); setFeedback(null); } }}
                           type="button"
@@ -3010,7 +2920,7 @@ function StudyContent() {
                         status={status}
                         value={wordAnswers[index] ?? ""}
                         isActive={activeWordIndex === index && answerState === "typing" && shouldShowInput}
-                        isDynamicBlank={isDynamicBlank}
+                        isDynamicBlank={isDynamicBlank && isSentenceCloze}
                         isRespellNonTarget={isRespellNonTarget}
                         isRespellTarget={isRespellTarget}
                         shouldShowInput={shouldShowInput}
@@ -3055,7 +2965,7 @@ function StudyContent() {
                   ) : (
                     <>
                       <Button className={actionButtonClass} disabled={answerState !== "typing" || isChoiceReviewTask} onClick={() => runStudyButtonAction(() => checkWord(activeWordIndex))} onMouseDown={keepStudyInputFocus} type="button">
-                        {isDynamicFillBlankItem ? "判定填空" : "判定单词"}
+                        {(isDynamicFillBlankItem && isSentenceCloze) ? "判定填空" : "判定单词"}
                       </Button>
                       <Button className={actionButtonClass} onClick={handleSpeakEnglish} onMouseDown={keepStudyInputFocus} type="button" variant="secondary">朗读英文</Button>
                     </>

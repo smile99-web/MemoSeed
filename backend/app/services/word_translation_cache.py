@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.models.word_translation import WordTranslation
 from app.services.llm_translation import LlmTranslationSettings, translate_english_to_chinese
 from app.utils import normalize_word, tokenize_words
+from app.services.word_dictionary import BUILTIN_WORD_DICTIONARY
 
 
 def extract_unique_words(texts: list[str]) -> list[str]:
@@ -59,6 +60,12 @@ def ensure_word_translations(
         for word, translation in cached_translations.items()
         if is_valid_chinese_translation(word, translation)
     }
+    # P2: Fill from built-in dictionary (instant, no API call needed)
+    for word in normalized_words:
+        if word not in translations and word in BUILTIN_WORD_DICTIONARY:
+            builtin = BUILTIN_WORD_DICTIONARY[word]
+            if is_valid_chinese_translation(word, builtin):
+                translations[word] = builtin
     missing_words = [word for word in normalized_words if word not in translations]
     if settings is None:
         return translations

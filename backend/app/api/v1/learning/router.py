@@ -1,6 +1,6 @@
 import json
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID
@@ -68,7 +68,6 @@ from app.utils import extract_mistake_words, normalize_word, string_setting, tok
 router = APIRouter()
 
 WORD_MEMORY_SOURCE = "word-memory"
-AI_CLOZE_CACHE_TYPE = "ai_cloze_sentence"
 GENERIC_WORD_DISTRACTORS = [
     "老师",
     "学生",
@@ -110,122 +109,6 @@ BASIC_WORD_TRANSLATIONS = {
     "you": "你",
 }
 CHINESE_SENTENCE_MARKERS = set("，。！？；：,.!?;:、 \n\r\t")
-FALLBACK_CLOZE_SENTENCE_TEMPLATES = (
-    ("I see {word}.", "我看见 {word} 这个单词。"),
-    ("We like {word}.", "我们喜欢 {word} 这个单词。"),
-    ("Please read {word}.", "请读出 {word} 这个单词。"),
-    ("This word is {word}.", "这个单词是 {word}。"),
-    ("Say {word} with me.", "和我一起说 {word}。"),
-    ("I remember {word}.", "我记得 {word} 这个单词。"),
-    ("Let us spell {word}.", "让我们拼写 {word}。"),
-    ("Can you find {word}?", "你能找到 {word} 吗？"),
-)
-
-
-def choose_cloze_sentence_template(word: str, seed: str) -> tuple[str, str]:
-    template_index = sum(ord(char) for char in seed) % len(FALLBACK_CLOZE_SENTENCE_TEMPLATES)
-    english_template, chinese_template = FALLBACK_CLOZE_SENTENCE_TEMPLATES[template_index]
-    return english_template.format(word=word), chinese_template.format(word=word)
-
-
-def build_cloze_sentence_text(word: str, seed: str) -> str:
-    english_text, _ = choose_cloze_sentence_template(word, seed)
-    return english_text
-
-
-def build_cloze_sentence_chinese_text(word: str, seed: str) -> str:
-    _, chinese_text = choose_cloze_sentence_template(word, seed)
-    return chinese_text
-
-
-def parse_compact_json_object(raw_text: str) -> dict[str, object]:
-    normalized_text = raw_text.strip()
-    if normalized_text.startswith("```"):
-        normalized_text = normalized_text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    json_start = normalized_text.find("{")
-    json_end = normalized_text.rfind("}")
-    if json_start >= 0 and json_end >= json_start:
-        normalized_text = normalized_text[json_start : json_end + 1]
-    parsed = json.loads(normalized_text)
-    if not isinstance(parsed, dict):
-        raise ValueError("LLM cloze sentence response is not a JSON object")
-    return parsed
-
-
-def get_cached_ai_cloze_sentence(task: WordReviewTask) -> tuple[str, str] | None:
-    for entry in task.choices or []:
-        if not isinstance(entry, dict) or entry.get("type") != AI_CLOZE_CACHE_TYPE:
-            continue
-        english_text = str(entry.get("english_text") or "").strip()
-        chinese_text = str(entry.get("chinese_text") or "").strip()
-        if english_text and chinese_text:
-            return english_text, chinese_text
-    return None
-
-
-def validate_ai_cloze_sentence(word: str, english_text: str, chinese_text: str) -> tuple[str, str]:
-    normalized_english = " ".join(english_text.strip().strip('"“”').split())
-    normalized_chinese = chinese_text.strip().strip('"“”')
-    if not normalized_english or not normalized_chinese:
-        raise ValueError("LLM cloze sentence response is incomplete")
-    if normalize_word(word) not in set(tokenize_words(normalized_english)):
-        raise ValueError("LLM cloze sentence does not contain the review word")
-    if len(tokenize_words(normalized_english)) > 7:
-        raise ValueError("LLM cloze sentence is longer than 7 words")
-    if normalized_english[-1] not in ".?!":
-        normalized_english = f"{normalized_english}."
-    return normalized_english, normalized_chinese
-
-
-def generate_ai_cloze_sentence(word: str, settings: LlmTranslationSettings, error_type: str = "", mistake_count: int = 0) -> tuple[str, str]:
-    error_hint = ""
-    if error_type and error_type != "spelling":
-        error_hint = f"The child often struggles with '{error_type}' errors for this word. "
-    if mistake_count >= 3:
-        error_hint += f"This word has been missed {mistake_count} times. Make the sentence especially memorable and vivid. "
-
-    prompt = (
-        "Generate one simple English sentence for a Chinese child learning English. "
-        "Return only compact JSON with keys english_text and chinese_text. "
-        "Rules: english_text must contain the exact review word once, use 7 English words or fewer. "
-        "Make the sentence fun, relatable to a child's daily life (school, family, play, food, animals). "
-        "Do NOT use fixed phrases like 'I can spell...' or 'I see...'. Be creative. "
-        f"{error_hint}"
-        "chinese_text must be a natural Simplified Chinese translation of english_text. "
-        f"Review word: {word}"
-    )
-    body = parse_compact_json_object(generate_learning_text(prompt, settings))
-    return validate_ai_cloze_sentence(word, str(body.get("english_text") or ""), str(body.get("chinese_text") or ""))
-
-
-def build_cloze_sentence_pair(task: WordReviewTask, settings: LlmTranslationSettings | None, db: Session | None = None) -> tuple[str, str, bool]:
-    cached_pair = get_cached_ai_cloze_sentence(task)
-    if cached_pair is not None:
-        return cached_pair[0], cached_pair[1], False
-
-    if settings is not None:
-        try:
-            # Look up error context for personalized AI sentence
-            err_type = ""
-            err_count = 0
-            if db is not None:
-                word_state = db.scalar(select(WordMemoryState).where(
-                    WordMemoryState.user_id == task.user_id,
-                    WordMemoryState.word == task.word,
-                ))
-                if word_state:
-                    err_counts = word_state.error_type_counts or {}
-                    err_type = max(err_counts.items(), key=lambda x: x[1])[0] if err_counts else ""
-                    err_count = sum(err_counts.values())
-
-            english_text, chinese_text = generate_ai_cloze_sentence(task.word, settings, err_type, err_count)
-            task.choices = [{"type": AI_CLOZE_CACHE_TYPE, "english_text": english_text, "chinese_text": chinese_text}]
-            return english_text, chinese_text, True
-        except ValueError:
-            pass
-
-    cloze_seed = f"{task.id}:{task.word}:{task.created_at.isoformat()}"
-    return build_cloze_sentence_text(task.word, cloze_seed), build_cloze_sentence_chinese_text(task.word, cloze_seed), False
 
 
 def build_micro_task_learning_item(
@@ -234,34 +117,29 @@ def build_micro_task_learning_item(
     current_user: User,
     cloze_settings: LlmTranslationSettings | None = None,
     db: Session | None = None,
+    word_translations: dict[str, str] | None = None,
 ) -> tuple[LearningItemRead, bool]:
     task_updated = False
-    if task.task_type == "cloze_sentence":
-        english_text, chinese_text, task_updated = build_cloze_sentence_pair(task, cloze_settings, db)
-        review_prompt = chinese_text
-        source = f"AI 动态复习：{task.word}"
-        item_type = "sentence"
-        raw_choices = []
-        review_answer = task.expected_answer
-    else:
-        english_text = task.word
-        chinese_text = task.prompt_text
-        review_prompt = task.prompt_text
-        source = f"微型任务：{task.task_type}：{task.word}"
-        item_type = "word"
-        raw_choices = [str(choice) for choice in task.choices]
-        review_answer = raw_choices[0] if raw_choices else task.expected_answer
-        # Enrich choice tasks: ensure 6 choices with the word's real Chinese translation
-        if task.task_type in {"listen_choose_chinese", "english_to_chinese", "match_translation"} and db is not None:
-            enriched, correct_answer = _enrich_review_choices(db, current_user.id, task, raw_choices, cloze_settings)
-            raw_choices = enriched
-            review_answer = correct_answer
-            task.choices = raw_choices
-            db.add(task)
-            task_updated = True
-        if len(raw_choices) > 1:
-            shift = len(task.word) % len(raw_choices)
-            raw_choices = raw_choices[shift:] + raw_choices[:shift]
+    english_text = task.word
+    # Use pre-cached Chinese translation if available; fall back to prompt text
+    cached_translation = (word_translations or {}).get(task.word.strip().lower(), "")
+    chinese_text = cached_translation if cached_translation else task.prompt_text
+    review_prompt = task.prompt_text
+    source = f"微型任务：{task.task_type}：{task.word}"
+    item_type = "word"
+    raw_choices = [str(choice) for choice in task.choices]
+    review_answer = raw_choices[0] if raw_choices else task.expected_answer
+    # Enrich choice tasks: ensure 6 choices with the word's real Chinese translation
+    if task.task_type in {"listen_choose_chinese", "english_to_chinese", "match_translation"} and db is not None:
+        enriched, correct_answer = _enrich_review_choices(db, current_user.id, task, raw_choices, cloze_settings)
+        raw_choices = enriched
+        review_answer = correct_answer
+        task.choices = raw_choices
+        db.add(task)
+        task_updated = True
+    if len(raw_choices) > 1:
+        shift = len(task.word) % len(raw_choices)
+        raw_choices = raw_choices[shift:] + raw_choices[:shift]
 
     return LearningItemRead(
         id=task.id,
@@ -606,18 +484,30 @@ def build_llm_translation_settings(
 
 
 @router.get("/items", response_model=list[LearningItemRead])
-def _recent_accuracy(db: Session, user_id: UUID, days: int = 3) -> float:
-    """Return accuracy rate over the last N days."""
-    cutoff = datetime.now(UTC) - timedelta(days=days)
-    total = db.scalar(select(func.count(ReviewLog.id)).where(
-        ReviewLog.user_id == user_id, ReviewLog.reviewed_at >= cutoff
-    )) or 0
-    if total == 0:
-        return 0.5  # default: assume moderate
-    correct = db.scalar(select(func.count(ReviewLog.id)).where(
-        ReviewLog.user_id == user_id, ReviewLog.reviewed_at >= cutoff, ReviewLog.is_correct.is_(True)
-    )) or 0
-    return round(correct / total, 2)
+def list_learning_items(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    course_id: UUID | None = None,
+    limit: int | None = None,
+) -> list[LearningItemRead]:
+    statement = (
+        select(LearningItem)
+        .outerjoin(MemoryState, MemoryState.learning_item_id == LearningItem.id)
+        .where(LearningItem.user_id == current_user.id)
+    )
+    if course_id is not None:
+        statement = statement.where(LearningItem.course_id == course_id)
+    # Sort overdue items first (nulls last = never-reviewed/new items go after due items)
+    statement = statement.order_by(
+        MemoryState.next_review_at.is_(None),
+        MemoryState.next_review_at.asc(),
+        LearningItem.sort_order.asc(),
+        LearningItem.created_at.asc(),
+    )
+    if limit is not None and limit > 0:
+        statement = statement.limit(limit)
+    items = db.scalars(statement).all()
+    return [LearningItemRead.model_validate(item) for item in items]
 
 
 # Phonics pattern groups for batch teaching
@@ -743,6 +633,19 @@ def list_due_review_items(
         .limit(effective_review_cap * 3)
     ).all()
     covered_task_words = {task.word for task, _source_item in task_rows}
+    # P1-5: Filter out removed task types (recall_word, cloze_sentence).
+    REMOVED_TASK_TYPES = {"recall_word", "cloze_sentence"}
+    task_rows = [(t, s) for t, s in task_rows if t.task_type not in REMOVED_TASK_TYPES]
+    # P1-4: Pre-cache Chinese translations for ALL review task words.
+    # Filter out words that don't have valid Chinese translations.
+    unique_task_words = list({tw.strip().lower() for tw in covered_task_words if tw.strip()})
+    task_word_translations: dict[str, str] = {}
+    if unique_task_words:
+        task_word_translations = ensure_word_translations(
+            db, current_user.id, unique_task_words, cloze_settings, None
+        )
+    valid_task_words = {w for w, t in task_word_translations.items() if t}
+
     task_review_items: list[LearningItemRead] = []
     queued_task_words: set[str] = set()
     deferred_task_rows: list[tuple[WordReviewTask, LearningItem | None]] = []
@@ -750,7 +653,9 @@ def list_due_review_items(
         if task.word in queued_task_words:
             deferred_task_rows.append((task, source_item))
             continue
-        task_item, task_updated = build_micro_task_learning_item(task, source_item, current_user, cloze_settings, db)
+        if task.word.strip().lower() not in valid_task_words:
+            continue  # skip words without Chinese translation
+        task_item, task_updated = build_micro_task_learning_item(task, source_item, current_user, cloze_settings, db, task_word_translations)
         task_review_items.append(task_item)
         has_task_updates = has_task_updates or task_updated
         queued_task_words.add(task.word)
@@ -758,7 +663,7 @@ def list_due_review_items(
             break
     if len(task_review_items) < effective_review_cap:
         for task, source_item in deferred_task_rows:
-            task_item, task_updated = build_micro_task_learning_item(task, source_item, current_user, cloze_settings, db)
+            task_item, task_updated = build_micro_task_learning_item(task, source_item, current_user, cloze_settings, db, task_word_translations)
             task_review_items.append(task_item)
             has_task_updates = has_task_updates or task_updated
             if len(task_review_items) >= effective_review_cap:
@@ -794,6 +699,9 @@ def list_due_review_items(
     for item in item_by_id.values():
         if item.item_type == "word" and item.source == WORD_MEMORY_SOURCE and normalize_word(item.english_text) in covered_task_words:
             continue
+        # Skip items without Chinese text — no child should see a word without Chinese context
+        if not item.chinese_text or not any("\u4e00" <= c <= "\u9fff" for c in item.chinese_text):
+            continue
         item_read = LearningItemRead.model_validate(item)
         focus_words = focus_words_by_item_id.get(item.id, [])
         if focus_words:
@@ -805,7 +713,7 @@ def list_due_review_items(
     if focus and sentence_review_items:
         # Focus mode: top 7-9 words, warm-up order, phonics grouping.
         FOCUS_WORD_COUNT = 7
-        FOCUS_MODES = ["recall_word", "english_to_chinese", "listen_spell"]
+        FOCUS_MODES = ["chinese_to_english", "english_to_chinese", "listen_spell"]
 
         # P0-1: Warm-up — sort by strength (highest first = easiest words first)
         def _item_strength(item: LearningItemRead) -> float:
@@ -834,16 +742,41 @@ def list_due_review_items(
                             break
         top_items = (top_items + extra_items)[:FOCUS_WORD_COUNT + 2]
 
+        # P1-3: Pre-cache Chinese translations for all focus words.
+        # Children need Chinese context to understand what they're spelling.
+        focus_words_set: set[str] = set()
+        for item in top_items:
+            for w in tokenize_words(item.english_text):
+                focus_words_set.add(w.strip().lower())
+        word_translations: dict[str, str] = {}
+        if focus_words_set:
+            word_translations = ensure_word_translations(
+                db, current_user.id, list(focus_words_set), cloze_settings, None
+            )
+            # Filter out words that don't have valid Chinese translations
+            valid_words = {w for w, t in word_translations.items() if t}
+            top_items = [
+                item for item in top_items
+                if any(w.strip().lower() in valid_words for w in tokenize_words(item.english_text))
+            ]
+
         focus_items: list[LearningItemRead] = []
         for item in top_items:
             words = tokenize_words(item.english_text)
             if not words:
                 continue
+            main_word = words[0].strip().lower()
+            chinese_meaning = word_translations.get(main_word, "")
             for mode in FOCUS_MODES:
-                focus_items.append(item.model_copy(update={
+                # Set chinese_text to the actual meaning, not the task prompt.
+                # The frontend uses chinese_text for display and reviewTaskWordTranslation for context.
+                focus_item = item.model_copy(update={
                     "review_task_type": mode,
+                    "chinese_text": chinese_meaning,
                     "source": f"聚焦 {words[0]}",
-                }))
+                    "focus_words": [main_word],
+                })
+                focus_items.append(focus_item)
         return task_review_items[:3] + focus_items
 
     if interleave and task_review_items and sentence_review_items:
@@ -1322,6 +1255,12 @@ def create_word_review(
             pass  # points failure should never block learning
     if not result.review_log.is_correct:
         schedule_micro_review_tasks_for_mistake(db, current_user.id, word_state, learning_item.chinese_text, learning_item.id, error_type or "spelling")
+        # Deduct points for wrong answer
+        try:
+            from app.services.points_service import POINTS_WRONG, award_points
+            award_points(db, current_user.id, POINTS_WRONG, "word_wrong", f"拼写错误 {POINTS_WRONG}", word_item.id)
+        except Exception:
+            pass  # points failure should never block learning
     db.commit()
     return WordReviewResponse(learning_item_id=word_item.id, word=word_item.english_text)
 

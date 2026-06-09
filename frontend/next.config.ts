@@ -4,6 +4,9 @@ const nextConfig: NextConfig = {
   reactStrictMode: true,
   devIndicators: false,
   output: "standalone",
+  turbopack: {
+    root: __dirname,
+  },
   async rewrites() {
     return [
       {

@@ -30,23 +30,20 @@ TASK_TYPE_LABELS = {
     "english_to_chinese": "英文选中文",
     "match_translation": "中英文配对",
     "missing_letter": "缺字母填空",
-    "cloze_sentence": "短句填空",
     "hidden_recall": "看 5 秒后隐藏重拼",
-    "recall_word": "无提示拼写",
 }
 
 ERROR_TYPE_TASK_STRATEGIES = {
-    "first-letter": ["listen_choose_chinese", "english_to_chinese", "chinese_to_english", "listen_spell", "cloze_sentence"],
-    "meaning": ["listen_choose_chinese", "english_to_chinese", "chinese_to_english", "match_translation", "cloze_sentence"],
-    "middle": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
-    "sequence": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
-    "ending": ["english_to_chinese", "missing_letter", "cloze_sentence", "hidden_recall", "recall_word"],
-    "missing-letter": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
-    "extra-letter": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell", "cloze_sentence"],
-    "unknown": ["english_to_chinese", "hidden_recall", "chinese_to_english", "listen_spell", "missing_letter", "cloze_sentence"],
-    # P2-2: Spelling errors → sentence-based review for contextual reinforcement
-    "spelling": ["cloze_sentence", "english_to_chinese", "missing_letter", "listen_spell", "recall_word"],
-    "spelling-spelling": ["cloze_sentence", "english_to_chinese", "missing_letter", "listen_spell", "recall_word"],
+    "first-letter": ["listen_choose_chinese", "english_to_chinese", "chinese_to_english", "listen_spell"],
+    "meaning": ["listen_choose_chinese", "english_to_chinese", "chinese_to_english", "match_translation"],
+    "middle": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell"],
+    "sequence": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell"],
+    "ending": ["english_to_chinese", "missing_letter", "hidden_recall", "chinese_to_english"],
+    "missing-letter": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell"],
+    "extra-letter": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell"],
+    "unknown": ["english_to_chinese", "hidden_recall", "chinese_to_english", "listen_spell", "missing_letter"],
+    "spelling": ["english_to_chinese", "missing_letter", "listen_spell", "chinese_to_english"],
+    "spelling-spelling": ["english_to_chinese", "missing_letter", "listen_spell", "chinese_to_english"],
 }
 
 TEACHING_TIPS = {
@@ -394,11 +391,9 @@ def get_decayed_error_weights(word_state: WordMemoryState, now: datetime) -> dic
 
 def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[str]:
     now_utc = datetime.now(UTC)
-    base_sequence = ERROR_TYPE_TASK_STRATEGIES.get(error_type, ["chinese_to_english", "listen_spell", "missing_letter", "cloze_sentence"])
+    base_sequence = ERROR_TYPE_TASK_STRATEGIES.get(error_type, ["chinese_to_english", "listen_spell", "missing_letter"])
     if word_state.consecutive_error_count >= 3 and "hidden_recall" not in base_sequence[:2]:
         base_sequence = ["hidden_recall", *base_sequence]
-    if word_state.preview_correct_count > word_state.recall_correct_count and "recall_word" not in base_sequence:
-        base_sequence = [*base_sequence, "recall_word"]
 
     task_counts = {str(key): int(value or 0) for key, value in (word_state.task_type_counts or {}).items()}
     decayed_errors = get_decayed_error_weights(word_state, now_utc)
@@ -407,7 +402,7 @@ def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[s
     for task_type in base_sequence:
         if task_type not in deduped_sequence:
             deduped_sequence.append(task_type)
-    fallback_tasks = ["listen_choose_chinese", "english_to_chinese", "chinese_to_english", "listen_spell", "missing_letter", "cloze_sentence", "recall_word"]
+    fallback_tasks = ["listen_choose_chinese", "english_to_chinese", "chinese_to_english", "listen_spell", "missing_letter"]
     for task_type in fallback_tasks:
         if task_type not in deduped_sequence:
             deduped_sequence.append(task_type)
@@ -422,9 +417,7 @@ def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[s
         "match_translation": ["meaning"],
         "listen_spell": ["first-letter", "middle", "sequence", "missing-letter", "extra-letter"],
         "missing_letter": ["middle", "sequence", "missing-letter", "extra-letter", "ending"],
-        "cloze_sentence": ["first-letter", "meaning", "middle", "sequence", "missing-letter", "extra-letter", "ending"],
         "hidden_recall": ["middle", "sequence", "ending", "unknown"],
-        "recall_word": ["ending"],
     }
     task_error_weight: dict[str, float] = {}
     for t in deduped_sequence[:4]:
@@ -450,12 +443,8 @@ def build_task_prompt(task_type: str, word: str, fallback_prompt: str) -> str:
         return f"把 {word} 和正确中文配对"
     if task_type == "missing_letter":
         return f"补全缺失字母：{mask_learning_letters(word)}"
-    if task_type == "cloze_sentence":
-        return f"在短句中填入 {word}。"
     if task_type == "hidden_recall":
         return f"先看 5 秒，再隐藏重拼：{word}"
-    if task_type == "recall_word":
-        return "无提示拼写这个单词"
     return f"根据中文意思拼写英文：{word}"
 
 

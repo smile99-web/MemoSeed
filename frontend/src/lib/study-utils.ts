@@ -154,9 +154,6 @@ export function buildReviewTaskInstruction(taskType: string | undefined, word: s
   if (taskType === "hidden_recall") {
     return "看 5 秒后会隐藏，再凭记忆重拼。";
   }
-  if (taskType === "recall_word") {
-    return "不看答案，直接凭记忆拼写。";
-  }
   if (taskType === "cloze_sentence") {
     return "只填写错过的单词。";
   }
@@ -176,7 +173,6 @@ export function getReviewTaskModeLabel(taskType: string | undefined): string {
     missing_letter: "缺字母填空",
     cloze_sentence: "短句填空",
     hidden_recall: "隐藏重拼",
-    recall_word: "无提示拼写",
   };
   return taskType ? labels[taskType] ?? "专项复习" : "";
 }
@@ -444,13 +440,6 @@ export function getAdaptivePreviewDuration(word: string): number {
   return 15000;
 }
 
-export const CONTEXT_EXAMPLE_TEMPLATES: Array<{ english: (w: string) => string; chinese: (w: string) => string }> = [
-  { english: (w) => `Look! I can see a ${w}.`, chinese: (w) => `看！我能看见一个${w}。` },
-  { english: (w) => `The ${w} is very nice.`, chinese: (w) => `这个${w}非常好。` },
-  { english: (w) => `I like this ${w}.`, chinese: (w) => `我喜欢这个${w}。` },
-  { english: (w) => `Can you find the ${w}?`, chinese: (w) => `你能找到${w}吗？` },
-  { english: (w) => `Here is a lovely ${w}.`, chinese: (w) => `这里有一个可爱的${w}。` },
-];
 
 export const commonPartLabels: Record<string, string> = {
   i: "代词",
