@@ -3,7 +3,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -713,7 +713,7 @@ def list_due_review_items(
     if focus and sentence_review_items:
         # Focus mode: top 7-9 words, warm-up order, phonics grouping.
         FOCUS_WORD_COUNT = 7
-        FOCUS_MODES = ["chinese_to_english", "english_to_chinese", "listen_spell"]
+        FOCUS_MODES = ["chinese_to_english", "listen_spell", "missing_letter"]
 
         # P0-1: Warm-up — sort by strength (highest first = easiest words first)
         def _item_strength(item: LearningItemRead) -> float:
@@ -770,7 +770,13 @@ def list_due_review_items(
             for mode in FOCUS_MODES:
                 # Set chinese_text to the actual meaning, not the task prompt.
                 # The frontend uses chinese_text for display and reviewTaskWordTranslation for context.
+                # IMPORTANT: each focus item needs a unique id. Without it the frontend's
+                # mergeLearningQueues dedup keeps only the first mode per word and silently
+                # drops the other spelling tasks (listen_spell / missing_letter / etc.) —
+                # the user sees a "下一句" button with no input because the spelling task
+                # never reaches the page.
                 focus_item = item.model_copy(update={
+                    "id": uuid4(),
                     "review_task_type": mode,
                     "chinese_text": chinese_meaning,
                     "source": f"聚焦 {words[0]}",
