@@ -1057,40 +1057,35 @@ def build_error_breakdown(db: Session, user_id: UUID) -> dict[str, object]:
 
 
 def generate_ai_daily_report(db: Session, user_id: UUID, report_date: date | None = None) -> dict[str, object]:
+    # Always compute fresh data from the database
     report_data = build_daily_report(db, user_id, report_date)
     raw = report_data.pop("_raw", {})
 
+    # Delete old record so regenerate always reflects current state
     existing = db.scalar(
         select(AiDailyReport).where(
             AiDailyReport.user_id == user_id,
             AiDailyReport.report_date == report_data["report_date"],
         )
     )
-
     if existing is not None:
-        existing.accuracy_rate = report_data["accuracy_rate"]
-        existing.spelling_error_rate = raw.get("spelling_error_rate", 0.0)  # type: ignore[arg-type]
-        existing.sentence_error_rate = raw.get("sentence_error_rate", 0.0)  # type: ignore[arg-type]
-        existing.study_duration_minutes = report_data["study_duration_minutes"]
-        existing.review_backlog_count = raw.get("review_backlog_count", 0)  # type: ignore[arg-type]
-        existing.high_forget_risk_count = raw.get("high_forget_risk_count", 0)  # type: ignore[arg-type]
-        existing.summary = report_data["summary"]
-        existing.next_day_strategy = report_data["next_day_strategy"]
-    else:
-        db.add(
-            AiDailyReport(
-                user_id=user_id,
-                report_date=report_data["report_date"],
-                accuracy_rate=report_data["accuracy_rate"],
-                spelling_error_rate=raw.get("spelling_error_rate", 0.0),  # type: ignore[arg-type]
-                sentence_error_rate=raw.get("sentence_error_rate", 0.0),  # type: ignore[arg-type]
-                study_duration_minutes=report_data["study_duration_minutes"],
-                review_backlog_count=raw.get("review_backlog_count", 0),  # type: ignore[arg-type]
-                high_forget_risk_count=raw.get("high_forget_risk_count", 0),  # type: ignore[arg-type]
-                summary=report_data["summary"],
-                next_day_strategy=report_data["next_day_strategy"],
-            )
+        db.delete(existing)
+        db.flush()
+
+    db.add(
+        AiDailyReport(
+            user_id=user_id,
+            report_date=report_data["report_date"],
+            accuracy_rate=report_data["accuracy_rate"],
+            spelling_error_rate=raw.get("spelling_error_rate", 0.0),  # type: ignore[arg-type]
+            sentence_error_rate=raw.get("sentence_error_rate", 0.0),  # type: ignore[arg-type]
+            study_duration_minutes=report_data["study_duration_minutes"],
+            review_backlog_count=raw.get("review_backlog_count", 0),  # type: ignore[arg-type]
+            high_forget_risk_count=raw.get("high_forget_risk_count", 0),  # type: ignore[arg-type]
+            summary=report_data["summary"],
+            next_day_strategy=report_data["next_day_strategy"],
         )
+    )
     db.commit()
 
     return report_data

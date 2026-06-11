@@ -1544,7 +1544,7 @@ function StudyContent() {
       }, 15_000);
       const intervalId = window.setInterval(() => {
         void insertDueReviewItemsAfterCurrent();
-      }, 60_000);
+      }, 900_000);
 
       return () => {
         window.clearTimeout(timeoutId);
