@@ -552,11 +552,22 @@ export default function DashboardPage() {
                       正确率 {Math.round(dailyReport.accuracy_rate * 100)}%
                     </span>
                     <span className="rounded-full bg-emerald-100 px-2 py-0.5">
+                      复习 {dailyReport.review_count} 次
+                    </span>
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5">
+                      答对 {dailyReport.correct_count} 次
+                    </span>
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5">
                       学习 {dailyReport.study_duration_minutes} 分钟
                     </span>
                     <span className="rounded-full bg-emerald-100 px-2 py-0.5">
                       练习 {dailyReport.words_practiced} 个单词
                     </span>
+                    {dailyReport.mistake_count > 0 ? (
+                      <span className="rounded-full bg-red-100 px-2 py-0.5 text-red-700">
+                        错词 {dailyReport.mistake_count} 个
+                      </span>
+                    ) : null}
                     {studyStreak ? (
                       <span className="rounded-full bg-orange-100 px-2 py-0.5">
                         连续 {studyStreak.current_streak_days} 天
