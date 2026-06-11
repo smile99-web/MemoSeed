@@ -415,6 +415,15 @@ export default function DashboardPage() {
     }
   }
 
+  // Force fresh data on every load: trigger a full page reload on first
+  // dashboard visit after the rebuild, so stale chunks never get reused.
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.localStorage.getItem("dashboard_v2_loaded") !== "1") {
+      window.localStorage.setItem("dashboard_v2_loaded", "1");
+      window.location.reload();
+    }
+  }, []);
+
   async function handleGenerateReport() {
     const accessToken = getAccessToken();
     if (!accessToken) {
