@@ -1470,10 +1470,9 @@ function StudyContent() {
       }
 
       try {
-        const [dueReviewItems, nextItems] = await Promise.all([
-          listDueReviewItems(accessToken, courseId, INITIAL_REVIEW_QUEUE_LIMIT, false, INITIAL_REVIEW_QUEUE_LIMIT, isFocusMode).catch(() => [] as LearningItem[]),
-          listLearningItems(accessToken, courseId),
-        ]);
+        // In focus mode, only load the focus set — no course items.
+        const nextItems = isFocusMode ? [] : await listLearningItems(accessToken, courseId).catch(() => [] as LearningItem[]);
+        const dueReviewItems = await listDueReviewItems(accessToken, courseId, INITIAL_REVIEW_QUEUE_LIMIT, false, INITIAL_REVIEW_QUEUE_LIMIT, isFocusMode).catch(() => [] as LearningItem[]);
         queuedReviewItemIdsRef.current = new Set(dueReviewItems.map((item) => item.id));
         const mergedItems = mergeLearningQueues(dueReviewItems, nextItems);
         const savedIndex = Number(window.localStorage.getItem(getStudyProgressKey(courseId)) ?? "0");
@@ -1503,6 +1502,7 @@ function StudyContent() {
   }, [isLoading, items.length, courseId]);
 
   const insertDueReviewItemsAfterCurrent = useCallback(async function insertDueReviewItemsAfterCurrent() {
+    if (isFocusMode) return;  // focus mode has fixed item set
     const accessToken = getAccessToken();
     const activeItem = currentItemRef.current;
     if (!accessToken || !courseId || !activeItem || celebrationSummaryRef.current) {
@@ -1537,17 +1537,20 @@ function StudyContent() {
 
     // Only poll once at session start — no silent mid-session injection.
     // Deferred reviews are shown as a count at session end, not forced mid-flow.
-    const timeoutId = window.setTimeout(() => {
-      void insertDueReviewItemsAfterCurrent();
-    }, 15_000);
-    const intervalId = window.setInterval(() => {
-      void insertDueReviewItemsAfterCurrent();
-    }, 60_000);
+    // In focus mode, skip refill entirely — session has a fixed set of items.
+    if (!isFocusMode) {
+      const timeoutId = window.setTimeout(() => {
+        void insertDueReviewItemsAfterCurrent();
+      }, 15_000);
+      const intervalId = window.setInterval(() => {
+        void insertDueReviewItemsAfterCurrent();
+      }, 60_000);
 
-    return () => {
-      window.clearTimeout(timeoutId);
-      window.clearInterval(intervalId);
-    };
+      return () => {
+        window.clearTimeout(timeoutId);
+        window.clearInterval(intervalId);
+      };
+    }
   }, [courseId, insertDueReviewItemsAfterCurrent, isLoading]);
 
   useEffect(() => {
