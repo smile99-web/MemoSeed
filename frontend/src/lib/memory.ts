@@ -212,6 +212,12 @@ export interface StrugglingWordItem {
   recommendation: string;
 }
 
+export interface PerWordBreakdownItem {
+  word: string;
+  reviews: number;
+  correct: number;
+}
+
 export interface DailyReport {
   report_date: string;
   review_count: number;
@@ -219,6 +225,8 @@ export interface DailyReport {
   accuracy_rate: number;
   study_duration_minutes: number;
   words_practiced: number;
+  new_words_practiced: number;
+  per_word_breakdown: PerWordBreakdownItem[];
   mistake_count: number;
   streak_days: number;
   struggling_words: StrugglingWordItem[];

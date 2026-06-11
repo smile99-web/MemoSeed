@@ -47,6 +47,12 @@ class StrugglingWordItem(BaseModel):
     recommendation: str
 
 
+class PerWordBreakdownItem(BaseModel):
+    word: str
+    reviews: int
+    correct: int
+
+
 class DailyReportResponse(BaseModel):
     report_date: date
     review_count: int
@@ -54,6 +60,8 @@ class DailyReportResponse(BaseModel):
     accuracy_rate: float
     study_duration_minutes: int
     words_practiced: int
+    new_words_practiced: int
+    per_word_breakdown: list[PerWordBreakdownItem]
     mistake_count: int
     streak_days: int
     struggling_words: list[StrugglingWordItem]

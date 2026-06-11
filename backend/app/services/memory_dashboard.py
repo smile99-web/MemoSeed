@@ -594,6 +594,42 @@ def build_daily_report(db: Session, user_id: UUID, report_date: date | None = No
     study_minutes = study_minutes_rows // 60
     words_practiced = len({r.learning_item_id for r in today_reviews})
 
+    # New words practiced today: items where the review was the first correct recall (repetition_count == 1)
+    new_words_practiced = db.scalar(
+        select(func.count(func.distinct(ReviewLog.learning_item_id))).where(
+            ReviewLog.user_id == user_id,
+            ReviewLog.reviewed_at >= day_start_utc,
+            ReviewLog.reviewed_at < day_end_utc,
+            ReviewLog.is_correct.is_(True),
+            ReviewLog.score >= 3,
+            ReviewLog.learning_item_id.in_(
+                select(MemoryState.learning_item_id).where(
+                    MemoryState.repetition_count == 1,
+                    MemoryState.last_reviewed_at >= day_start_utc,
+                )
+            ),
+        )
+    ) or 0
+
+    # Per-word review breakdown: each unique word, its review count and accuracy
+    per_word_rows = db.execute(
+        select(LearningItem.english_text, func.count(ReviewLog.id), func.sum(func.cast(ReviewLog.is_correct, Integer)))
+        .join(ReviewLog, ReviewLog.learning_item_id == LearningItem.id)
+        .where(
+            ReviewLog.user_id == user_id,
+            ReviewLog.reviewed_at >= day_start_utc,
+            ReviewLog.reviewed_at < day_end_utc,
+            LearningItem.item_type == "word",
+        )
+        .group_by(LearningItem.english_text)
+        .order_by(func.count(ReviewLog.id).desc())
+        .limit(10)
+    ).all()
+    per_word_breakdown = [
+        {"word": w, "reviews": int(c), "correct": int(corr or 0)}
+        for w, c, corr in per_word_rows
+    ]
+
     today_mistakes = db.execute(
         select(func.count(MistakeLog.id))
         .where(MistakeLog.user_id == user_id, MistakeLog.occurred_at >= day_start_utc, MistakeLog.occurred_at < day_end_utc)
@@ -671,6 +707,8 @@ def build_daily_report(db: Session, user_id: UUID, report_date: date | None = No
         "accuracy_rate": accuracy_rate,
         "study_duration_minutes": study_minutes,
         "words_practiced": words_practiced,
+        "new_words_practiced": new_words_practiced,
+        "per_word_breakdown": per_word_breakdown,
         "mistake_count": today_mistakes,
         "streak_days": streak_data["current_streak_days"],
         "struggling_words": struggling_words,

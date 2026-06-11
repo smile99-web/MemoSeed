@@ -573,7 +573,28 @@ export default function DashboardPage() {
                         连续 {studyStreak.current_streak_days} 天
                       </span>
                     ) : null}
+                    {dailyReport.new_words_practiced > 0 ? (
+                      <span className="rounded-full bg-blue-100 px-2 py-0.5 text-blue-700">
+                        新学 {dailyReport.new_words_practiced} 个
+                      </span>
+                    ) : null}
                   </div>
+                  {dailyReport.per_word_breakdown.length > 0 ? (
+                    <div className="rounded-md border border-emerald-200 bg-white/60 p-2 text-xs">
+                      <p className="mb-1 font-medium text-muted-foreground">今日复习详情（每个词复习了几遍）</p>
+                      <div className="space-y-0.5">
+                        {dailyReport.per_word_breakdown.map((w) => (
+                          <div key={w.word} className="flex items-center justify-between gap-2">
+                            <span className="font-medium text-slate-700">{w.word}</span>
+                            <span className="text-muted-foreground">
+                              {w.reviews} 次 · 答对 {w.correct}
+                              {w.reviews > 0 && ` · ${Math.round((w.correct / w.reviews) * 100)}%`}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                   {dailyReport.struggling_words.length > 0 ? (
                     <div className="space-y-1">
                       <p className="text-xs font-medium text-muted-foreground">需要关注的单词</p>
