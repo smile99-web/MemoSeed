@@ -30,9 +30,9 @@ router = APIRouter()
 
 @router.get("/learning/heatmap", response_model=HeatmapResponse)
 def get_heatmap(
-    year: Optional[int] = Query(None),
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
+    year: Optional[int] = Query(None),
 ) -> HeatmapResponse:
     """Annual heatmap of study minutes per day."""
     # First-visit auto-backfill from existing review_logs
