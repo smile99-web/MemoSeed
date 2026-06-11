@@ -73,9 +73,9 @@ def get_hour_detail(
 def get_minute_events(
     date: str,
     minute: int,
-    hour: int = Query(0, ge=0, le=23),
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
+    hour: int = Query(0, ge=0, le=23),
 ) -> MinuteEventsResponse:
     """One minute: full event log."""
     if minute < 0 or minute > 59:
