@@ -586,8 +586,12 @@ def build_daily_report(db: Session, user_id: UUID, report_date: date | None = No
     review_count = len(today_reviews)
     correct_count = sum(1 for r in today_reviews if r.is_correct)
     accuracy_rate = round(correct_count / review_count, 2) if review_count else 0.0
-    total_duration_seconds = sum(r.duration_seconds for r in today_reviews)
-    study_minutes = total_duration_seconds // 60
+    # Use StudyTimeLog (real per-session time) instead of ReviewLog.duration_seconds (always 0)
+    study_minutes_rows = db.execute(
+        select(func.coalesce(func.sum(StudyTimeLog.duration_seconds), 0))
+        .where(StudyTimeLog.user_id == user_id, StudyTimeLog.recorded_at >= day_start_utc, StudyTimeLog.recorded_at < day_end_utc)
+    ).scalar() or 0
+    study_minutes = study_minutes_rows // 60
     words_practiced = len({r.learning_item_id for r in today_reviews})
 
     today_mistakes = db.execute(
