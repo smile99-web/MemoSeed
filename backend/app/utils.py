@@ -1,7 +1,7 @@
 """Shared utility functions used across services and routers."""
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 
@@ -37,6 +37,16 @@ def parse_datetime_setting(value: object) -> datetime | None:
         return None
     try:
         return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def parse_date_param(value: str) -> date | None:
+    """Parse YYYY-MM-DD date string."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
     except ValueError:
         return None
 

@@ -546,6 +546,20 @@ export default function DashboardPage() {
 
         {dashboard ? (
           <>
+            <Card className="border-emerald-200 bg-gradient-to-r from-emerald-50 to-teal-50">
+              <CardHeader>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <CardTitle className="text-emerald-800">📅 学习回放</CardTitle>
+                  <Link href="/dashboard/replay" className="text-sm font-medium text-emerald-700 hover:underline">
+                    打开热力图 →
+                  </Link>
+                </div>
+                <CardDescription>
+                  类似 GitHub Contribution 视图，支持年度/日/小时/分钟四级回放
+                </CardDescription>
+              </CardHeader>
+            </Card>
+
             {dailyReport ? (
               <Card className="border-emerald-200 bg-emerald-50/30">
                 <CardHeader>

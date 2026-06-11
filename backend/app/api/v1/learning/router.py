@@ -1267,6 +1267,12 @@ def create_word_review(
             award_points(db, current_user.id, POINTS_WRONG, "word_wrong", f"拼写错误 {POINTS_WRONG}", word_item.id)
         except Exception:
             pass  # points failure should never block learning
+    # Learning Replay: record event + update minute stats
+    try:
+        from app.services.learning_replay import record_learning_event
+        record_learning_event(db, current_user.id, result.review_log, word_item, duration_ms=0)
+    except Exception:
+        pass
     db.commit()
     return WordReviewResponse(learning_item_id=word_item.id, word=word_item.english_text)
 
