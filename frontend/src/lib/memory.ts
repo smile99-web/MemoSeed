@@ -218,6 +218,14 @@ export interface PerWordBreakdownItem {
   correct: number;
 }
 
+export interface PerTypeBreakdownItem {
+  mode: string;
+  label: string;
+  reviews: number;
+  correct: number;
+  kind: string;
+}
+
 export interface DailyReport {
   report_date: string;
   review_count: number;
@@ -227,6 +235,11 @@ export interface DailyReport {
   words_practiced: number;
   new_words_practiced: number;
   per_word_breakdown: PerWordBreakdownItem[];
+  per_type_breakdown: PerTypeBreakdownItem[];
+  spelling_total: number;
+  spelling_correct: number;
+  choice_total: number;
+  choice_correct: number;
   mistake_count: number;
   streak_days: number;
   struggling_words: StrugglingWordItem[];

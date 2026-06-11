@@ -630,6 +630,49 @@ def build_daily_report(db: Session, user_id: UUID, report_date: date | None = No
         for w, c, corr in per_word_rows
     ]
 
+    # Review breakdown by question type
+    type_rows = db.execute(
+        select(ReviewLog.review_mode, func.count(ReviewLog.id), func.sum(func.cast(ReviewLog.is_correct, Integer)))
+        .where(
+            ReviewLog.user_id == user_id,
+            ReviewLog.reviewed_at >= day_start_utc,
+            ReviewLog.reviewed_at < day_end_utc,
+        )
+        .group_by(ReviewLog.review_mode)
+    ).all()
+    REVIEW_TYPE_LABELS = {
+        "word-spelling": "拼写题（单词默写）",
+        "word-recall": "拼写题（无提示）",
+        "word-hinted": "拼写题（有提示）",
+        "word-preview": "拼写题（预览后）",
+        "word-context": "拼写题（句子里）",
+        "word-english_to_chinese": "选择题（英选中）",
+        "word-listen_choose_chinese": "选择题（听音选）",
+        "word-match_translation": "选择题（配对）",
+        "word-chinese_to_english": "拼写题（看中文）",
+        "word-listen_spell": "拼写题（听音）",
+        "word-missing_letter": "拼写题（缺字母）",
+        "word-hidden_recall": "拼写题（隐藏）",
+        "sentence-spelling": "拼写题（整句）",
+    }
+    spelling_count = 0
+    spelling_correct = 0
+    choice_count = 0
+    choice_correct = 0
+    per_type_breakdown: list[dict[str, object]] = []
+    for mode, count, corr in type_rows:
+        c = int(count)
+        cr = int(corr or 0)
+        label = REVIEW_TYPE_LABELS.get(mode or "", mode or "其他")
+        kind = "spelling" if "spell" in (mode or "").lower() or "recall" in (mode or "").lower() or "preview" in (mode or "").lower() or "context" in (mode or "").lower() or "missing" in (mode or "").lower() or "hidden" in (mode or "").lower() else "choice"
+        per_type_breakdown.append({"mode": mode, "label": label, "reviews": c, "correct": cr, "kind": kind})
+        if kind == "spelling":
+            spelling_count += c
+            spelling_correct += cr
+        else:
+            choice_count += c
+            choice_correct += cr
+
     today_mistakes = db.execute(
         select(func.count(MistakeLog.id))
         .where(MistakeLog.user_id == user_id, MistakeLog.occurred_at >= day_start_utc, MistakeLog.occurred_at < day_end_utc)
@@ -709,6 +752,11 @@ def build_daily_report(db: Session, user_id: UUID, report_date: date | None = No
         "words_practiced": words_practiced,
         "new_words_practiced": new_words_practiced,
         "per_word_breakdown": per_word_breakdown,
+        "per_type_breakdown": per_type_breakdown,
+        "spelling_total": spelling_count,
+        "spelling_correct": spelling_correct,
+        "choice_total": choice_count,
+        "choice_correct": choice_correct,
         "mistake_count": today_mistakes,
         "streak_days": streak_data["current_streak_days"],
         "struggling_words": struggling_words,

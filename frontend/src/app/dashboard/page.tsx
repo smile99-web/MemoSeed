@@ -595,6 +595,48 @@ export default function DashboardPage() {
                       </div>
                     </div>
                   ) : null}
+                  {dailyReport.review_count > 0 ? (
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="rounded-md border border-blue-200 bg-blue-50/50 p-2 text-xs">
+                        <p className="font-semibold text-blue-700">✍️ 拼写题</p>
+                        <p className="text-lg font-bold text-blue-700">
+                          {dailyReport.spelling_total} <span className="text-xs font-normal text-muted-foreground">题 · 答对 {dailyReport.spelling_correct}</span>
+                        </p>
+                        {dailyReport.spelling_total > 0 && (
+                          <p className="text-muted-foreground">
+                            正确率 {Math.round((dailyReport.spelling_correct / dailyReport.spelling_total) * 100)}%
+                          </p>
+                        )}
+                      </div>
+                      <div className="rounded-md border border-purple-200 bg-purple-50/50 p-2 text-xs">
+                        <p className="font-semibold text-purple-700">🔘 选择题</p>
+                        <p className="text-lg font-bold text-purple-700">
+                          {dailyReport.choice_total} <span className="text-xs font-normal text-muted-foreground">题 · 答对 {dailyReport.choice_correct}</span>
+                        </p>
+                        {dailyReport.choice_total > 0 && (
+                          <p className="text-muted-foreground">
+                            正确率 {Math.round((dailyReport.choice_correct / dailyReport.choice_total) * 100)}%
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+                  {dailyReport.per_type_breakdown.length > 0 ? (
+                    <div className="rounded-md border border-slate-200 bg-slate-50/50 p-2 text-xs">
+                      <p className="mb-1 font-medium text-muted-foreground">分题型明细</p>
+                      <div className="space-y-0.5">
+                        {dailyReport.per_type_breakdown.map((t) => (
+                          <div key={t.mode} className="flex items-center justify-between gap-2">
+                            <span className="text-slate-700">{t.label}</span>
+                            <span className="text-muted-foreground">
+                              {t.reviews} 次 · 答对 {t.correct}
+                              {t.reviews > 0 && ` · ${Math.round((t.correct / t.reviews) * 100)}%`}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                   {dailyReport.struggling_words.length > 0 ? (
                     <div className="space-y-1">
                       <p className="text-xs font-medium text-muted-foreground">需要关注的单词</p>
