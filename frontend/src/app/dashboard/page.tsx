@@ -1002,21 +1002,6 @@ export default function DashboardPage() {
                     <p className="mb-1 text-xs font-medium text-muted-foreground">积分热力图</p>
                     <PointsHeatmapCompact />
                   </div>
-                  {pointsSummary.recent_logs.length > 0 && (
-                    <div className="mt-3 border-t pt-2">
-                      <p className="mb-1 text-xs font-medium text-muted-foreground">最近积分记录</p>
-                      <div className="max-h-24 space-y-0.5 overflow-y-auto">
-                        {pointsSummary.recent_logs.slice(0, 8).map((log, i) => (
-                          <div key={i} className="flex items-center justify-between text-xs">
-                            <span className="text-muted-foreground truncate max-w-[200px]">{log.detail || log.reason}</span>
-                            <span className={`ml-2 font-semibold tabular-nums ${log.points_changed > 0 ? "text-emerald-600" : "text-red-500"}`}>
-                              {log.points_changed > 0 ? "+" : ""}{log.points_changed}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
                 </CardContent>
               </Card>
             ) : null}

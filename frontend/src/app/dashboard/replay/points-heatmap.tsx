@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useState } from "react";
 
 const DAY_LABELS = ["", "Mon", "", "Wed", "", "Fri", ""];
-
 const POINTS_COLORS = ["#ebedf0", "#dbeafe", "#93c5fd", "#3b82f6", "#1d4ed8"];
 
 interface PointsDay {
@@ -16,6 +15,8 @@ export function PointsHeatmapCompact() {
   const [days, setDays] = useState<PointsDay[]>([]);
   const [totalPoints, setTotalPoints] = useState(0);
   const [activeDays, setActiveDays] = useState(0);
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [selectedData, setSelectedData] = useState<PointsDay | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -28,41 +29,24 @@ export function PointsHeatmapCompact() {
       if (!token) return;
 
       try {
-        const r = await fetchWithAuth(`${getApiBaseUrl()}/memory/points/summary`, { cache: "no-store" }, token);
+        const r = await fetchWithAuth(`${getApiBaseUrl()}/memory/points/heatmap`, { cache: "no-store" }, token);
         if (!r.ok) throw new Error(await parseApiError(r));
-        const summary = await r.json() as { total_points: number; recent_logs: Array<{ points_changed: number; reason: string; detail: string | null; created_at: string | null }> };
-
-        // Build daily aggregation from recent_logs + heatmap-style grid
-        const byDate = new Map<string, number>();
-        for (const log of summary.recent_logs) {
-          if (!log.created_at) continue;
-          const d = log.created_at.slice(0, 10);
-          byDate.set(d, (byDate.get(d) || 0) + log.points_changed);
-        }
-
-        // Also get full year heatmap from points API
-        const year = new Date().getFullYear();
-        const firstDay = new Date(Date.UTC(year, 0, 1));
-        const totalDays = 365 + ((year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)) ? 1 : 0);
-        const result: PointsDay[] = [];
-        for (let i = 0; i < totalDays; i++) {
-          const d = new Date(firstDay.getTime() + i * 86400000);
-          const key = d.toISOString().slice(0, 10);
-          const pts = byDate.get(key) || 0;
-          const absPts = Math.abs(pts);
-          const color = absPts === 0 ? POINTS_COLORS[0]
-            : absPts <= 10 ? POINTS_COLORS[1]
-            : absPts <= 30 ? POINTS_COLORS[2]
-            : absPts <= 80 ? POINTS_COLORS[3]
-            : POINTS_COLORS[4];
-          result.push({ date: key, points: pts, color });
-        }
-        setDays(result);
-        setTotalPoints(summary.total_points);
-        setActiveDays([...byDate.values()].filter(v => v > 0).length);
+        const data = await r.json() as { year: number; days: PointsDay[]; total_points: number; active_days: number };
+        setDays(data.days);
+        setTotalPoints(data.total_points);
+        setActiveDays(data.active_days);
       } catch { /* */ }
     })();
   }, []);
+
+  useEffect(() => {
+    if (!selectedDate) {
+      setSelectedData(null);
+      return;
+    }
+    const found = days.find((d) => d.date === selectedDate);
+    setSelectedData(found || null);
+  }, [selectedDate, days]);
 
   const grid = useMemo(() => {
     if (!days.length) return { weeks: [] as Array<Array<PointsDay | null>>, monthLabels: [] as Array<{ week: number; label: string }> };
@@ -95,6 +79,13 @@ export function PointsHeatmapCompact() {
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
         <div className="text-muted-foreground">
           {new Date().getFullYear()} 年 · 累计 {totalPoints} 分 · 活跃 {activeDays} 天
+          {selectedData ? (
+            <span className="ml-2 font-semibold text-amber-700">
+              {selectedData.date} · {selectedData.points > 0 ? "+" : ""}{selectedData.points} 分
+            </span>
+          ) : (
+            <span className="ml-2 text-muted-foreground">点击日期查看积分</span>
+          )}
         </div>
         <div className="flex items-center gap-1 text-muted-foreground">
           <span>少</span>
@@ -121,10 +112,13 @@ export function PointsHeatmapCompact() {
               {grid.weeks.map((week, wi) => (
                 <div key={`pw-${wi}`} className="flex flex-col gap-[2px]">
                   {week.map((cell, di) => (
-                    <div
+                    <button
+                      type="button"
                       key={`pc-${wi}-${di}`}
                       title={cell ? `${cell.date} · ${cell.points > 0 ? "+" : ""}${cell.points} 分` : ""}
-                      className="h-[12px] w-[12px] rounded-sm border border-transparent"
+                      disabled={!cell}
+                      onClick={() => cell && setSelectedDate(cell.date)}
+                      className={`h-[12px] w-[12px] rounded-sm border ${selectedDate === cell?.date ? "border-amber-600 ring-2 ring-amber-300" : "border-transparent"} hover:border-slate-400 focus:outline-none`}
                       style={{ background: cell ? cell.color : "transparent" }}
                     />
                   ))}
