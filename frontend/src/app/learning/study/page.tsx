@@ -1700,10 +1700,26 @@ function StudyContent() {
     startVoiceSequence();
     setCurrentIndex((index) => {
       const nextIndex = index + 1;
-      // Focus mode: stop at end instead of wrapping around
+      // Focus mode: rotate out all current batch words, then load new focus words
       if (isFocusMode && nextIndex >= items.length) {
-        setFeedback("🎯 聚焦完成！今天这批词已经全部练习完毕。", "success");
-        return index; // stay on last item
+        updateAnswerState("sentence-complete");
+        setFeedback("🎯 聚焦完成！正在准备下一批单词...", "success");
+        // Rotate all unique words in this session out (push to tomorrow)
+        const token = getAccessToken();
+        const rotatedIds = new Set<string>();
+        for (const item of items) {
+          if (item.id && !rotatedIds.has(item.id)) {
+            rotatedIds.add(item.id);
+            if (token) {
+              void rotateFocusWord(token, item.id).catch(() => {});
+            }
+          }
+        }
+        // Reload page after brief pause — fresh focus session with new words
+        window.setTimeout(() => {
+          window.location.reload();
+        }, 2000);
+        return index;
       }
       // Normal mode: wrap around to beginning
       const wrappedIndex = nextIndex % items.length;
