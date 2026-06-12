@@ -178,7 +178,7 @@ def build_heatmap(db: Session, user_id: UUID, year: int | None = None) -> dict:
 
     event_by_date: dict[str, tuple[float, int]] = {}
     for d, ms, events in rows:
-        event_by_date[str(d)] = (round((ms or 0) / 60000, 1), int(events or 0))
+        event_by_date[str(d)] = (round(float(ms or 0) / 60000, 1), int(events or 0))
 
     # Merge: use the MAX of event-measured minutes and StudyTimeLog minutes
     first_day = date(target_year, 1, 1)
