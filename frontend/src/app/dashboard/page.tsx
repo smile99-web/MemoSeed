@@ -465,17 +465,14 @@ export default function DashboardPage() {
 
       try {
         const courseId = selectedCourseId || undefined;
-        const [dashboardData, reportData, planData, curveData, errorData, streakData, forecastData, pointsData, progressData, heatmapData] = await Promise.all([
+        // Phase 1: critical data (show page immediately)
+        const [dashboardData, reportData, planData, curveData, errorData, streakData] = await Promise.all([
           getMemoryDashboardWithCourse(accessToken, courseId),
           getDailyReport(accessToken).catch(() => null),
           getTodayPlan(accessToken).catch(() => null),
           getRetentionCurve(accessToken, courseId).catch(() => null),
           getErrorBreakdown(accessToken).catch(() => null),
           getStudyStreak(accessToken).catch(() => null),
-          getReviewForecast(accessToken).catch(() => null),
-          getPointsSummary(accessToken).catch(() => null),
-          getTodayProgress(accessToken).catch(() => null),
-          getHeatmap(accessToken).catch(() => null),
         ]);
         setDashboard(dashboardData);
         setDailyReport(reportData);
@@ -483,10 +480,21 @@ export default function DashboardPage() {
         setRetentionCurve(curveData);
         setErrorBreakdown(errorData);
         setStudyStreak(streakData);
-        setReviewForecast(forecastData);
-        setPointsSummary(pointsData);
-        setTodayProgress(progressData);
-        setLearningHeatmap(heatmapData);
+        setIsLoading(false); // Show page now!
+
+        // Phase 2: secondary data (load after page renders, non-blocking)
+        void (async () => {
+          const [forecastData, pointsData, progressData, heatmapData] = await Promise.all([
+            getReviewForecast(accessToken).catch(() => null),
+            getPointsSummary(accessToken).catch(() => null),
+            getTodayProgress(accessToken).catch(() => null),
+            getHeatmap(accessToken).catch(() => null),
+          ]);
+          setReviewForecast(forecastData);
+          setPointsSummary(pointsData);
+          setTodayProgress(progressData);
+          setLearningHeatmap(heatmapData);
+        })();
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "读取数据看板失败");
       } finally {
