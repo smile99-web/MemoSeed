@@ -14,6 +14,7 @@ from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
 from app.models.study_time_log import StudyTimeLog
 from app.models.user import User
+from app.models.user_points import PointsLog
 from app.schemas.memory import CourseCompletionRequest, CourseProgressStats, FsrsFitResponse, MemoryDashboardResponse, MemoryScheduleResponse, MemoryStateRead, PointsAwardRequest, PointsSummaryResponse, ReviewForecastResponse, ReviewScoreRequest, StudyTimeLogRequest, TodayProgressResponse
 from app.services.memory_dashboard import build_memory_dashboard, build_review_forecast, build_today_progress, check_and_generate_daily_report
 from app.schemas.review import MistakeLogRead, ReviewLogRead
