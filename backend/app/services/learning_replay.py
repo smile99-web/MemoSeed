@@ -123,8 +123,9 @@ def _fill_gap_minutes(db: Session, user_id: UUID, event: LearningEvent) -> None:
         _last_event_minute[user_id] = (event.event_date, event.event_hour, event.event_minute)
         return
 
-    # Fill all gap minutes with estimated study time
-    gap_duration_ms = int((event.duration_ms or 20000) / gap * 0.5)
+    # Fill all gap minutes with minimal study time (1s each — just to show continuity)
+    # The real study time comes from StudyTimeLog, not from gap estimates
+    gap_duration_ms = 1000
     for gm in range(prev_minute + 1, curr_minute):
         stmt = select(LearningMinuteStat).where(
             LearningMinuteStat.user_id == user_id,
@@ -251,7 +252,8 @@ def build_heatmap(db: Session, user_id: UUID, year: int | None = None) -> dict:
         d = (first_day + timedelta(days=i)).isoformat()
         ev_min, ev_count = event_by_date.get(d, (0.0, 0))
         st_min = round(study_by_date.get(d, 0) / 60, 1)
-        real_min = max(ev_min, st_min)
+        # Use StudyTimeLog for daily totals (most accurate) — event minutes are for per-minute breakdown only
+        real_min = st_min if st_min > 0 else ev_min
         days.append({
             "date": d,
             "minutes": real_min,
