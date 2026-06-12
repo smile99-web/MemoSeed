@@ -36,6 +36,18 @@ class HourBlock(BaseModel):
     hour: int
     label: str
     minutes: list[MinuteBreakdown]
+    modes: list[dict] = []
+
+
+class ModeCount(BaseModel):
+    mode: str
+    label: str
+    count: int
+
+
+class MinuteModeRow(BaseModel):
+    minute: int
+    modes: dict[str, int]
 
 
 class DayDetailResponse(BaseModel):
@@ -45,12 +57,14 @@ class DayDetailResponse(BaseModel):
     accuracy: float
     mistake_count: int
     hours: list[HourBlock]
+    day_modes: list[ModeCount] = []
 
 
 class HourDetailResponse(BaseModel):
     date: str
     hour: int
     minutes: list[MinuteBreakdown]
+    minute_modes: list[MinuteModeRow] = []
 
 
 class LearningEventLog(BaseModel):

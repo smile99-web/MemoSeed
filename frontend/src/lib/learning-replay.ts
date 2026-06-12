@@ -30,6 +30,18 @@ export interface HourBlock {
   hour: number;
   label: string;
   minutes: MinuteBreakdown[];
+  modes: Array<{ mode: string; label: string; count: number }>;
+}
+
+export interface ModeCount {
+  mode: string;
+  label: string;
+  count: number;
+}
+
+export interface MinuteModeRow {
+  minute: number;
+  modes: Record<string, number>;
 }
 
 export interface DayDetail {
@@ -39,6 +51,7 @@ export interface DayDetail {
   accuracy: number;
   mistake_count: number;
   hours: HourBlock[];
+  day_modes: ModeCount[];
 }
 
 export interface LearningEventLog {
@@ -77,10 +90,10 @@ export async function getDayDetail(accessToken: string, date: string): Promise<D
   return (await r.json()) as DayDetail;
 }
 
-export async function getHourDetail(accessToken: string, date: string, hour: number): Promise<{ date: string; hour: number; minutes: MinuteBreakdown[] }> {
+export async function getHourDetail(accessToken: string, date: string, hour: number): Promise<{ date: string; hour: number; minutes: MinuteBreakdown[]; minute_modes: MinuteModeRow[] }> {
   const r = await fetchWithAuth(`${getApiBaseUrl()}/reports/learning/hour/${date}/${hour}`, { cache: "no-store" }, accessToken);
   if (!r.ok) throw new Error(await parseApiError(r));
-  return (await r.json()) as { date: string; hour: number; minutes: MinuteBreakdown[] };
+  return (await r.json()) as { date: string; hour: number; minutes: MinuteBreakdown[]; minute_modes: MinuteModeRow[] };
 }
 
 export async function getMinuteEvents(accessToken: string, date: string, hour: number, minute: number): Promise<MinuteEvents> {

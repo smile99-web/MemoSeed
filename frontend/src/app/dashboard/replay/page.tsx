@@ -176,6 +176,19 @@ export default function LearningReplayPage() {
           </CardHeader>
           {dayDetail ? (
             <CardContent className="space-y-3">
+              {dayDetail.day_modes && dayDetail.day_modes.length > 0 ? (
+                <div className="rounded-md border border-emerald-200 bg-emerald-50/40 p-2 text-xs">
+                  <p className="mb-1 font-semibold text-emerald-700">📊 今日题型分布</p>
+                  <div className="grid grid-cols-2 gap-1 md:grid-cols-3">
+                    {dayDetail.day_modes.map((m) => (
+                      <div key={m.mode} className="flex items-center justify-between rounded border border-slate-200 bg-white px-2 py-0.5">
+                        <span className="text-slate-700">{m.label}</span>
+                        <span className="font-semibold tabular-nums">{m.count}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               {dayDetail.hours.map((h) => {
                 const totalSpelling = h.minutes.reduce((s, m) => s + m.spelling, 0);
                 const totalChoice = h.minutes.reduce((s, m) => s + m.english_to_chinese, 0);
@@ -184,8 +197,18 @@ export default function LearningReplayPage() {
                 const totalSentence = h.minutes.reduce((s, m) => s + m.sentence, 0);
                 return (
                   <div key={h.hour} className="rounded-md border border-slate-200 bg-slate-50/50 p-2 text-xs">
-                    <div className="mb-1 font-semibold text-slate-700">⏰ {h.label}</div>
-                    <div className="mb-1 text-muted-foreground">拼写 {totalSpelling} · 英译中 {totalChoice} · 中译英 {totalC2E} · 短语 {totalPhrase} · 句子 {totalSentence}</div>
+                    <div className="mb-1 font-semibold text-slate-700">⏰ {h.label} · 共 {h.minutes.reduce((s, m) => s + m.total, 0)} 题</div>
+                    {h.modes && h.modes.length > 0 ? (
+                      <div className="mb-1 flex flex-wrap gap-1">
+                        {h.modes.map((m) => (
+                          <span key={m.mode} className="rounded border border-slate-200 bg-white px-1.5 py-0.5">
+                            {m.label} <span className="font-semibold tabular-nums">{m.count}</span>
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="mb-1 text-muted-foreground">拼写 {totalSpelling} · 英译中 {totalChoice} · 中译英 {totalC2E} · 短语 {totalPhrase} · 句子 {totalSentence}</div>
+                    )}
                     <div className="flex flex-wrap gap-1">
                       {h.minutes.map((m) => (
                         <Link
