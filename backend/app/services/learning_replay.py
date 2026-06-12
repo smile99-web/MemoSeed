@@ -12,6 +12,7 @@ from app.models.learning_event import LearningEvent, LearningMinuteStat
 from app.models.review_log import ReviewLog
 from app.models.mistake_log import MistakeLog
 from app.models.learning_item import LearningItem
+from app.models.study_time_log import StudyTimeLog
 from app.models.user import User
 
 LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -159,17 +160,44 @@ def build_heatmap(db: Session, user_id: UUID, year: int | None = None) -> dict:
         )
         .group_by(LearningMinuteStat.stat_date)
     ).all()
-    days = [
-        {
-            "date": d.isoformat(),
-            "minutes": round((ms or 0) / 60000, 1),
-            "events": int(events or 0),
-            "color": color_for_minutes(round((ms or 0) / 60000)),
-        }
-        for d, ms, events in rows
-    ]
+
+    # Also get StudyTimeLog data for accurate daily study minutes
+    study_rows = db.execute(
+        select(
+            func.date(StudyTimeLog.recorded_at).label("d"),
+            func.sum(StudyTimeLog.duration_seconds).label("secs"),
+        )
+        .where(
+            StudyTimeLog.user_id == user_id,
+            func.date(StudyTimeLog.recorded_at) >= start,
+            func.date(StudyTimeLog.recorded_at) <= end,
+        )
+        .group_by(func.date(StudyTimeLog.recorded_at))
+    ).all()
+    study_by_date: dict[str, int] = {str(d): int(s or 0) for d, s in study_rows}
+
+    event_by_date: dict[str, tuple[float, int]] = {}
+    for d, ms, events in rows:
+        event_by_date[str(d)] = (round((ms or 0) / 60000, 1), int(events or 0))
+
+    # Merge: use the MAX of event-measured minutes and StudyTimeLog minutes
+    first_day = date(target_year, 1, 1)
+    year_days = 366 if (target_year % 4 == 0 and (target_year % 100 != 0 or target_year % 400 == 0)) else 365
+    days = []
+    for i in range(year_days):
+        d = (first_day + timedelta(days=i)).isoformat()
+        ev_min, ev_count = event_by_date.get(d, (0.0, 0))
+        st_min = round(study_by_date.get(d, 0) / 60, 1)
+        real_min = max(ev_min, st_min)
+        days.append({
+            "date": d,
+            "minutes": real_min,
+            "events": ev_count,
+            "color": color_for_minutes(int(real_min)),
+        })
+
     total_minutes = sum(d["minutes"] for d in days)
-    total_days = sum(1 for d in days if d["events"] > 0)
+    total_days = sum(1 for d in days if d["events"] > 0 or d["minutes"] > 0)
     return {
         "year": target_year,
         "days": days,

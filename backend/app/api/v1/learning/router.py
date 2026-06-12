@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -66,6 +67,7 @@ from app.services.word_translation_cache import ensure_word_translations, get_ca
 from app.utils import extract_mistake_words, normalize_word, string_setting, tokenize_words
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 WORD_MEMORY_SOURCE = "word-memory"
 GENERIC_WORD_DISTRACTORS = [
@@ -1211,6 +1213,24 @@ def create_word_mistake_log(
     )
     word_state = sync_word_memory_from_review(db, current_user.id, word_item.english_text, result.memory_state, "word-spelling", False, error_type)
     schedule_micro_review_tasks_for_mistake(db, current_user.id, word_state, learning_item.chinese_text, learning_item.id, error_type)
+    try:
+        from app.services.learning_replay import record_learning_event
+        now = datetime.now(UTC)
+        last_review = db.execute(
+            select(ReviewLog.reviewed_at).where(
+                ReviewLog.user_id == current_user.id,
+                ReviewLog.id != result.review_log.id,
+                ReviewLog.reviewed_at.isnot(None),
+            ).order_by(ReviewLog.reviewed_at.desc()).limit(1)
+        ).scalar()
+        if last_review and result.review_log.reviewed_at:
+            gap_seconds = (result.review_log.reviewed_at - last_review).total_seconds()
+            duration_ms = int(min(gap_seconds, 60) * 1000) if 0 < gap_seconds < 300 else 20000
+        else:
+            duration_ms = 20000
+        record_learning_event(db, current_user.id, result.review_log, word_item, duration_ms=duration_ms)
+    except Exception as exc:
+        logger.warning("Failed to record learning replay event for word mistake: %s", exc)
     db.commit()
     return WordMistakeLogResponse(logged_count=1)
 
@@ -1267,12 +1287,29 @@ def create_word_review(
             award_points(db, current_user.id, POINTS_WRONG, "word_wrong", f"拼写错误 {POINTS_WRONG}", word_item.id)
         except Exception:
             pass  # points failure should never block learning
-    # Learning Replay: record event + update minute stats
+    # Learning Replay: record event + estimate duration from gap to previous event
     try:
         from app.services.learning_replay import record_learning_event
-        record_learning_event(db, current_user.id, result.review_log, word_item, duration_ms=0)
-    except Exception:
-        pass
+        now = datetime.now(UTC)
+        # Estimate duration from gap to last review (or default 20s)
+        last_review = db.execute(
+            select(ReviewLog.reviewed_at).where(
+                ReviewLog.user_id == current_user.id,
+                ReviewLog.id != result.review_log.id,
+                ReviewLog.reviewed_at.isnot(None),
+            ).order_by(ReviewLog.reviewed_at.desc()).limit(1)
+        ).scalar()
+        if last_review and result.review_log.reviewed_at:
+            gap_seconds = (result.review_log.reviewed_at - last_review).total_seconds()
+            if 0 < gap_seconds < 300:
+                duration_ms = int(min(gap_seconds, 60) * 1000)
+            else:
+                duration_ms = 20000
+        else:
+            duration_ms = 20000
+        record_learning_event(db, current_user.id, result.review_log, word_item, duration_ms=duration_ms)
+    except Exception as exc:
+        logger.warning("Failed to record learning replay event for word review: %s", exc)
     db.commit()
     return WordReviewResponse(learning_item_id=word_item.id, word=word_item.english_text)
 
