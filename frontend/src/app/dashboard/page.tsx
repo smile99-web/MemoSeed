@@ -7,7 +7,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest, getFreshAccessToken } from "@/lib/api";
-import { LearningReplayCompact } from "./replay/compact";
 import { getAccessToken } from "@/lib/auth";
 import { DayDetail, Heatmap, HeatmapDay, getDayDetail, getHeatmap } from "@/lib/learning-replay";
 import { getModelSettings, savePersistedModelSettings } from "@/lib/model-settings";
@@ -967,21 +966,6 @@ export default function DashboardPage() {
                 </CardContent>
               </Card>
             ) : null}
-
-            <Card>
-              <CardHeader className="pb-2">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <CardTitle className="flex items-center gap-2 text-lg">🗓️ 学习热力图</CardTitle>
-                  <Link href="/dashboard/replay" className="text-sm font-medium text-emerald-700 hover:underline">
-                    打开完整回放 →
-                  </Link>
-                </div>
-                <CardDescription>点击日期进入分钟级回放（GitHub Contribution 风格）</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <LearningReplayCompact onSelectDate={(d) => window.location.assign(`/dashboard/replay/${d}`)} />
-              </CardContent>
-            </Card>
 
             {pointsSummary ? (
               <Card className="border-2 border-amber-200 bg-gradient-to-r from-amber-50 to-yellow-50">
