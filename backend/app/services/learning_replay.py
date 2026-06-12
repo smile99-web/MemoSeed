@@ -106,21 +106,25 @@ def _fill_gap_minutes(db: Session, user_id: UUID, event: LearningEvent) -> None:
     This ensures the minute-level replay shows continuous study time, not just
     the exact minutes when reviews happened.
     """
-    key = (user_id, event.event_date, event.event_hour)
     prev = _last_event_minute.get(user_id)
-    if prev is None or prev[:3] != key:
+    if prev is None:
         _last_event_minute[user_id] = (event.event_date, event.event_hour, event.event_minute)
         return
 
-    _, _, prev_minute = prev
+    prev_date, prev_hour, prev_minute = prev
+    # Reset if different date or hour
+    if prev_date != event.event_date or prev_hour != event.event_hour:
+        _last_event_minute[user_id] = (event.event_date, event.event_hour, event.event_minute)
+        return
+
     curr_minute = event.event_minute
     gap = curr_minute - prev_minute
     if gap <= 1:
         _last_event_minute[user_id] = (event.event_date, event.event_hour, event.event_minute)
         return
 
-    # Fill all gap minutes with 20s study time each
-    gap_duration_ms = int((event.duration_ms or 20000) / gap * 0.5)  # distribute some time
+    # Fill all gap minutes with estimated study time
+    gap_duration_ms = int((event.duration_ms or 20000) / gap * 0.5)
     for gm in range(prev_minute + 1, curr_minute):
         stmt = select(LearningMinuteStat).where(
             LearningMinuteStat.user_id == user_id,
