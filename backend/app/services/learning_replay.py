@@ -65,6 +65,7 @@ def record_learning_event(
     if review_log.score is None or review_log.reviewed_at is None:
         return None
 
+    effective_duration_ms = duration_ms if duration_ms > 0 else int(max(review_log.duration_seconds or 0, 0) * 1000)
     local_dt = review_log.reviewed_at.astimezone(LOCAL_TIMEZONE)
     event = LearningEvent(
         user_id=user_id,
@@ -83,7 +84,7 @@ def record_learning_event(
         english_text=(learning_item.english_text if learning_item else ""),
         chinese_text=(learning_item.chinese_text if learning_item else None),
         response_text=review_log.response_text,
-        duration_ms=max(0, duration_ms),
+        duration_ms=max(0, effective_duration_ms),
         error_type=review_log.error_type,
     )
     db.add(event)
@@ -296,10 +297,17 @@ def build_minute_events(db: Session, user_id: UUID, day: date, hour: int, minute
 
 
 def backfill_events_from_review_logs(db: Session, user_id: UUID) -> int:
-    """One-time migration: convert existing review_logs into learning_events + minute stats."""
-    existing = db.scalar(select(func.count(LearningEvent.id)).where(LearningEvent.user_id == user_id)) or 0
-    if existing > 0:
-        return 0
+    """Convert missing review logs into replay events and repair zero-duration stats."""
+    existing_events = {
+        event.review_log_id: event
+        for event in db.scalars(
+            select(LearningEvent).where(
+                LearningEvent.user_id == user_id,
+                LearningEvent.review_log_id.isnot(None),
+            )
+        ).all()
+        if event.review_log_id is not None
+    }
     logs = db.execute(
         select(ReviewLog, LearningItem)
         .outerjoin(LearningItem, LearningItem.id == ReviewLog.learning_item_id)
@@ -307,10 +315,51 @@ def backfill_events_from_review_logs(db: Session, user_id: UUID) -> int:
         .order_by(ReviewLog.reviewed_at.asc())
     ).all()
     count = 0
+    prev_time = None
     for log, item in logs:
         if log.score is None:
             continue
-        record_learning_event(db, user_id, log, item, duration_ms=0)
+        # Use real duration if logged, else estimate from gap to previous event
+        if log.duration_seconds and log.duration_seconds > 0:
+            expected_duration_ms = int(log.duration_seconds * 1000)
+        elif prev_time and log.reviewed_at:
+            gap_seconds = (log.reviewed_at - prev_time).total_seconds()
+            if 0 < gap_seconds < 300:
+                expected_duration_ms = int(min(gap_seconds, 60) * 1000)
+            else:
+                expected_duration_ms = 20000
+        else:
+            expected_duration_ms = 20000
+        existing_event = existing_events.get(log.id)
+        if existing_event is not None:
+            delta_ms = max(expected_duration_ms - (existing_event.duration_ms or 0), 0)
+            if delta_ms > 0:
+                existing_event.duration_ms = expected_duration_ms
+            if _repair_existing_event_minute_stat(db, existing_event, delta_ms):
+                count += 1
+            continue
+        record_learning_event(db, user_id, log, item, duration_ms=expected_duration_ms)
         count += 1
+        if log.reviewed_at:
+            prev_time = log.reviewed_at
     db.commit()
     return count
+
+
+def _repair_existing_event_minute_stat(db: Session, event: LearningEvent, delta_ms: int) -> bool:
+    stat = db.scalar(
+        select(LearningMinuteStat).where(
+            LearningMinuteStat.user_id == event.user_id,
+            LearningMinuteStat.stat_date == event.event_date,
+            LearningMinuteStat.stat_hour == event.event_hour,
+            LearningMinuteStat.stat_minute == event.event_minute,
+        )
+    )
+    if stat is None:
+        _increment_minute_stat(db, event)
+        return True
+    if delta_ms <= 0:
+        return False
+    stat.study_duration_ms = (stat.study_duration_ms or 0) + delta_ms
+    stat.updated_at = datetime.now(UTC)
+    return True
