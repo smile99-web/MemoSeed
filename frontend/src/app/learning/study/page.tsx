@@ -1699,12 +1699,19 @@ function StudyContent() {
 
     startVoiceSequence();
     setCurrentIndex((index) => {
-      const nextIndex = (index + 1) % items.length;
-      window.localStorage.setItem(getStudyProgressKey(courseId), String(nextIndex));
-      if (options.completedCurrentItem && nextIndex === 0) {
+      const nextIndex = index + 1;
+      // Focus mode: stop at end instead of wrapping around
+      if (isFocusMode && nextIndex >= items.length) {
+        setFeedback("🎯 聚焦完成！今天这批词已经全部练习完毕。", "success");
+        return index; // stay on last item
+      }
+      // Normal mode: wrap around to beginning
+      const wrappedIndex = nextIndex % items.length;
+      window.localStorage.setItem(getStudyProgressKey(courseId), String(wrappedIndex));
+      if (options.completedCurrentItem && wrappedIndex === 0) {
         window.setTimeout(showCourseCompletion, 0);
       }
-      return nextIndex;
+      return wrappedIndex;
     });
   }, [courseId, items.length, showCourseCompletion, startVoiceSequence]);
 
