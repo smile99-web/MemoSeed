@@ -108,24 +108,34 @@ def _increment_minute_stat(db: Session, event: LearningEvent) -> None:
             stat_date=event.event_date,
             stat_hour=event.event_hour,
             stat_minute=event.event_minute,
+            total_events=0,
+            spelling_events=0,
+            english_to_chinese_events=0,
+            chinese_to_english_events=0,
+            phrase_events=0,
+            sentence_events=0,
+            correct_events=0,
+            incorrect_events=0,
+            study_duration_ms=0,
         )
         db.add(stat)
-    stat.total_events += 1
+        db.flush()
+    stat.total_events = (stat.total_events or 0) + 1
     if category == "spelling":
-        stat.spelling_events += 1
+        stat.spelling_events = (stat.spelling_events or 0) + 1
     elif category == "english_to_chinese":
-        stat.english_to_chinese_events += 1
+        stat.english_to_chinese_events = (stat.english_to_chinese_events or 0) + 1
     elif category == "chinese_to_english":
-        stat.chinese_to_english_events += 1
+        stat.chinese_to_english_events = (stat.chinese_to_english_events or 0) + 1
     elif category == "phrase":
-        stat.phrase_events += 1
+        stat.phrase_events = (stat.phrase_events or 0) + 1
     elif category == "sentence":
-        stat.sentence_events += 1
+        stat.sentence_events = (stat.sentence_events or 0) + 1
     if event.is_correct:
-        stat.correct_events += 1
+        stat.correct_events = (stat.correct_events or 0) + 1
     else:
-        stat.incorrect_events += 1
-    stat.study_duration_ms += event.duration_ms
+        stat.incorrect_events = (stat.incorrect_events or 0) + 1
+    stat.study_duration_ms = (stat.study_duration_ms or 0) + event.duration_ms
     stat.updated_at = datetime.now(UTC)
 
 
