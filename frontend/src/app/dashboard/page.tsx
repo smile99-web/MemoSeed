@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest, getFreshAccessToken } from "@/lib/api";
+import { PointsHeatmapCompact } from "./replay/points-heatmap";
 import { getAccessToken } from "@/lib/auth";
 import { DayDetail, Heatmap, HeatmapDay, getDayDetail, getHeatmap } from "@/lib/learning-replay";
 import { getModelSettings, savePersistedModelSettings } from "@/lib/model-settings";
@@ -996,6 +997,10 @@ export default function DashboardPage() {
                         </div>
                       )}
                     </div>
+                  </div>
+                  <div className="mt-3 border-t pt-3">
+                    <p className="mb-1 text-xs font-medium text-muted-foreground">积分热力图</p>
+                    <PointsHeatmapCompact />
                   </div>
                   {pointsSummary.recent_logs.length > 0 && (
                     <div className="mt-3 border-t pt-2">
