@@ -174,7 +174,7 @@ def build_heatmap(db: Session, user_id: UUID, year: int | None = None) -> dict:
         )
         .group_by(func.date(StudyTimeLog.recorded_at))
     ).all()
-    study_by_date: dict[str, int] = {str(d): int(s or 0) for d, s in study_rows}
+    study_by_date: dict[str, float] = {str(d): float(s or 0) for d, s in study_rows}
 
     event_by_date: dict[str, tuple[float, int]] = {}
     for d, ms, events in rows:
