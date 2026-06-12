@@ -216,15 +216,21 @@ def build_day_detail(db: Session, user_id: UUID, day: date) -> dict:
             "accuracy": round((r.correct_events / r.total_events) * 100, 1) if r.total_events else 0.0,
         })
 
-    hours = [
-        {
+    hours = []
+    for h, minutes in sorted(hours_map.items()):
+        total_ev = sum(m["total"] for m in minutes)
+        correct_ev = sum(m["correct"] for m in minutes)
+        hour_accuracy = round((correct_ev / total_ev) * 100, 1) if total_ev else 0.0
+        hour_study_sec = sum(m.get("study_seconds", 0) for m in minutes)
+        hours.append({
             "hour": h,
             "label": f"{h:02d}:00-{h+1:02d}:00",
             "minutes": minutes,
-            "modes": _build_mode_breakdown_for_minutes(minutes),
-        }
-        for h, minutes in sorted(hours_map.items())
-    ]
+            "modes": _build_mode_breakdown_for_hour(db, user_id, day, h),
+            "total_events": total_ev,
+            "accuracy": hour_accuracy,
+            "study_minutes": round(hour_study_sec / 60, 1),
+        })
     return {
         "date": day.isoformat(),
         "study_minutes": total_minutes,
@@ -255,14 +261,20 @@ MODE_LABELS = {
 }
 
 
-def _build_mode_breakdown_for_minutes(minutes: list[dict]) -> list[dict]:
-    """Aggregate per-minute stats into per-mode counts (e.g. listen_spell: 4, listen_choose: 2)."""
-    aggregate: dict[str, dict[str, int]] = {}
-    for m in minutes:
-        # Run a query for events in this hour; reuse the same source
-        # We can use a placeholder — real aggregation done at hour level
-        pass
-    return []
+def _build_mode_breakdown_for_hour(db: Session, user_id: UUID, day: date, hour: int) -> list[dict]:
+    """Per-mode count for a specific hour."""
+    rows = db.execute(
+        select(LearningEvent.review_mode, func.count(LearningEvent.id))
+        .where(
+            LearningEvent.user_id == user_id,
+            LearningEvent.event_date == day,
+            LearningEvent.event_hour == hour,
+            LearningEvent.review_mode.isnot(None),
+        )
+        .group_by(LearningEvent.review_mode)
+        .order_by(func.count(LearningEvent.id).desc())
+    ).all()
+    return [{"mode": m, "label": MODE_LABELS.get(m or "", m or ""), "count": int(c)} for m, c in rows]
 
 
 def _aggregate_modes_by_minute(db: Session, user_id: UUID, day: date, hour: int) -> list[dict]:

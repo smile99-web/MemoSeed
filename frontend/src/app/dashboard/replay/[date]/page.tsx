@@ -130,7 +130,7 @@ export default function DayReplayPage() {
                   className="mb-2 text-left text-sm font-semibold text-slate-700 hover:text-emerald-600"
                   onClick={() => setSelectedHour(selectedHour === h.hour ? null : h.hour)}
                 >
-                  ⏰ {h.label} · {h.minutes.reduce((s, m) => s + m.total, 0)} 题
+                  ⏰ {h.label} · {h.total_events || h.minutes.reduce((s, m) => s + m.total, 0)} 题 · 正确率 {h.accuracy || 0}%{(h.study_minutes || 0) > 0 ? ` · ${h.study_minutes}分钟` : ''}
                 </button>
                 {h.modes && h.modes.length > 0 ? (
                   <div className="mb-2 flex flex-wrap gap-1 text-xs">

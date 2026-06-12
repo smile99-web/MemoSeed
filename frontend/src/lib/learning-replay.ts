@@ -31,6 +31,9 @@ export interface HourBlock {
   label: string;
   minutes: MinuteBreakdown[];
   modes: Array<{ mode: string; label: string; count: number }>;
+  total_events: number;
+  accuracy: number;
+  study_minutes: number;
 }
 
 export interface ModeCount {

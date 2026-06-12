@@ -197,7 +197,7 @@ export default function LearningReplayPage() {
                 const totalSentence = h.minutes.reduce((s, m) => s + m.sentence, 0);
                 return (
                   <div key={h.hour} className="rounded-md border border-slate-200 bg-slate-50/50 p-2 text-xs">
-                    <div className="mb-1 font-semibold text-slate-700">⏰ {h.label} · 共 {h.minutes.reduce((s, m) => s + m.total, 0)} 题</div>
+                    <div className="mb-1 font-semibold text-slate-700">⏰ {h.label} · {h.total_events || h.minutes.reduce((s, m) => s + m.total, 0)} 题 · 正确率 {h.accuracy || 0}% · {(h.study_minutes || 0) > 0 ? `${h.study_minutes} 分钟` : ''}</div>
                     {h.modes && h.modes.length > 0 ? (
                       <div className="mb-1 flex flex-wrap gap-1">
                         {h.modes.map((m) => (

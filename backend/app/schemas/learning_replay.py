@@ -37,6 +37,9 @@ class HourBlock(BaseModel):
     label: str
     minutes: list[MinuteBreakdown]
     modes: list[dict] = []
+    total_events: int = 0
+    accuracy: float = 0.0
+    study_minutes: float = 0.0
 
 
 class ModeCount(BaseModel):
