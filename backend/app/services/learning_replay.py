@@ -94,8 +94,67 @@ def record_learning_event(
     return event
 
 
+# Track the last recorded minute per user to fill gaps between events
+_last_event_minute: dict[UUID, tuple[date, int, int]] = {}  # user_id -> (date, hour, minute)
+
+
+def _fill_gap_minutes(db: Session, user_id: UUID, event: LearningEvent) -> None:
+    """Fill minute_stats for minutes between the last event and this one.
+
+    If the last event was at 19:05 and this event is at 19:09, create filler
+    entries for minutes 19:06, 19:07, 19:08 with no events but with study_time.
+    This ensures the minute-level replay shows continuous study time, not just
+    the exact minutes when reviews happened.
+    """
+    key = (user_id, event.event_date, event.event_hour)
+    prev = _last_event_minute.get(user_id)
+    if prev is None or prev[:3] != key:
+        _last_event_minute[user_id] = (event.event_date, event.event_hour, event.event_minute)
+        return
+
+    _, _, prev_minute = prev
+    curr_minute = event.event_minute
+    gap = curr_minute - prev_minute
+    if gap <= 1:
+        _last_event_minute[user_id] = (event.event_date, event.event_hour, event.event_minute)
+        return
+
+    # Fill all gap minutes with 20s study time each
+    gap_duration_ms = int((event.duration_ms or 20000) / gap * 0.5)  # distribute some time
+    for gm in range(prev_minute + 1, curr_minute):
+        stmt = select(LearningMinuteStat).where(
+            LearningMinuteStat.user_id == user_id,
+            LearningMinuteStat.stat_date == event.event_date,
+            LearningMinuteStat.stat_hour == event.event_hour,
+            LearningMinuteStat.stat_minute == gm,
+        )
+        existing = db.scalar(stmt)
+        if existing is not None:
+            existing.study_duration_ms = (existing.study_duration_ms or 0) + gap_duration_ms
+            continue
+        stat = LearningMinuteStat(
+            user_id=user_id,
+            stat_date=event.event_date,
+            stat_hour=event.event_hour,
+            stat_minute=gm,
+            study_duration_ms=gap_duration_ms,
+            total_events=0,
+            spelling_events=0,
+            english_to_chinese_events=0,
+            chinese_to_english_events=0,
+            phrase_events=0,
+            sentence_events=0,
+            correct_events=0,
+            incorrect_events=0,
+        )
+        db.add(stat)
+    _last_event_minute[user_id] = (event.event_date, event.event_hour, event.event_minute)
+
+
 def _increment_minute_stat(db: Session, event: LearningEvent) -> None:
     """Upsert pre-aggregated minute stats — fast heatmap/histogram queries."""
+    _fill_gap_minutes(db, event.user_id, event)
+
     category = categorize_review_mode(event.review_mode)
     stmt = select(LearningMinuteStat).where(
         LearningMinuteStat.user_id == event.user_id,
