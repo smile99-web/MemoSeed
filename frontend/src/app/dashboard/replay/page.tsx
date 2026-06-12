@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { getFreshAccessToken } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
 import { DayDetail, Heatmap, HeatmapDay, getDayDetail, getHeatmap } from "@/lib/learning-replay";
 
@@ -16,15 +17,20 @@ export default function LearningReplayPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const token = getAccessToken();
-    if (!token) {
-      setLoading(false);
-      return;
-    }
     void (async () => {
+      let token = getAccessToken();
+      if (!token) {
+        token = await getFreshAccessToken();
+      }
+      if (!token) {
+        setLoading(false);
+        return;
+      }
       try {
         const hm = await getHeatmap(token);
         setHeatmap(hm);
+      } catch {
+        // ignore
       } finally {
         setLoading(false);
       }
@@ -36,9 +42,9 @@ export default function LearningReplayPage() {
       setDayDetail(null);
       return;
     }
-    const token = getAccessToken();
-    if (!token) return;
     void (async () => {
+      const token = getAccessToken() ?? await getFreshAccessToken();
+      if (!token) return;
       try {
         const d = await getDayDetail(token, selectedDate);
         setDayDetail(d);
@@ -184,7 +190,7 @@ export default function LearningReplayPage() {
                       {h.minutes.map((m) => (
                         <Link
                           key={m.minute}
-                          href={`/dashboard/replay/${selectedDate}/${h.hour}-${m.minute}`}
+                          href={`/dashboard/replay/${selectedDate}?hour=${h.hour}&minute=${m.minute}`}
                           className="rounded border border-slate-200 bg-white px-1.5 py-0.5 tabular-nums hover:bg-emerald-50"
                         >
                           {m.minute}分·{m.total}题·{m.accuracy}%
