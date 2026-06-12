@@ -6,8 +6,10 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { apiRequest } from "@/lib/api";
+import { apiRequest, getFreshAccessToken } from "@/lib/api";
+import { LearningReplayCompact } from "./replay/compact";
 import { getAccessToken } from "@/lib/auth";
+import { DayDetail, Heatmap, HeatmapDay, getDayDetail, getHeatmap } from "@/lib/learning-replay";
 import { getModelSettings, savePersistedModelSettings } from "@/lib/model-settings";
 import {
   DailyReport,
@@ -43,6 +45,9 @@ const statusLabels: Record<WordMasterySummary["status"], string> = {
   near_mastered: "接近掌握",
   mastered: "已掌握",
 };
+
+const replayDayLabels = ["", "Mon", "", "Wed", "", "Fri", ""];
+const replayMonthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 function formatPercent(value: number): string {
   return `${Math.round(value * 100)}%`;
@@ -134,6 +139,171 @@ function StatCard({ label, value, hint }: { label: string; value: string | numbe
       </CardHeader>
       <CardContent>
         <p className="text-sm text-muted-foreground ipad:text-base">{hint}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function buildReplayGrid(heatmap: Heatmap | null): {
+  weeks: Array<Array<HeatmapDay | null>>;
+  monthLabels: Array<{ week: number; label: string }>;
+} {
+  if (!heatmap) {
+    return { weeks: [], monthLabels: [] };
+  }
+  const byDate = new Map(heatmap.days.map((day) => [day.date, day]));
+  const firstDay = new Date(Date.UTC(heatmap.year, 0, 1));
+  const startWeekday = (firstDay.getUTCDay() + 6) % 7;
+  const totalDays = 365 + ((heatmap.year % 4 === 0 && (heatmap.year % 100 !== 0 || heatmap.year % 400 === 0)) ? 1 : 0);
+  const cells: Array<HeatmapDay | null> = [];
+  for (let i = 0; i < startWeekday; i += 1) {
+    cells.push(null);
+  }
+  for (let i = 0; i < totalDays; i += 1) {
+    const day = new Date(firstDay.getTime() + i * 86400000);
+    const key = day.toISOString().slice(0, 10);
+    cells.push(byDate.get(key) ?? { date: key, minutes: 0, events: 0, color: "#ebedf0" });
+  }
+  while (cells.length % 7 !== 0) {
+    cells.push(null);
+  }
+
+  const weeks: Array<Array<HeatmapDay | null>> = [];
+  for (let i = 0; i < cells.length; i += 7) {
+    weeks.push(cells.slice(i, i + 7));
+  }
+
+  const monthLabels: Array<{ week: number; label: string }> = [];
+  weeks.forEach((week, index) => {
+    const firstCell = week.find((cell) => cell !== null);
+    if (!firstCell) {
+      return;
+    }
+    const month = new Date(firstCell.date).getUTCMonth();
+    const previousCell = weeks[index - 1]?.find((cell) => cell !== null);
+    const previousMonth = previousCell ? new Date(previousCell.date).getUTCMonth() : null;
+    if (index === 0 || previousMonth !== month) {
+      monthLabels.push({ week: index, label: replayMonthLabels[month] });
+    }
+  });
+  return { weeks, monthLabels };
+}
+
+function LearningReplayCard({
+  heatmap,
+  selectedDate,
+  dayDetail,
+  onSelectDate,
+}: {
+  heatmap: Heatmap | null;
+  selectedDate: string | null;
+  dayDetail: DayDetail | null;
+  onSelectDate: (date: string) => void;
+}) {
+  const grid = buildReplayGrid(heatmap);
+
+  return (
+    <Card className="border-emerald-200 bg-emerald-50/30">
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <CardTitle className="text-emerald-800">学习热力图</CardTitle>
+            <CardDescription>
+              {heatmap
+                ? `${heatmap.year} 年 · 累计学习 ${heatmap.total_minutes} 分钟 · 活跃 ${heatmap.active_days} 天`
+                : "正在加载年度学习分布"}
+            </CardDescription>
+          </div>
+          <div className="flex items-center gap-1 text-xs text-muted-foreground">
+            <span>少</span>
+            <span className="h-3 w-3 rounded-sm" style={{ background: "#ebedf0" }} />
+            <span className="h-3 w-3 rounded-sm" style={{ background: "#9be9a8" }} />
+            <span className="h-3 w-3 rounded-sm" style={{ background: "#40c463" }} />
+            <span className="h-3 w-3 rounded-sm" style={{ background: "#30a14e" }} />
+            <span className="h-3 w-3 rounded-sm" style={{ background: "#216e39" }} />
+            <span>多</span>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {heatmap ? (
+          <div className="overflow-x-auto pb-1">
+            <div className="inline-block min-w-full">
+              <div className="flex pl-6 text-[10px] text-muted-foreground" style={{ height: 14 }}>
+                {grid.monthLabels.map((month) => (
+                  <div key={`replay-month-${month.week}`} style={{ position: "relative", left: `${month.week * 13}px` }}>
+                    {month.label}
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-[2px]">
+                <div className="flex w-6 flex-col gap-[2px] pr-1 text-[10px] text-muted-foreground">
+                  {replayDayLabels.map((label, index) => (
+                    <div key={`replay-day-${index}`} className="h-[12px] leading-[12px]">{label}</div>
+                  ))}
+                </div>
+                <div className="flex gap-[2px]">
+                  {grid.weeks.map((week, weekIndex) => (
+                    <div key={`replay-week-${weekIndex}`} className="flex flex-col gap-[2px]">
+                      {week.map((cell, dayIndex) => (
+                        <button
+                          type="button"
+                          key={`replay-cell-${weekIndex}-${dayIndex}`}
+                          title={cell ? `${cell.date} · ${cell.minutes} 分钟 · ${cell.events} 次` : ""}
+                          disabled={!cell}
+                          onClick={() => cell && onSelectDate(cell.date)}
+                          className={`h-[12px] w-[12px] rounded-sm border transition ${
+                            selectedDate === cell?.date
+                              ? "border-emerald-700 ring-1 ring-emerald-500"
+                              : "border-transparent hover:border-slate-400"
+                          }`}
+                          style={{ background: cell ? cell.color : "transparent" }}
+                        />
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <Skeleton className="h-28 rounded-lg" />
+        )}
+
+        {selectedDate ? (
+          <div className="rounded-lg border border-emerald-200 bg-white/70 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="font-semibold text-emerald-900">{selectedDate} 学习详情</p>
+                {dayDetail ? (
+                  <p className="text-xs text-muted-foreground">
+                    {dayDetail.total_events} 次练习 · {dayDetail.study_minutes} 分钟 · 正确率 {dayDetail.accuracy}% · 错词 {dayDetail.mistake_count}
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">正在加载当天学习详情...</p>
+                )}
+              </div>
+              <Link href={`/dashboard/replay/${selectedDate}`} className="text-sm font-medium text-emerald-700 hover:underline">
+                分钟级回放
+              </Link>
+            </div>
+            {dayDetail && dayDetail.hours.length > 0 ? (
+              <div className="mt-3 grid gap-2 md:grid-cols-2">
+                {dayDetail.hours.map((hour) => (
+                  <div key={hour.hour} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                    <div className="font-semibold text-slate-700">{hour.label}</div>
+                    <div className="text-muted-foreground">
+                      {hour.minutes.reduce((sum, minute) => sum + minute.total, 0)} 题 ·
+                      拼写 {hour.minutes.reduce((sum, minute) => sum + minute.spelling, 0)} ·
+                      英译中 {hour.minutes.reduce((sum, minute) => sum + minute.english_to_chinese, 0)} ·
+                      中译英 {hour.minutes.reduce((sum, minute) => sum + minute.chinese_to_english, 0)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -276,6 +446,9 @@ export default function DashboardPage() {
   const [todayProgress, setTodayProgress] = useState<TodayProgress | null>(null);
   const [errorBreakdown, setErrorBreakdown] = useState<ErrorBreakdown | null>(null);
   const [studyStreak, setStudyStreak] = useState<StudyStreak | null>(null);
+  const [learningHeatmap, setLearningHeatmap] = useState<Heatmap | null>(null);
+  const [selectedReplayDate, setSelectedReplayDate] = useState<string | null>(null);
+  const [selectedReplayDayDetail, setSelectedReplayDayDetail] = useState<DayDetail | null>(null);
   const [selectedCourseId] = useState<string>("");
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [selectedWordHistory, setSelectedWordHistory] = useState<WordHistoryResponse | null>(null);
@@ -283,7 +456,7 @@ export default function DashboardPage() {
 
   useEffect(() => {
     async function loadDashboard() {
-      const accessToken = getAccessToken();
+      const accessToken = getAccessToken() ?? await getFreshAccessToken();
       if (!accessToken) {
         setErrorMessage("请先登录后再查看数据看板");
         setIsLoading(false);
@@ -292,7 +465,7 @@ export default function DashboardPage() {
 
       try {
         const courseId = selectedCourseId || undefined;
-        const [dashboardData, reportData, planData, curveData, errorData, streakData, forecastData, pointsData, progressData] = await Promise.all([
+        const [dashboardData, reportData, planData, curveData, errorData, streakData, forecastData, pointsData, progressData, heatmapData] = await Promise.all([
           getMemoryDashboardWithCourse(accessToken, courseId),
           getDailyReport(accessToken).catch(() => null),
           getTodayPlan(accessToken).catch(() => null),
@@ -302,6 +475,7 @@ export default function DashboardPage() {
           getReviewForecast(accessToken).catch(() => null),
           getPointsSummary(accessToken).catch(() => null),
           getTodayProgress(accessToken).catch(() => null),
+          getHeatmap(accessToken).catch(() => null),
         ]);
         setDashboard(dashboardData);
         setDailyReport(reportData);
@@ -312,6 +486,7 @@ export default function DashboardPage() {
         setReviewForecast(forecastData);
         setPointsSummary(pointsData);
         setTodayProgress(progressData);
+        setLearningHeatmap(heatmapData);
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "读取数据看板失败");
       } finally {
@@ -454,8 +629,22 @@ export default function DashboardPage() {
     }
   }
 
+  async function handleReplayDateSelect(date: string) {
+    const accessToken = getAccessToken() ?? await getFreshAccessToken();
+    if (!accessToken) {
+      setErrorMessage("请先登录后再查看学习回放");
+      return;
+    }
+    setSelectedReplayDate(date);
+    setSelectedReplayDayDetail(null);
+    try {
+      setSelectedReplayDayDetail(await getDayDetail(accessToken, date));
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "读取学习回放失败");
+    }
+  }
+
   const fsrsFitRecommendation = dashboard ? getFsrsFitRecommendation(dashboard) : null;
-  const maxRetentionCount = retentionCurve ? Math.max(...retentionCurve.bins.map((b) => b.total_reviews), 1) : 1;
   const maxErrorCount = errorBreakdown ? Math.max(...errorBreakdown.items.map((item) => Math.max(item.this_week_count, item.last_week_count)), 1) : 1;
 
   return (
@@ -546,19 +735,12 @@ export default function DashboardPage() {
 
         {dashboard ? (
           <>
-            <Card className="border-emerald-200 bg-gradient-to-r from-emerald-50 to-teal-50">
-              <CardHeader>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <CardTitle className="text-emerald-800">📅 学习回放</CardTitle>
-                  <Link href="/dashboard/replay" className="text-sm font-medium text-emerald-700 hover:underline">
-                    打开热力图 →
-                  </Link>
-                </div>
-                <CardDescription>
-                  类似 GitHub Contribution 视图，支持年度/日/小时/分钟四级回放
-                </CardDescription>
-              </CardHeader>
-            </Card>
+            <LearningReplayCard
+              heatmap={learningHeatmap}
+              selectedDate={selectedReplayDate}
+              dayDetail={selectedReplayDayDetail}
+              onSelectDate={handleReplayDateSelect}
+            />
 
             {dailyReport ? (
               <Card className="border-emerald-200 bg-emerald-50/30">
@@ -785,6 +967,21 @@ export default function DashboardPage() {
                 </CardContent>
               </Card>
             ) : null}
+
+            <Card>
+              <CardHeader className="pb-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <CardTitle className="flex items-center gap-2 text-lg">🗓️ 学习热力图</CardTitle>
+                  <Link href="/dashboard/replay" className="text-sm font-medium text-emerald-700 hover:underline">
+                    打开完整回放 →
+                  </Link>
+                </div>
+                <CardDescription>点击日期进入分钟级回放（GitHub Contribution 风格）</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <LearningReplayCompact onSelectDate={(d) => window.location.assign(`/dashboard/replay/${d}`)} />
+              </CardContent>
+            </Card>
 
             {pointsSummary ? (
               <Card className="border-2 border-amber-200 bg-gradient-to-r from-amber-50 to-yellow-50">
