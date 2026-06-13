@@ -1470,8 +1470,8 @@ function StudyContent() {
       }
 
       try {
-        // In focus mode, only load the focus set — no course items.
-        const nextItems = isFocusMode ? [] : await listLearningItems(accessToken, courseId).catch(() => [] as LearningItem[]);
+        // Always load course items — focus words come first via mergeLearningQueues
+        const nextItems = await listLearningItems(accessToken, courseId).catch(() => [] as LearningItem[]);
         const dueReviewItems = await listDueReviewItems(accessToken, courseId, INITIAL_REVIEW_QUEUE_LIMIT, false, INITIAL_REVIEW_QUEUE_LIMIT, isFocusMode).catch(() => [] as LearningItem[]);
         queuedReviewItemIdsRef.current = new Set(dueReviewItems.map((item) => item.id));
         const mergedItems = mergeLearningQueues(dueReviewItems, nextItems);
@@ -1700,11 +1700,11 @@ function StudyContent() {
     startVoiceSequence();
     setCurrentIndex((index) => {
       const nextIndex = index + 1;
-      // Focus mode: rotate out all current batch words, then load new focus words
+      // Focus mode: when all items done (focus + course), rotate and reload
       if (isFocusMode && nextIndex >= items.length) {
         updateAnswerState("sentence-complete");
-        setFeedback("🎯 聚焦完成！正在准备下一批单词...", "success");
-        // Rotate all unique words in this session out (push to tomorrow)
+        setFeedback("🎯 全部完成！正在准备下一轮...", "success");
+        // Rotate all items out
         const token = getAccessToken();
         const rotatedIds = new Set<string>();
         for (const item of items) {
@@ -1715,7 +1715,6 @@ function StudyContent() {
             }
           }
         }
-        // Reload page after brief pause — fresh focus session with new words
         window.setTimeout(() => {
           window.location.reload();
         }, 2000);
