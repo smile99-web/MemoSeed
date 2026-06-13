@@ -114,7 +114,10 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
     if course_id is not None:
         item_query = item_query.where(LearningItem.course_id == course_id)
     item_rows = db.execute(item_query).all()
-    memory_states = [memory_state for _, memory_state in item_rows if memory_state is not None]
+    memory_states_all = [memory_state for _, memory_state in item_rows if memory_state is not None]
+    # Word-centic: only count word-type items for review stats
+    word_memory_state_ids = {ms.id for item, ms in item_rows if ms is not None and item.item_type == "word"}
+    memory_states = [ms for ms in memory_states_all if ms.id in word_memory_state_ids]
     memory_state_by_id = {memory_state.id: memory_state for memory_state in memory_states}
 
     word_stats: dict[str, WordStats] = {}
@@ -289,7 +292,7 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
         learning_words=learning_words,
         weak_words=weak_words,
         due_now_count=len([s for s in summaries if s.next_review_at is not None and s.next_review_at <= now]),
-        overdue_count=len([state for state in memory_states if state.next_review_at < now - timedelta(hours=1)]),
+        overdue_count=len([s for s in summaries if s.next_review_at is not None and s.next_review_at < now - timedelta(hours=1)]),
         average_memory_strength=round(average(current_memory_strengths), 2),
         average_forget_risk=round(average(current_forget_risks), 2),
         average_interval_days=round(average([state.interval_days for state in memory_states]), 1),
