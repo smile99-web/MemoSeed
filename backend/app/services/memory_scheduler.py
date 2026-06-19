@@ -510,6 +510,16 @@ def park_stuck_words(db: Session, user_id: UUID, now: datetime | None = None) ->
         .where(MemoryState.learning_item_id.in_(stuck_ids_subquery))
         .values(next_review_at=target_due)
     )
+    # Also push micro-review clock forward so parked words don't keep
+    # generating new micro-review tasks while resting.
+    db.execute(
+        update(WordMemoryState)
+        .where(
+            WordMemoryState.user_id == user_id,
+            WordMemoryState.learning_item_id.in_(stuck_ids_subquery),
+        )
+        .values(next_micro_review_at=target_due)
+    )
     db.commit()
     return int(result.rowcount or 0)
 
@@ -582,6 +592,14 @@ def park_cliff_words(db: Session, user_id: UUID, now: datetime | None = None) ->
         .where(MemoryState.learning_item_id.in_(cliff_ids_subquery))
         .values(next_review_at=target_due)
     )
+    db.execute(
+        update(WordMemoryState)
+        .where(
+            WordMemoryState.user_id == user_id,
+            WordMemoryState.learning_item_id.in_(cliff_ids_subquery),
+        )
+        .values(next_micro_review_at=target_due)
+    )
     db.commit()
     return int(result.rowcount or 0)
 
@@ -624,6 +642,18 @@ def park_mastered_words(db: Session, user_id: UUID, now: datetime | None = None)
         update(MemoryState)
         .where(MemoryState.learning_item_id.in_(mastered_ids_subquery))
         .values(next_review_at=target_due)
+    )
+    # Also push micro-review clock forward for parked mastered words.
+    # Without this, word_memory_states.next_micro_review_at stays in the
+    # past and ensure_due_word_review_tasks keeps creating new micro-review
+    # tasks for a word that's supposed to be resting for 30 days.
+    db.execute(
+        update(WordMemoryState)
+        .where(
+            WordMemoryState.user_id == user_id,
+            WordMemoryState.learning_item_id.in_(mastered_ids_subquery),
+        )
+        .values(next_micro_review_at=target_due)
     )
     db.commit()
     return int(result.rowcount or 0)
