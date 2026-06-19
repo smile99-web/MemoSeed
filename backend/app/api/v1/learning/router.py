@@ -775,6 +775,15 @@ def list_due_review_items(
     if focus and sentence_review_items:
         # Focus mode: top 7-9 words, warm-up order, phonics grouping.
         FOCUS_WORD_COUNT = 7
+        # Rotate sessions: shuffle the top candidates so every session
+        # draws different words. Also push selected items to tomorrow so
+        # next session naturally picks fresh content. Without the push,
+        # the top priority items (like "Drink some water now." which is
+        # 5 days overdue) would always dominate the candidate pool.
+        import random
+        pool = sentence_review_items[:max(FOCUS_WORD_COUNT * 3, len(sentence_review_items))]
+        random.shuffle(pool)
+        sentence_review_items = pool + sentence_review_items[len(pool):]
         # Mixed mode set: 2 recognition tasks first (build confidence),
         # then 3 spelling tasks (apply what was just reviewed).
         # The old set [chinese_to_english, listen_spell, missing_letter]
@@ -860,6 +869,16 @@ def list_due_review_items(
                     "focus_words": [main_word],
                 })
                 focus_items.append(focus_item)
+        # Push selected sentences to tomorrow so the next session
+        # draws fresh content. Without this, the same 7 sentences
+        # (top priority, always in the pool) reappear every session.
+        for item in top_items:
+            db.execute(
+                update(MemoryState)
+                .where(MemoryState.learning_item_id == item.id)
+                .values(next_review_at=now + timedelta(days=1))
+            )
+        db.commit()
         return task_review_items[:3] + focus_items
 
     if interleave and task_review_items and sentence_review_items:
