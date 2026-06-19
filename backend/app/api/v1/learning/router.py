@@ -49,7 +49,15 @@ from app.services.dynamic_sentence import generate_dynamic_review_sentence
 from app.services.learning_import import SUPPORTED_IMPORT_EXTENSIONS, import_learning_items, parse_txt_import, parse_xlsx_import
 from app.services.llm_translation import DEFAULT_LLM_TRANSLATION_SETTINGS, LlmTranslationSettings, generate_learning_text, needs_translation, translate_english_to_chinese
 from app.services.memory_dashboard import calculate_word_priority
-from app.services.memory_scheduler import calculate_current_forget_risk, calculate_review_priority, schedule_memory_review
+from app.services.memory_scheduler import (
+    calculate_current_forget_risk,
+    calculate_review_priority,
+    exceeded_daily_review_filter_clause,
+    park_mastered_words,
+    schedule_memory_review,
+    stuck_word_daily_cap_filter_clause,
+    stuck_word_filter_clause,
+)
 from app.services.secure_model_settings import get_private_model_settings
 from app.services.speech_asset_cache import build_learning_speech_targets, ensure_volcengine_speech_asset
 from app.services.tts_cache import build_cache_key, get_cached_audio
@@ -581,6 +589,8 @@ def list_due_review_items(
     capped_limit = max(1, min(limit, 200))
     effective_review_cap = review_cap if review_cap is not None else capped_limit
     now = datetime.now(UTC)
+    # Local-day boundary (Asia/Shanghai) for the per-day review cap.
+    today_start = (now + timedelta(hours=8)).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=8)
     item_by_id: dict[UUID, LearningItem] = {}
     focus_words_by_item_id: dict[UUID, list[str]] = {}
 
@@ -597,14 +607,26 @@ def list_due_review_items(
                 current_words.append(normalized_word)
 
     stored_settings = get_private_model_settings(db, current_user.id)
+    # Mastered words get pushed +30 days so they don't compete for attention
+    # with new/struggling words. See memory_scheduler.park_mastered_words.
+    park_mastered_words(db, current_user.id, now)
     cloze_settings = build_llm_translation_settings(None, None, None, None, stored_settings)
     has_task_updates = supersede_stale_pending_tasks_for_reviewed_words(db, current_user.id, now)
 
     # Word-centric: prioritize word-type items first, then sentences as context
+    # The stuck-word filter and per-day review cap prevent a handful of
+    # unlearnable words from dominating the queue (see memory_scheduler
+    # STUCK_WORD_LAPSE_THRESHOLD / MAX_DAILY_REVIEWS_PER_WORD).
     due_statement = (
         select(LearningItem, MemoryState)
         .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
-        .where(LearningItem.user_id == current_user.id, MemoryState.next_review_at <= now)
+        .where(
+            LearningItem.user_id == current_user.id,
+            MemoryState.next_review_at <= now,
+            stuck_word_filter_clause(),
+            exceeded_daily_review_filter_clause(current_user.id, today_start),
+            stuck_word_daily_cap_filter_clause(current_user.id, today_start),
+        )
         .order_by(
             LearningItem.item_type.desc(),  # "word" > "sentence" > "phrase"
             MemoryState.next_review_at.asc(),

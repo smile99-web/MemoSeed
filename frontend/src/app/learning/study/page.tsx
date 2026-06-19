@@ -1733,7 +1733,10 @@ function StudyContent() {
         review_mode: reviewMode,
         response_text: responseText,
         error_type: errorType,
-        duration_seconds: 0,
+        // Real elapsed time, not 0. The backend uses this for the study-time
+        // summary; sending 0 here made the dashboard's "累计学习时长" (total
+        // study time) underreport dramatically.
+        duration_seconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
         encoding_stage: currentEncodingStage ?? undefined,
         encoding_duration_ms: encodingDurationMs,
       },
@@ -2477,7 +2480,9 @@ function StudyContent() {
             review_mode: `word-${currentItem.review_task_type}`,
             response_text: selectedChoice,
             error_type: isCorrect ? undefined : "meaning",
-            duration_seconds: 0,
+            // Real elapsed time, not 0. See the comment in
+            // recordWordMemoryReview above.
+            duration_seconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
           },
           accessToken,
         );

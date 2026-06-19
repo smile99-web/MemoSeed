@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
@@ -12,7 +12,15 @@ from app.models.memory_state import MemoryState
 from app.models.user import User
 from app.schemas.memory import MemoryScheduleResponse, MemoryStateRead
 from app.schemas.review import MistakeLogRead, ReviewLogCreate, ReviewLogRead
-from app.services.memory_scheduler import calculate_current_forget_risk, calculate_review_priority, schedule_memory_review
+from app.services.memory_scheduler import (
+    calculate_current_forget_risk,
+    calculate_review_priority,
+    exceeded_daily_review_filter_clause,
+    park_mastered_words,
+    schedule_memory_review,
+    stuck_word_daily_cap_filter_clause,
+    stuck_word_filter_clause,
+)
 
 router = APIRouter()
 
@@ -23,11 +31,24 @@ def get_review_queue(
     db: Annotated[Session, Depends(get_db)],
 ) -> list[MemoryStateRead]:
     now = datetime.now(UTC)
+    # Push mastered words to +30 days before fetching the queue so they
+    # don't compete for attention with new/struggling words. See
+    # memory_scheduler.park_mastered_words.
+    park_mastered_words(db, current_user.id, now)
+    # Today (Asia/Shanghai) — the daily cap uses local-day boundaries so a
+    # late-night session doesn't double-count against the next-day morning.
+    today_start = (now + timedelta(hours=8)).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=8)
     memory_states = list(
         db.scalars(
             select(MemoryState)
             .join(LearningItem, LearningItem.id == MemoryState.learning_item_id)
-            .where(LearningItem.user_id == current_user.id, MemoryState.next_review_at <= now)
+            .where(
+                LearningItem.user_id == current_user.id,
+                MemoryState.next_review_at <= now,
+                stuck_word_filter_clause(),
+                exceeded_daily_review_filter_clause(current_user.id, today_start),
+                stuck_word_daily_cap_filter_clause(current_user.id, today_start),
+            )
             .order_by(MemoryState.next_review_at.asc())
         ).all()
     )

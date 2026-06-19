@@ -5,7 +5,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, and_, func, not_, select, update
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
@@ -114,6 +114,24 @@ SLOW_LEARNER_TARGET_RETENTION = 0.92
 CHILD_STS_DECAY = -0.8                 # steeper than long-term FSRS_DECAY=-0.5
 CHILD_STS_HALF_LIFE_MINUTES = 30       # STS half-life in minutes
 CHILD_STS_TO_LTS_TRANSFER_RATE = 0.15  # fraction of STS converted to LTS per review
+
+# --- Stuck-word parking lot + per-day review cap ---------------------------
+# A "stuck" word is one that has been tried many times (lapse_count high) and
+# has not made progress (memory_strength very low). Without this filter the
+# FSRS scheduler keeps re-serving these words every session because their
+# forget_risk stays at 1.0 and next_review_at stays in the past, wasting
+# 20-30% of the child's study time on words that won't be learned today.
+# Parked words are excluded from the due-queue at query time; their
+# next_review_at is NOT mutated, so they re-enter the queue naturally once
+# the child's memory consolidates and lapses drop below the threshold.
+STUCK_WORD_LAPSE_THRESHOLD = 10
+STUCK_WORD_STRENGTH_THRESHOLD = 0.3
+STUCK_WORD_RESCHEDULE_DAYS = 7   # informational; we don't actually reschedule
+
+# Daily cap on how many times the same word can appear in the due queue.
+# Without this, a single stuck word can occupy 30% of a session
+# (e.g. 'truth' reviewed 270 times over 24 days).
+MAX_DAILY_REVIEWS_PER_WORD = 3
 
 LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
 WORD_MEMORY_SOURCE = "word-memory"
@@ -301,6 +319,159 @@ def get_scheduler_metadata(db: Session, user_id: UUID) -> SchedulerMetadata:
     )
 
 
+# --- Stuck-word parking lot helpers -----------------------------------------
+def is_stuck_word(memory_state: MemoryState) -> bool:
+    """Return True if a word has been tried many times without progress.
+
+    A word is "stuck" when its lapse_count is at or above
+    STUCK_WORD_LAPSE_THRESHOLD and its memory_strength is below
+    STUCK_WORD_STRENGTH_THRESHOLD. These are words the child has not been
+    able to consolidate across many reviews — re-serving them in the
+    immediate queue is counterproductive (see memory_scheduler header).
+    """
+    lapse = memory_state.lapse_count or 0
+    strength = memory_state.memory_strength or 0.0
+    return lapse >= STUCK_WORD_LAPSE_THRESHOLD and strength < STUCK_WORD_STRENGTH_THRESHOLD
+
+
+def stuck_word_filter_clause() -> ColumnElement[bool]:
+    """Return a SQLAlchemy `not_(...)` clause that excludes stuck words.
+
+    Use in due-queue queries:
+
+        .where(MemoryState.next_review_at <= now, ~stuck_word_filter_clause())
+
+    Note: `~` is the bitwise-not operator which inverts a boolean column
+    expression in SQLAlchemy 2.x.
+    """
+    return not_(
+        and_(
+            MemoryState.lapse_count >= STUCK_WORD_LAPSE_THRESHOLD,
+            MemoryState.memory_strength < STUCK_WORD_STRENGTH_THRESHOLD,
+        )
+    )
+
+
+def exceeded_daily_review_filter_clause(
+    user_id: UUID, today_start: datetime
+) -> ColumnElement[bool]:
+    """Return a NOT clause that excludes words already reviewed >= MAX_DAILY_REVIEWS_PER_WORD
+    times today.
+
+    This prevents a single word from dominating a session. The threshold is
+    intentionally low (3) — a child should not need more than 3 attempts on
+    the same word in one sitting. After a break (next day), the word re-enters
+    the queue.
+    """
+    over_limit_subquery = (
+        select(ReviewLog.learning_item_id)
+        .where(
+            ReviewLog.user_id == user_id,
+            ReviewLog.reviewed_at >= today_start,
+        )
+        .group_by(ReviewLog.learning_item_id)
+        .having(func.count(ReviewLog.id) >= MAX_DAILY_REVIEWS_PER_WORD)
+    )
+    return not_(MemoryState.learning_item_id.in_(over_limit_subquery))
+
+
+def stuck_word_daily_cap_filter_clause(
+    user_id: UUID, today_start: datetime
+) -> ColumnElement[bool]:
+    """Return a NOT clause that excludes STUCK words reviewed 1+ times today.
+
+    Stuck words (lapse_count >= STUCK_WORD_LAPSE_THRESHOLD) get a tighter
+    cap than the normal MAX_DAILY_REVIEWS_PER_WORD. A child should not see
+    a persistently failing word more than once per day — repeated attempts
+    the same day produce no learning signal, just fatigue.
+    """
+    over_limit_subquery = select(ReviewLog.learning_item_id).where(
+        ReviewLog.user_id == user_id,
+        ReviewLog.reviewed_at >= today_start,
+    )
+    return not_(
+        and_(
+            MemoryState.lapse_count >= STUCK_WORD_LAPSE_THRESHOLD,
+            MemoryState.learning_item_id.in_(over_limit_subquery),
+        )
+    )
+
+
+def count_paused_words(db: Session, user_id: UUID) -> int:
+    """Return the number of words currently in the parking lot.
+
+    Surfaced to the dashboard so the user/parent knows the system is
+    intentionally stepping away from a small set of words rather than
+    silently dropping them.
+    """
+    return int(
+        db.scalar(
+            select(func.count(MemoryState.id))
+            .join(LearningItem, LearningItem.id == MemoryState.learning_item_id)
+            .where(
+                LearningItem.user_id == user_id,
+                MemoryState.lapse_count >= STUCK_WORD_LAPSE_THRESHOLD,
+                MemoryState.memory_strength < STUCK_WORD_STRENGTH_THRESHOLD,
+            )
+        )
+        or 0
+    )
+
+
+# --- Mastered-word rotator ----------------------------------------------------
+# Once a word meets the mastered criteria, we push its `next_review_at` to
+# 30 days in the future. This is NOT "stop reviewing forever" — after 30 days
+# the word will re-enter the queue for a retention check. This matches the
+# locked product decision: "已掌握" != "不再复习", just a long interval.
+#
+# We do this at queue-build time rather than at review time because:
+#   1. Mastery can be achieved without a review (e.g. after a focus-mode
+#      session that doesn't write a review_log).
+#   2. We want words that became mastered weeks ago to be re-pushed if the
+#      rotator hasn't run recently.
+#   3. Pushing at review time would only fix forward-going words; old
+#      already-mastered words would still be due today.
+MASTERED_WORD_RESCHEDULE_DAYS = 30
+
+
+def park_mastered_words(db: Session, user_id: UUID, now: datetime | None = None) -> int:
+    """Push `next_review_at` to NOW + 30 days for all currently-mastered words.
+
+    Returns the number of words whose due-date was moved forward. Safe to
+    call repeatedly: a no-op if the new due-date is already in the future.
+    """
+    from app.models.word_memory_state import WordMemoryState
+    now = now or datetime.now(UTC)
+    target_due = now + timedelta(days=MASTERED_WORD_RESCHEDULE_DAYS)
+    # Find mastered words whose current next_review_at is BEFORE the target.
+    # We only push forward — never shorten an already-long interval.
+    mastered_ids_subquery = (
+        select(LearningItem.id)
+        .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
+        .join(WordMemoryState, and_(
+            WordMemoryState.learning_item_id == LearningItem.id,
+            WordMemoryState.user_id == user_id,
+        ))
+        .where(
+            LearningItem.user_id == user_id,
+            LearningItem.item_type == "word",
+            MemoryState.memory_strength >= 0.75,
+            MemoryState.consecutive_error_count <= 1,
+            WordMemoryState.recall_correct_count >= 3,
+            WordMemoryState.no_hint_correct_date_count >= 3,
+            MemoryState.next_review_at < target_due,
+        )
+    )
+    # Bulk update; returns rowcount.
+    result = db.execute(
+        update(MemoryState)
+        .where(MemoryState.learning_item_id.in_(mastered_ids_subquery))
+        .values(next_review_at=target_due)
+    )
+    db.commit()
+    return int(result.rowcount or 0)
+
+
 def initial_fsrs_difficulty(rating: int, weights: tuple[float, ...] = FSRS_WEIGHTS) -> float:
     return constrain_difficulty(weights[4] - exp((rating - 1) * weights[5]) + 1)
 
@@ -360,7 +531,19 @@ def calculate_review_priority(memory_state: MemoryState, now: datetime) -> float
             recent_practice_penalty = 0.06
     if memory_state.consecutive_error_count > 0:
         recent_practice_penalty *= 0.35
-    return round(clamp(current_risk + overdue_boost + lapse_boost + error_boost - recent_practice_penalty, 0.0, 1.0), 4)
+    # New-word boost: words that have been seen few times and still have a
+    # meaningful forget risk get surfaced ahead of older words that the child
+    # is more likely to know. Without this, new words with low strength
+    # would queue behind well-practiced ones and not get enough exposure.
+    # Heuristic: repetition_count < 5 AND current_risk > 0.3 → +0.10.
+    new_word_boost = 0.0
+    if (memory_state.repetition_count or 0) < 5 and current_risk > 0.3:
+        new_word_boost = 0.10
+    return round(clamp(
+        current_risk + overdue_boost + lapse_boost + error_boost
+        - recent_practice_penalty + new_word_boost,
+        0.0, 1.0,
+    ), 4)
 
 
 def next_fsrs_difficulty(current_difficulty: float, rating: int, weights: tuple[float, ...] = FSRS_WEIGHTS) -> float:
