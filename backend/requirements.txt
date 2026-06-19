@@ -13,3 +13,7 @@ openpyxl==3.1.5
 email-validator==2.2.0
 ruff==0.8.4
 mypy==1.14.1
+
+# Test dependencies (dev only — not required for the backend service to run)
+pytest==8.3.4
+pytest-asyncio==0.25.0

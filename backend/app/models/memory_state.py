@@ -1,9 +1,9 @@
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Integer, func
-from sqlalchemy.dialects.postgresql import UUID as PgUUID
+from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Integer, String, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -41,6 +41,11 @@ class MemoryState(Base):
     next_review_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     short_term_stability: Mapped[float | None] = mapped_column(Float, nullable=True, default=1.0)
     last_short_term_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # FSRS audit fields — populated by schedule_memory_review. See
+    # database/init/009_fsrs_audit_fields.sql and docs/fsrs_verification_report.md.
+    scheduler_type: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    algorithm_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    fsrs_params_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 

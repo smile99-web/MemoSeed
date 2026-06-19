@@ -239,6 +239,68 @@ def get_effective_fsrs_params(db: Session, user_id: UUID) -> tuple[tuple[float, 
     return (FSRS_WEIGHTS, FSRS_TARGET_RETENTION)
 
 
+# --- Scheduler audit metadata ------------------------------------------------
+# Constants for the new audit fields on ReviewLog and MemoryState
+# (see database/init/009_fsrs_audit_fields.sql). Every review is now tagged
+# with the active profile + algorithm version + a JSON snapshot of the 19
+# weights that were applied. This makes "why was this scheduled 30 days out?"
+# answerable from a single row.
+
+SCHEDULER_TYPE_USER_FITTED = "user_fitted"
+SCHEDULER_TYPE_SLOW_LEARNER = "slow_learner"
+SCHEDULER_TYPE_CHILD_PROFILE = "child_profile"
+SCHEDULER_TYPE_BUILT_IN = "built_in"
+
+ALGORITHM_VERSION_FSRS_V4 = "FSRS_v4"
+
+
+@dataclass(frozen=True)
+class SchedulerMetadata:
+    scheduler_type: str
+    algorithm_version: str
+    fsrs_params_snapshot: dict[str, object]
+
+
+def get_scheduler_metadata(db: Session, user_id: UUID) -> SchedulerMetadata:
+    """Return the scheduler-type label, algorithm version, and JSONB snapshot
+    that should be persisted on every ReviewLog and MemoryState row.
+
+    The label is derived from the same precedence as `get_effective_fsrs_params`:
+    user_fitted > slow_learner > child_profile > built_in. The snapshot includes
+    the active 19-element weights tuple and the target retention, so a future
+    audit query can reproduce the exact scheduling decision without joining to
+    `user_model_settings` (whose weights may have since changed).
+    """
+    weights, target_retention = get_effective_fsrs_params(db, user_id)
+    try:
+        stored_settings = db.scalar(select(UserModelSettings).where(UserModelSettings.user_id == user_id))
+    except ProgrammingError:
+        stored_settings = None
+
+    settings = dict(stored_settings.settings) if stored_settings is not None else {}
+    has_personalized = normalize_fsrs_weights(settings.get(FSRS_WEIGHTS_SETTING_KEY)) is not None
+    use_slow_learner = bool(settings.get("useSlowLearnerProfile", False))
+    use_child_profile = bool(settings.get("useChildProfile", True))
+
+    if has_personalized:
+        scheduler_type = SCHEDULER_TYPE_SLOW_LEARNER if use_slow_learner else SCHEDULER_TYPE_USER_FITTED
+    elif use_slow_learner:
+        scheduler_type = SCHEDULER_TYPE_SLOW_LEARNER
+    elif use_child_profile:
+        scheduler_type = SCHEDULER_TYPE_CHILD_PROFILE
+    else:
+        scheduler_type = SCHEDULER_TYPE_BUILT_IN
+
+    return SchedulerMetadata(
+        scheduler_type=scheduler_type,
+        algorithm_version=ALGORITHM_VERSION_FSRS_V4,
+        fsrs_params_snapshot={
+            "weights": [float(w) for w in weights],
+            "target_retention": float(target_retention),
+        },
+    )
+
+
 def initial_fsrs_difficulty(rating: int, weights: tuple[float, ...] = FSRS_WEIGHTS) -> float:
     return constrain_difficulty(weights[4] - exp((rating - 1) * weights[5]) + 1)
 
@@ -601,6 +663,7 @@ def schedule_memory_review(
 
     now = datetime.now(UTC)
     fsrs_weights, fsrs_target_retention = get_effective_fsrs_params(db, user_id)
+    scheduler_metadata = get_scheduler_metadata(db, user_id)
     memory_state = get_or_create_memory_state(db, learning_item, now)
     current_sts = compute_short_term_stability(memory_state, now)
     is_correct = score >= 3
@@ -608,6 +671,10 @@ def schedule_memory_review(
     previous_repetition_count = memory_state.repetition_count
     previous_stability_days = scheduled_stability_days(memory_state)
     previous_retrievability = calculate_fsrs_retrievability(elapsed_days_since_last_review(memory_state, now), previous_stability_days)
+    # Snapshot the interval BEFORE we mutate memory_state. The audit fields on
+    # ReviewLog (`previous_interval` / `new_interval`) are the most useful
+    # single-row evidence that scheduling is actually changing intervals.
+    previous_interval = memory_state.interval_days
     current_difficulty = constrain_difficulty(memory_state.ease_factor or DEFAULT_FSRS_DIFFICULTY)
     next_difficulty = next_fsrs_difficulty(current_difficulty, rating, fsrs_weights)
     next_difficulty = constrain_difficulty(next_difficulty + estimate_item_difficulty_adjustment(learning_item, rating) * (0.4 if previous_repetition_count == 0 else 0.15))
@@ -679,6 +746,11 @@ def schedule_memory_review(
     memory_state.last_short_term_updated_at = now
     memory_state.last_reviewed_at = now
     memory_state.next_review_at = now + review_delay
+    # Stamp audit fields on memory_state so future reviews can read the last
+    # applied profile without an extra round-trip to user_model_settings.
+    memory_state.scheduler_type = scheduler_metadata.scheduler_type
+    memory_state.algorithm_version = scheduler_metadata.algorithm_version
+    memory_state.fsrs_params_snapshot = scheduler_metadata.fsrs_params_snapshot
 
     review_log = ReviewLog(
         user_id=user_id,
@@ -691,6 +763,12 @@ def schedule_memory_review(
         duration_seconds=duration_seconds,
         encoding_stage=encoding_stage,
         encoding_duration_ms=encoding_duration_ms,
+        scheduler_type=scheduler_metadata.scheduler_type,
+        algorithm_version=scheduler_metadata.algorithm_version,
+        fsrs_params_snapshot=scheduler_metadata.fsrs_params_snapshot,
+        previous_interval=previous_interval,
+        new_interval=memory_state.interval_days,
+        next_review_at=memory_state.next_review_at,
     )
     db.add(review_log)
 

@@ -1,9 +1,9 @@
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import UUID as PgUUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -31,5 +31,14 @@ class ReviewLog(Base):
     encoding_stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
     encoding_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+
+    # FSRS audit fields — populated by schedule_memory_review. See
+    # database/init/009_fsrs_audit_fields.sql and docs/fsrs_verification_report.md.
+    scheduler_type: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    algorithm_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    fsrs_params_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    previous_interval: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    new_interval: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    next_review_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     learning_item: Mapped["LearningItem"] = relationship(back_populates="review_logs")
