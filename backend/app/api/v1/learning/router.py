@@ -848,34 +848,47 @@ def list_due_review_items(
 
         focus_items: list[LearningItemRead] = []
         seen_main_words: set[str] = set()
+        # Build a map of word → word-level LearningItem so each word
+        # gets its own independent review items (5 modes per word).
+        # Previously, focus tasks were cloned from sentence items —
+        # if 20 sentences contained 'your', the child saw 'your'
+        # 20 × 5 = 100 times. Now each word gets exactly 5 tasks
+        # regardless of how many sentences reference it.
+        word_items_by_word: dict[str, LearningItem] = {}
+        for li in item_by_id.values():
+            if li.item_type != "word":
+                continue
+            w = normalize_word(li.english_text)
+            if w and w not in word_items_by_word:
+                word_items_by_word[w] = li
+
         for item in top_items:
             words = tokenize_words(item.english_text)
             if not words:
                 continue
             main_word = words[0].strip().lower()
-            # Skip if this word already has a focus slot in this session.
-            # Without this, four sentences starting with 'I' (e.g.
-            # 'I am a teacher' + 'I go to school' + ...) each generate
-            # 5 tasks, making 'I' appear 20+ times in one session.
             if main_word in seen_main_words:
                 continue
             seen_main_words.add(main_word)
-            chinese_meaning = word_translations.get(main_word, "")
+            # Use the word-level item if available; fall back to the
+            # sentence item. The word item has the word's own Chinese
+            # translation and properties, giving a clean word-only review.
+            word_item = word_items_by_word.get(main_word, item)
+            chinese_meaning = word_translations.get(main_word, "") or getattr(word_item, 'chinese_text', "") or main_word
             for mode in FOCUS_MODES:
-                # Set chinese_text to the actual meaning, not the task prompt.
-                # The frontend uses chinese_text for display and reviewTaskWordTranslation for context.
-                # IMPORTANT: each focus item needs a unique id. Without it the frontend's
-                # mergeLearningQueues dedup keeps only the first mode per word and silently
-                # drops the other spelling tasks (listen_spell / missing_letter / etc.) —
-                # the user sees a "下一句" button with no input because the spelling task
-                # never reaches the page.
-                focus_item = item.model_copy(update={
-                    "id": uuid4(),
-                    "review_task_type": mode,
-                    "chinese_text": chinese_meaning,
-                    "source": f"聚焦 {words[0]}",
-                    "focus_words": [main_word],
-                })
+                focus_item = LearningItemRead(
+                    id=uuid4(),
+                    user_id=current_user.id,
+                    course_id=item.course_id,
+                    item_type="word",
+                    english_text=main_word,
+                    chinese_text=chinese_meaning,
+                    review_task_type=mode,
+                    source=f"单词复习",
+                    focus_words=[main_word],
+                    created_at=item.created_at,
+                    updated_at=item.updated_at,
+                )
                 focus_items.append(focus_item)
         # Push the served focus items to tomorrow — but ONLY if
         # they haven't already been pushed further by a park
@@ -894,7 +907,14 @@ def list_due_review_items(
                 .values(next_review_at=tomorrow)
             )
         db.commit()
-        return task_review_items[:3] + focus_items
+        # Sentences first (discover new weak words), then word-only
+        # review (practice already-discovered words). Each word that
+        # appears in the word review section is excluded from the
+        # sentence section so the child doesn't see 'your' in 20
+        # different sentences during word practice.
+        sentences_for_session = [s for s in sentence_review_items[:15]
+                                if tokenize_words(s.english_text) and tokenize_words(s.english_text)[0].strip().lower() not in seen_main_words]
+        return sentences_for_session + focus_items
 
     if interleave and task_review_items and sentence_review_items:
         # Interleave: pattern of 1 review → 2 sentence items → 1 review → ...
