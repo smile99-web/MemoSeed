@@ -1341,7 +1341,10 @@ def create_word_mistake_log(
         error_type=error_type,
     )
     word_state = sync_word_memory_from_review(db, current_user.id, word_item.english_text, result.memory_state, "word-spelling", False, error_type)
-    schedule_micro_review_tasks_for_mistake(db, current_user.id, word_state, learning_item.chinese_text, learning_item.id, error_type)
+    # Disabled: same reason as create_word_review — the focus mode provides
+    # sufficient correction practice without creating 5 extra micro-review
+    # tasks per mistake.
+    # schedule_micro_review_tasks_for_mistake(db, current_user.id, word_state, learning_item.chinese_text, learning_item.id, error_type)
     try:
         from app.services.learning_replay import record_learning_event
         now = datetime.now(UTC)
@@ -1409,7 +1412,12 @@ def create_word_review(
         except Exception:
             pass  # points failure should never block learning
     if not result.review_log.is_correct:
-        schedule_micro_review_tasks_for_mistake(db, current_user.id, word_state, learning_item.chinese_text, learning_item.id, error_type or "spelling")
+        # Disabled: the focus mode (7 words × 5 modes) provides sufficient
+        # correction practice. Creating 5 additional micro-review tasks per
+        # mistake was generating 50+ new WordReviewTask rows per session,
+        # flooding the task history and confusing the child with duplicate
+        # review items.
+        # schedule_micro_review_tasks_for_mistake(db, current_user.id, word_state, learning_item.chinese_text, learning_item.id, error_type or "spelling")
         # Deduct points for wrong answer
         try:
             from app.services.points_service import POINTS_WRONG, award_points
