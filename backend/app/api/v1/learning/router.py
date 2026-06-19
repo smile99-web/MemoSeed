@@ -658,12 +658,27 @@ def list_due_review_items(
             WordReviewTask.due_at <= now,
         )
         .order_by(WordReviewTask.priority_score.desc(), WordReviewTask.due_at.asc())
-        .limit(effective_review_cap * 3)
+        .limit(min(effective_review_cap + 15, 35))  # keep session manageable
     ).all()
     covered_task_words = {task.word for task, _source_item in task_rows}
     # P1-5: Filter out removed task types (recall_word, cloze_sentence).
     REMOVED_TASK_TYPES = {"recall_word", "cloze_sentence"}
     task_rows = [(t, s) for t, s in task_rows if t.task_type not in REMOVED_TASK_TYPES]
+    # P0-2: Per-word-per-session cap. Without this, a single word with 5+ pending
+    # micro-review tasks (one per mode) would monopolize the session — the child
+    # sees "drink, can, go" 20 times each because every completed task makes the
+    # next pending task for the same word immediately due. We deduplicate by word
+    # AND by source learning_item so different learning items for the same word
+    # (which have different Chinese translations) can still appear.
+    seen_task_words: set[str] = set()
+    deduped_task_rows: list[tuple[WordReviewTask, LearningItem | None]] = []
+    for t, s in task_rows:
+        w = t.word.strip().lower()
+        if w in seen_task_words:
+            continue
+        seen_task_words.add(w)
+        deduped_task_rows.append((t, s))
+    task_rows = deduped_task_rows
     # P1-4: Pre-cache Chinese translations for ALL review task words.
     # Filter out words that don't have valid Chinese translations.
     unique_task_words = list({tw.strip().lower() for tw in covered_task_words if tw.strip()})
