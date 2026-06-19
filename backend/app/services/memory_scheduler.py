@@ -508,62 +508,6 @@ def park_stuck_words(db: Session, user_id: UUID, now: datetime | None = None) ->
     return int(result.rowcount or 0)
 
 
-# --- P3: Daily-failure parking -------------------------------------------------
-# When a word has been reviewed 5+ times in a single day AND all of those
-# reviews failed, further attempts within the same day produce no learning
-# signal — just fatigue. Push next_review_at out by 7 days so the child gets
-# a real break. The 5-fail trigger fires before lapse_count climbs to 10
-# (the stuck-word threshold), giving us earlier intervention.
-DAILY_FAILURE_THRESHOLD = 5
-DAILY_FAILURE_RESCHEDULE_DAYS = 7
-
-
-def park_daily_failure_words(db: Session, user_id: UUID, now: datetime | None = None) -> int:
-    """Push `next_review_at` to NOW + 7 days for words that failed 5+ times today.
-
-    Returns the number of words re-parked. Idempotent: a word that's already
-    parked (next_review_at in the future) is left alone.
-    """
-    from app.models.word_memory_state import WordMemoryState
-    now = now or datetime.now(UTC)
-    target_due = now + timedelta(days=DAILY_FAILURE_RESCHEDULE_DAYS)
-    today_start = (now + timedelta(hours=8)).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=8)
-    failed_today_subquery = (
-        select(ReviewLog.learning_item_id)
-        .where(
-            ReviewLog.user_id == user_id,
-            ReviewLog.reviewed_at >= today_start,
-            ReviewLog.is_correct.is_(False),
-        )
-        .group_by(ReviewLog.learning_item_id)
-        .having(func.count(ReviewLog.id) >= DAILY_FAILURE_THRESHOLD)
-    )
-    # Also require: today's reviews on this word are ALL failed (no successes
-    # mixed in — a word with 4 fails + 1 success has 5 reviews but is making
-    # progress, not stuck). Compute via NOT EXISTS on a success-today subquery.
-    succeeded_today_subquery = (
-        select(ReviewLog.id)
-        .where(
-            ReviewLog.user_id == user_id,
-            ReviewLog.reviewed_at >= today_start,
-            ReviewLog.is_correct.is_(True),
-        )
-        .where(ReviewLog.learning_item_id == MemoryState.learning_item_id)
-        .exists()
-    )
-    result = db.execute(
-        update(MemoryState)
-        .where(
-            MemoryState.learning_item_id.in_(failed_today_subquery),
-            MemoryState.next_review_at <= now,
-            ~succeeded_today_subquery,
-        )
-        .values(next_review_at=target_due)
-    )
-    db.commit()
-    return int(result.rowcount or 0)
-
-
 def park_mastered_words(db: Session, user_id: UUID, now: datetime | None = None) -> int:
     """Push `next_review_at` to NOW + 30 days for all currently-mastered words.
 

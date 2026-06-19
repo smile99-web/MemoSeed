@@ -53,7 +53,6 @@ from app.services.memory_scheduler import (
     calculate_current_forget_risk,
     calculate_review_priority,
     exceeded_daily_review_filter_clause,
-    park_daily_failure_words,
     park_mastered_words,
     park_stuck_words,
     schedule_memory_review,
@@ -119,87 +118,6 @@ BASIC_WORD_TRANSLATIONS = {
     "you": "你",
 }
 CHINESE_SENTENCE_MARKERS = set("，。！？；：,.!?;:、 \n\r\t")
-
-
-# --- P1: Session composition helper -----------------------------------------
-# The default priority-sorted due list is dominated by old/stuck words. This
-# leaves no room for new words in any given session, which is why the
-# 32-hour data shows a bimodal distribution: 49 'very struggling' + 48
-# 'close to mastered' + ZERO in the 0.40-0.70 in-progress band.
-#
-# Rebucket items into new / review / mistakes and reassemble with a 50/30/20
-# mix so every session surfaces all three bands. If a bucket is empty,
-# fill the slot from the highest-priority remaining bucket so the
-# total never drops below `cap`.
-_SESSION_MIX_RATIOS = (("new", 0.50), ("review", 0.30), ("mistakes", 0.20))
-
-
-def _curate_session_mix(
-    due_rows: list[tuple[LearningItem, MemoryState]],
-    cap: int,
-) -> list[tuple[LearningItem, MemoryState]]:
-    """Re-bucket due_rows into new/review/mistakes and return a mixed list.
-
-    Each item's category is derived from its MemoryState fields:
-      - new      : repetition_count < 5
-      - review   : 5 <= repetition_count <= 15 AND lapse_count <= 2
-      - mistakes : lapse_count >= 3 (regardless of repetition_count)
-
-    Items that don't fit any bucket (e.g. 5 <= rep <= 15 AND lapse == 2)
-    fall into 'review'. Within a bucket, the original priority order is
-    preserved (the input list is assumed already sorted by priority).
-    """
-    if cap <= 0 or not due_rows:
-        return due_rows[:cap]
-
-    buckets: dict[str, list[tuple[LearningItem, MemoryState]]] = {
-        "new": [], "review": [], "mistakes": [],
-    }
-    for item, memory_state in due_rows:
-        rep = memory_state.repetition_count or 0
-        lapse = memory_state.lapse_count or 0
-        if lapse >= 3:
-            buckets["mistakes"].append((item, memory_state))
-        elif rep < 5:
-            buckets["new"].append((item, memory_state))
-        else:
-            buckets["review"].append((item, memory_state))
-
-    # Compute the target count per bucket from the ratios. If a bucket is
-    # empty, redistribute the slot to the next-priority bucket that still
-    # has items.
-    targets = {name: int(round(cap * ratio)) for name, ratio in _SESSION_MIX_RATIOS}
-    # Ensure sum equals cap (rounding can drift)
-    drift = cap - sum(targets.values())
-    if drift:
-        targets[_SESSION_MIX_RATIOS[0][0]] += drift
-
-    selected: list[tuple[LearningItem, MemoryState]] = []
-    deficits: list[tuple[str, int]] = []  # (name, shortage) to redistribute later
-    for name, _ in _SESSION_MIX_RATIOS:
-        take = min(targets[name], len(buckets[name]))
-        selected.extend(buckets[name][:take])
-        if take < targets[name]:
-            deficits.append((name, targets[name] - take))
-
-    # Redistribute deficits in priority order: if 'new' is short, top up
-    # from 'review' (next most useful). If both are short, top up from
-    # 'mistakes'. This keeps the cap while preserving the spirit of the mix.
-    fallback_chain = ["review", "mistakes", "new"]
-    for deficit_name, shortage in deficits:
-        for fb in fallback_chain:
-            if fb == deficit_name:
-                continue
-            available = buckets[fb][targets[fb]:]  # not-yet-taken items
-            extra = min(shortage, len(available))
-            if extra:
-                selected.extend(available[:extra])
-                targets[fb] += extra
-                shortage -= extra
-                if shortage == 0:
-                    break
-
-    return selected[:cap]
 
 
 def build_micro_task_learning_item(
@@ -690,12 +608,10 @@ def list_due_review_items(
                 current_words.append(normalized_word)
 
     stored_settings = get_private_model_settings(db, current_user.id)
-    # Mastered words: push +30 days. Stuck words: 7-day cycle. Daily
-    # failures: 5+ fails in a day → +7 days. See memory_scheduler for
-    # the full algorithms.
+    # Mastered words: push +30 days. Stuck words: 7-day park/release cycle.
+    # See memory_scheduler.park_mastered_words and park_stuck_words.
     park_mastered_words(db, current_user.id, now)
     park_stuck_words(db, current_user.id, now)
-    park_daily_failure_words(db, current_user.id, now)
     cloze_settings = build_llm_translation_settings(None, None, None, None, stored_settings)
     has_task_updates = supersede_stale_pending_tasks_for_reviewed_words(db, current_user.id, now)
 
@@ -723,18 +639,6 @@ def list_due_review_items(
 
     due_rows = list(db.execute(due_statement).all())
     due_rows.sort(key=lambda row: (-calculate_review_priority(row[1], now), row[1].next_review_at))
-
-    # P1: Curate the session composition. The default priority sort produces a
-    # list dominated by old/stuck words that the child has been hammering
-    # without progress, leaving no room for new words (which the data shows
-    # have 0 words in the 0.40-0.70 'in-progress' bucket — the algorithm
-    # is too bimodal). Re-bucket items into new/review/mistakes and
-    # reassemble with a 50/30/20 mix so every session surfaces:
-    #   - 50% new words (rep < 5)            — building the in-progress bucket
-    #   - 30% review words (rep 5-15)         — keeping learned words fresh
-    #   - 20% mistakes (lapse >= 3)           — targeted re-teaching
-    # If a category is empty, fill the gap with the next-priority category.
-    due_rows = _curate_session_mix(due_rows, capped_limit)
     for item, _memory_state in due_rows:
         item_by_id.setdefault(item.id, item)
 

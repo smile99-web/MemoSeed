@@ -407,30 +407,6 @@ def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[s
     if word_state.consecutive_error_count >= 3 and "hidden_recall" not in base_sequence[:2]:
         base_sequence = ["hidden_recall", *base_sequence]
 
-    # P0: Adaptive mode routing. When a word has accumulated 5+ historical lapses
-    # (i.e. the child has been failing the production-mode spelling task
-    # repeatedly), force the first task to a higher-success mode. The
-    # production data shows word-spelling sits at 0% accuracy for the test
-    # child while listen_choose_chinese sits at 55% — routing lapsed words
-    # to the easier mode converts "0% time sink" into "55% learning signal".
-    lapsed_mode_override: str | None = None
-    if (word_state.lapse_count or 0) >= 5:
-        lapsed_mode_override = "listen_choose_chinese"
-    elif (word_state.lapse_count or 0) >= 3:
-        # Mid-range: still struggling but not yet hopeless; mix in easier modes
-        lapsed_mode_override = "english_to_chinese"
-
-    # P2: Time-of-day mode selection. Children have known efficiency windows
-    # — peak 22:00-23:00 and 10:00-11:00 (best retention), low 12:00-16:00
-    # (worse retention). At low-efficiency hours, bias the first task toward
-    # easier recognition modes (choice/recall); at peak hours, allow harder
-    # production modes (spelling/missing-letter). This converts low-efficiency
-    # time into actual learning instead of a frustrating spelling drill the
-    # child is going to fail anyway.
-    local_hour = now_utc.astimezone(LOCAL_TIMEZONE).hour
-    is_low_efficiency_hour = local_hour in (12, 13, 14, 15, 16)
-    easy_mode_priority = ("listen_choose_chinese", "english_to_chinese", "match_translation", "hidden_recall")
-
     task_counts = {str(key): int(value or 0) for key, value in (word_state.task_type_counts or {}).items()}
     decayed_errors = get_decayed_error_weights(word_state, now_utc)
 
@@ -461,26 +437,10 @@ def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[s
         total_weight = sum(decayed_errors.get(e, 0.0) for e in relevant_errors)
         task_error_weight[t] = total_weight
 
-    if lapsed_mode_override is not None and lapsed_mode_override in deduped_sequence:
-        first_task = lapsed_mode_override
-    elif is_low_efficiency_hour:
-        # Pick the first available easy mode from the candidate list. Falls
-        # back to the original tie-breaker if none of the easy modes are in
-        # the candidate set.
-        for easy in easy_mode_priority:
-            if easy in deduped_sequence[:4]:
-                first_task = easy
-                break
-        else:
-            first_task = min(
-                deduped_sequence[:4],
-                key=lambda t: (task_counts.get(t, 0), task_error_weight.get(t, 0.0)),
-            )
-    else:
-        first_task = min(
-            deduped_sequence[:4],
-            key=lambda t: (task_counts.get(t, 0), task_error_weight.get(t, 0.0)),
-        )
+    first_task = min(
+        deduped_sequence[:4],
+        key=lambda t: (task_counts.get(t, 0), task_error_weight.get(t, 0.0)),
+    )
     return [first_task, *[task_type for task_type in deduped_sequence if task_type != first_task]]
 
 
