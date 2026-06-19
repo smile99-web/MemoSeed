@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
@@ -646,7 +646,22 @@ def list_due_review_items(
     for item, _memory_state in due_rows:
         item_by_id.setdefault(item.id, item)
 
-    has_task_updates = ensure_due_word_review_tasks(db, current_user.id, now, max(capped_limit, effective_review_cap) * 3) or has_task_updates
+    has_task_updates = ensure_due_word_review_tasks(db, current_user.id, now, min(max(capped_limit, effective_review_cap), 15)) or has_task_updates
+    # Garbage-collect stale pending tasks: if a word's micro-review clock has
+    # already moved past the task's due_at (e.g. the word was reviewed via
+    # another path), the old pending task is dead weight. Cancel all pending
+    # tasks whose due_at is more than 1 day in the past — the word has moved on.
+    _gc_count = db.execute(
+        update(WordReviewTask)
+        .where(
+            WordReviewTask.user_id == current_user.id,
+            WordReviewTask.status == "pending",
+            WordReviewTask.due_at < now - timedelta(days=1),
+        )
+        .values(status="superseded", updated_at=now)
+    ).rowcount
+    if _gc_count:
+        has_task_updates = True
     has_task_updates = refresh_pending_word_review_task_priorities(db, current_user.id, now) or has_task_updates
 
     task_rows = db.execute(
