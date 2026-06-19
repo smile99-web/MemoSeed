@@ -407,6 +407,23 @@ def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[s
     if word_state.consecutive_error_count >= 3 and "hidden_recall" not in base_sequence[:2]:
         base_sequence = ["hidden_recall", *base_sequence]
 
+    # Q3: Sentence-spelling demotion. Production data shows sentence-spelling
+    # sits at 33% accuracy — the worst of the 4 real task types and a
+    # consistent time sink. When the child has had a recent failure streak
+    # (consecutive_error_count >= 2), demote the first task from spelling
+    # to a recognition mode. The child gets to build confidence on the
+    # easier mode, then naturally re-attempt spelling in a later session
+    # when their cc resets. The demotion is keyed on the *current* failure
+    # streak rather than cumulative history, so it doesn't trap recovering
+    # words.
+    demoted_to_easier: str | None = None
+    if (word_state.consecutive_error_count or 0) >= 2:
+        # Pick the easier mode the child has had least practice with — gives
+        # variety while still picking a high-success mode.
+        task_counts_for_pick = {str(k): int(v or 0) for k, v in (word_state.task_type_counts or {}).items()}
+        candidates = ["listen_choose_chinese", "english_to_chinese", "match_translation"]
+        demoted_to_easier = min(candidates, key=lambda t: task_counts_for_pick.get(t, 0))
+
     task_counts = {str(key): int(value or 0) for key, value in (word_state.task_type_counts or {}).items()}
     decayed_errors = get_decayed_error_weights(word_state, now_utc)
 
@@ -437,10 +454,13 @@ def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[s
         total_weight = sum(decayed_errors.get(e, 0.0) for e in relevant_errors)
         task_error_weight[t] = total_weight
 
-    first_task = min(
-        deduped_sequence[:4],
-        key=lambda t: (task_counts.get(t, 0), task_error_weight.get(t, 0.0)),
-    )
+    if demoted_to_easier is not None and demoted_to_easier in deduped_sequence:
+        first_task = demoted_to_easier
+    else:
+        first_task = min(
+            deduped_sequence[:4],
+            key=lambda t: (task_counts.get(t, 0), task_error_weight.get(t, 0.0)),
+        )
     return [first_task, *[task_type for task_type in deduped_sequence if task_type != first_task]]
 
 

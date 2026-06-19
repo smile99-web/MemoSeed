@@ -434,30 +434,31 @@ def count_paused_words(db: Session, user_id: UUID) -> int:
 MASTERED_WORD_RESCHEDULE_DAYS = 30
 
 # --- Stuck-word park + release cycle -----------------------------------------
-# A "stuck" word (lapse_count >= STUCK_WORD_LAPSE_THRESHOLD AND
-# memory_strength < STUCK_WORD_STRENGTH_THRESHOLD) is one the child has been
-# hammered with for days/weeks without progress. Constant daily review of such
-# a word produces no learning signal — just fatigue.
+# A "stuck" word is one with NO recent progress, NOT one with high historical
+# lapse_count. The previous version used `lapse >= 10 AND strength < 0.3`
+# which incorrectly included 18 "historically struggling but currently
+# recovering" words (e.g. truth: 119 errors + 151 correct, strength=0.75,
+# cc=2) — those words are actually approaching mastery and shouldn't be
+# parked.
 #
-# Algorithm:
-#   1. DETECT:  stuck = lapse >= 10 AND strength < 0.3 AND
-#              consecutive_correct_count < 3
-#              (the third clause is the 'recovery' gate — a word that the
-#               child has just nailed 3 times in a row is NOT stuck.)
-#   2. PARK:   push next_review_at to now + 7 days. The word disappears
-#              from the queue for 7 days. Idempotent: re-park only if the
-#              word is currently due (next_review_at <= now) AND its last
-#              review was > 1 day ago (so the child gets at least 1 day of
-#              exposure per cycle).
-#   3. RELEASE: after 7 days, next_review_at is in the past and the word
-#              re-enters the queue naturally. If the child gets it right,
-#              consecutive_correct_count increments and the word's status
-#              shifts toward 'near_mastered'. If the child fails, lapse
-#              increments and the next queue build re-parks the word.
-#   4. ESCAPE: once consecutive_correct_count >= 3, the 'recovery' gate
-#              stops parking the word — it's no longer considered stuck.
+# New algorithm (Q1):
+#   1. DETECT:  truly stuck = strength < 0.3
+#                            AND consecutive_correct_count = 0
+#                            AND last_reviewed_at < now - 7 days
+#              (consecutive_correct_count is the recovery gate — a word the
+#               child is currently nailing is NEVER stuck, regardless of
+#               how many historical failures it has accumulated.)
+#   2. PARK:   push next_review_at to now + 7 days.
+#   3. RELEASE: after 7 days, the word re-enters the queue naturally.
+#   4. ESCAPE: any successful review increments cc; once cc >= 1 the word
+#              un-parks. The cc gate is checked every queue build.
 STUCK_WORD_RESCHEDULE_DAYS = 7
 STUCK_WORD_RECENT_REVIEW_GRACE_HOURS = 24
+# Q1: A word is "abandoned" (truly stuck, not just weak) if its last review
+# was more than this many days ago AND it has no recent success. Anything
+# reviewed in the last 7 days is making active progress and should NOT be
+# parked even if strength is low.
+STUCK_WORD_ABANDONED_DAYS = 7
 
 
 def park_stuck_words(db: Session, user_id: UUID, now: datetime | None = None) -> int:
@@ -473,6 +474,7 @@ def park_stuck_words(db: Session, user_id: UUID, now: datetime | None = None) ->
     now = now or datetime.now(UTC)
     target_due = now + timedelta(days=STUCK_WORD_RESCHEDULE_DAYS)
     grace_cutoff = now - timedelta(hours=STUCK_WORD_RECENT_REVIEW_GRACE_HOURS)
+    abandoned_cutoff = now - timedelta(days=STUCK_WORD_ABANDONED_DAYS)
     stuck_ids_subquery = (
         select(LearningItem.id)
         .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
@@ -483,13 +485,17 @@ def park_stuck_words(db: Session, user_id: UUID, now: datetime | None = None) ->
         .where(
             LearningItem.user_id == user_id,
             LearningItem.item_type == "word",
-            MemoryState.lapse_count >= STUCK_WORD_LAPSE_THRESHOLD,
+            # Q1: Replace `lapse >= 10` with current-state signals. A word
+            # is only stuck if it has NO recent success and HASN'T been
+            # reviewed in 7+ days. This excludes 18 "historically struggling
+            # but currently recovering" words (truth, let, show, etc.) that
+            # the old algorithm incorrectly parked.
             MemoryState.memory_strength < STUCK_WORD_STRENGTH_THRESHOLD,
-            # Recovery gate: a word the child is currently nailing is NOT stuck.
-            or_(
-                WordMemoryState.consecutive_correct_count.is_(None),
-                WordMemoryState.consecutive_correct_count < 3,
-            ),
+            # Strict recovery gate: cc must be 0 (not just < 3). A word the
+            # child has nailed even once recently is NOT stuck.
+            WordMemoryState.consecutive_correct_count == 0,
+            # Truly abandoned: not reviewed in 7+ days.
+            MemoryState.last_reviewed_at < abandoned_cutoff,
             # Idempotency: only re-park if the word is currently due AND
             # the child hasn't seen it in the last 24 hours.
             MemoryState.next_review_at <= now,
@@ -653,8 +659,35 @@ def next_fsrs_forget_stability(difficulty: float, stability_days: float, retriev
     return constrain_stability(min(next_stability, stability_days))
 
 
-def calculate_fsrs_interval(stability_days: float, target_retention: float = FSRS_TARGET_RETENTION) -> timedelta:
+def calculate_fsrs_interval(
+    stability_days: float,
+    target_retention: float = FSRS_TARGET_RETENTION,
+    current_strength: float | None = None,
+) -> timedelta:
+    """Compute the next review interval for a stable memory.
+
+    The standard FSRS formula gives longer intervals as stability grows.
+    Q2 adds an optional `current_strength` parameter that shortens the
+    interval when the word is in the "weak" / "in-progress" bands. The
+    data showed a bimodal strength distribution: words were either
+    "almost mastered" (strength >= 0.70) or "stuck" (strength < 0.30)
+    with NOTHING in between. Forcing more frequent reviews in the 0.30-0.70
+    range gives the algorithm time to build the in-progress band.
+
+    Multipliers:
+      - strength <  0.30  -> 0.50x (heavily struggling: review more often)
+      - 0.30 <= s < 0.70 -> 0.70x (in-progress band: build it)
+      - strength >= 0.70  -> 1.00x (close-to-mastered: FSRS default)
+
+    The 3/day cap + stuck-word parking keep these shortened intervals
+    from running away.
+    """
     interval_days = stability_days / FSRS_FACTOR * (target_retention ** (1 / FSRS_DECAY) - 1)
+    if current_strength is not None:
+        if current_strength < 0.30:
+            interval_days *= 0.50
+        elif current_strength < 0.70:
+            interval_days *= 0.70
     return timedelta(days=constrain_stability(interval_days))
 
 
@@ -985,7 +1018,15 @@ def schedule_memory_review(
         else:
             review_delay = FIRST_SUCCESS_DELAYS.get(rating, timedelta(days=1))
     else:
-        review_delay = calculate_fsrs_interval(next_stability_days, fsrs_target_retention)
+        # Q2: pass current memory_strength so weak/in-progress words get
+        # shorter intervals (more frequent reviews) — fills the 0.30-0.70
+        # in-progress band that the data showed was empty.
+        current_strength = constrain_stability(
+            1.0 - calculate_current_forget_risk(memory_state, now)
+        )
+        review_delay = calculate_fsrs_interval(
+            next_stability_days, fsrs_target_retention, current_strength
+        )
 
     review_delay = adjust_delay_for_learning_item(review_delay, learning_item, memory_state)
     memory_state.interval_days = calculate_interval_days(review_delay)
