@@ -17,6 +17,7 @@ from app.services.memory_scheduler import (
     calculate_review_priority,
     exceeded_daily_review_filter_clause,
     park_mastered_words,
+    park_stuck_words,
     schedule_memory_review,
     stuck_word_daily_cap_filter_clause,
     stuck_word_filter_clause,
@@ -31,10 +32,12 @@ def get_review_queue(
     db: Annotated[Session, Depends(get_db)],
 ) -> list[MemoryStateRead]:
     now = datetime.now(UTC)
-    # Push mastered words to +30 days before fetching the queue so they
-    # don't compete for attention with new/struggling words. See
-    # memory_scheduler.park_mastered_words.
+    # Push mastered words to +30 days and re-park stuck words to +7 days
+    # before fetching the queue. See memory_scheduler.park_mastered_words
+    # and park_stuck_words for the full algorithm (mastered: long interval;
+    # stuck: 7-day cycle with grace + recovery gate).
     park_mastered_words(db, current_user.id, now)
+    park_stuck_words(db, current_user.id, now)
     # Today (Asia/Shanghai) — the daily cap uses local-day boundaries so a
     # late-night session doesn't double-count against the next-day morning.
     today_start = (now + timedelta(hours=8)).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=8)

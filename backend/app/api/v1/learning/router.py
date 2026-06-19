@@ -54,6 +54,7 @@ from app.services.memory_scheduler import (
     calculate_review_priority,
     exceeded_daily_review_filter_clause,
     park_mastered_words,
+    park_stuck_words,
     schedule_memory_review,
     stuck_word_daily_cap_filter_clause,
     stuck_word_filter_clause,
@@ -607,9 +608,10 @@ def list_due_review_items(
                 current_words.append(normalized_word)
 
     stored_settings = get_private_model_settings(db, current_user.id)
-    # Mastered words get pushed +30 days so they don't compete for attention
-    # with new/struggling words. See memory_scheduler.park_mastered_words.
+    # Mastered words: push +30 days. Stuck words: 7-day park/release cycle.
+    # See memory_scheduler.park_mastered_words and park_stuck_words.
     park_mastered_words(db, current_user.id, now)
+    park_stuck_words(db, current_user.id, now)
     cloze_settings = build_llm_translation_settings(None, None, None, None, stored_settings)
     has_task_updates = supersede_stale_pending_tasks_for_reviewed_words(db, current_user.id, now)
 

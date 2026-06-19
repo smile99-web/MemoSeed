@@ -5,7 +5,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
-from sqlalchemy import ColumnElement, and_, func, not_, select, update
+from sqlalchemy import ColumnElement, and_, func, not_, or_, select, update
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
@@ -432,6 +432,80 @@ def count_paused_words(db: Session, user_id: UUID) -> int:
 #   3. Pushing at review time would only fix forward-going words; old
 #      already-mastered words would still be due today.
 MASTERED_WORD_RESCHEDULE_DAYS = 30
+
+# --- Stuck-word park + release cycle -----------------------------------------
+# A "stuck" word (lapse_count >= STUCK_WORD_LAPSE_THRESHOLD AND
+# memory_strength < STUCK_WORD_STRENGTH_THRESHOLD) is one the child has been
+# hammered with for days/weeks without progress. Constant daily review of such
+# a word produces no learning signal — just fatigue.
+#
+# Algorithm:
+#   1. DETECT:  stuck = lapse >= 10 AND strength < 0.3 AND
+#              consecutive_correct_count < 3
+#              (the third clause is the 'recovery' gate — a word that the
+#               child has just nailed 3 times in a row is NOT stuck.)
+#   2. PARK:   push next_review_at to now + 7 days. The word disappears
+#              from the queue for 7 days. Idempotent: re-park only if the
+#              word is currently due (next_review_at <= now) AND its last
+#              review was > 1 day ago (so the child gets at least 1 day of
+#              exposure per cycle).
+#   3. RELEASE: after 7 days, next_review_at is in the past and the word
+#              re-enters the queue naturally. If the child gets it right,
+#              consecutive_correct_count increments and the word's status
+#              shifts toward 'near_mastered'. If the child fails, lapse
+#              increments and the next queue build re-parks the word.
+#   4. ESCAPE: once consecutive_correct_count >= 3, the 'recovery' gate
+#              stops parking the word — it's no longer considered stuck.
+STUCK_WORD_RESCHEDULE_DAYS = 7
+STUCK_WORD_RECENT_REVIEW_GRACE_HOURS = 24
+
+
+def park_stuck_words(db: Session, user_id: UUID, now: datetime | None = None) -> int:
+    """Push `next_review_at` to NOW + 7 days for stuck words that need parking.
+
+    Returns the number of words re-parked. Idempotent: a word that was just
+    parked (or has been reviewed in the last 24 hours) is NOT re-parked —
+    the child gets a chance to actually engage with it during the cycle.
+
+    See module-level comment above for the full park/release algorithm.
+    """
+    from app.models.word_memory_state import WordMemoryState
+    now = now or datetime.now(UTC)
+    target_due = now + timedelta(days=STUCK_WORD_RESCHEDULE_DAYS)
+    grace_cutoff = now - timedelta(hours=STUCK_WORD_RECENT_REVIEW_GRACE_HOURS)
+    stuck_ids_subquery = (
+        select(LearningItem.id)
+        .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
+        .outerjoin(WordMemoryState, and_(
+            WordMemoryState.learning_item_id == LearningItem.id,
+            WordMemoryState.user_id == user_id,
+        ))
+        .where(
+            LearningItem.user_id == user_id,
+            LearningItem.item_type == "word",
+            MemoryState.lapse_count >= STUCK_WORD_LAPSE_THRESHOLD,
+            MemoryState.memory_strength < STUCK_WORD_STRENGTH_THRESHOLD,
+            # Recovery gate: a word the child is currently nailing is NOT stuck.
+            or_(
+                WordMemoryState.consecutive_correct_count.is_(None),
+                WordMemoryState.consecutive_correct_count < 3,
+            ),
+            # Idempotency: only re-park if the word is currently due AND
+            # the child hasn't seen it in the last 24 hours.
+            MemoryState.next_review_at <= now,
+            or_(
+                MemoryState.last_reviewed_at.is_(None),
+                MemoryState.last_reviewed_at < grace_cutoff,
+            ),
+        )
+    )
+    result = db.execute(
+        update(MemoryState)
+        .where(MemoryState.learning_item_id.in_(stuck_ids_subquery))
+        .values(next_review_at=target_due)
+    )
+    db.commit()
+    return int(result.rowcount or 0)
 
 
 def park_mastered_words(db: Session, user_id: UUID, now: datetime | None = None) -> int:
