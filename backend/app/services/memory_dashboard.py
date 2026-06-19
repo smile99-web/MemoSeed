@@ -807,6 +807,17 @@ def build_today_plan(db: Session, user_id: UUID) -> dict[str, object]:
     now_local = datetime.now(LOCAL_TIMEZONE)
     today = now_local.date()
 
+    # Park mastered/stuck/cliff words first so the due_count reflects the
+    # *actual* queue the child will see — the same park_xxx calls that
+    # the /api/v1/review/queue and /api/v1/learning/review-items endpoints
+    # apply. Without this, build_today_plan's due_count would be 100+
+    # words higher than the real queue, showing a misleading number on
+    # the dashboard.
+    from app.services.memory_scheduler import park_mastered_words, park_stuck_words, park_cliff_words
+    park_mastered_words(db, user_id, now_utc)
+    park_stuck_words(db, user_id, now_utc)
+    park_cliff_words(db, user_id, now_utc)
+
     due_count = db.scalar(
         select(func.count(MemoryState.id))
         .join(LearningItem, MemoryState.learning_item_id == LearningItem.id)

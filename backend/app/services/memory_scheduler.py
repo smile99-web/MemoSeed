@@ -611,7 +611,12 @@ def park_mastered_words(db: Session, user_id: UUID, now: datetime | None = None)
             MemoryState.consecutive_error_count <= 1,
             WordMemoryState.recall_correct_count >= 3,
             WordMemoryState.no_hint_correct_date_count >= 3,
-            MemoryState.next_review_at < target_due,
+            # Only push words whose current next_review_at is BEFORE the
+            # target. Idempotency: a word that's already parked past
+            # `target_due` is left alone — its rowcount is 0 on repeat
+            # calls. We compare against `now` (not `target_due`) so we
+            # only re-park words the child is currently expected to see.
+            MemoryState.next_review_at < now,
         )
     )
     # Bulk update; returns rowcount.
@@ -1109,8 +1114,22 @@ def schedule_memory_review(
         # Reset STS after successful review: memory has reconsolidated.
         memory_state.short_term_stability = 1.0
     else:
-        memory_state.forget_risk = 1.0
-        memory_state.memory_strength = round(max(score / 5 * 0.35, 0.0), 2)
+        # Compute actual FSRS retrievability from the forget stability that
+        # was just determined by next_fsrs_forget_stability. The previous
+        # hardcoded `max(score/5*0.35, 0.0)` always produced 0.07 for
+        # score=1 regardless of how many prior correct reviews the child
+        # had — it threw away the entire FSRS history in favor of a
+        # single failure score. The new computation respects the full
+        # stability curve: a word with high prior stability that suffered
+        # a single lapse will show a higher retrievability (and thus higher
+        # memory_strength) than a word that has never been learned.
+        current_retrievability = calculate_fsrs_retrievability(
+            elapsed_days_since_last_review(memory_state, now),
+            next_stability_days,
+        )
+        memory_state.forget_risk = round(
+            clamp(1.0 - current_retrievability + min(memory_state.lapse_count * 0.03, 0.15), 0.0, 1.0), 2)
+        memory_state.memory_strength = round(1.0 - memory_state.forget_risk, 2)
         # Each failure reduces STS by 40 % for the next interval.
         memory_state.short_term_stability = round(current_sts * 0.6, 4)
     memory_state.last_short_term_updated_at = now
