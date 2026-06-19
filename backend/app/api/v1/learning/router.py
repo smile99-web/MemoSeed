@@ -646,7 +646,11 @@ def list_due_review_items(
     for item, _memory_state in due_rows:
         item_by_id.setdefault(item.id, item)
 
-    has_task_updates = ensure_due_word_review_tasks(db, current_user.id, now, min(max(capped_limit, effective_review_cap), 15)) or has_task_updates
+    # Disabled: ensure_due_word_review_tasks was generating 300+ micro-review
+    # tasks per session, causing the same handful of words to be repeated
+    # dozens of times with no variety. The focus mode (7 words × 5 modes =
+    # 35 items) already provides sufficient practice per session.
+    # has_task_updates = ensure_due_word_review_tasks(db, ...) or has_task_updates
     # Garbage-collect stale pending tasks: if a word's micro-review clock has
     # already moved past the task's due_at (e.g. the word was reviewed via
     # another path), the old pending task is dead weight. Cancel all pending
