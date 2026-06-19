@@ -741,7 +741,22 @@ def list_due_review_items(
     if focus and sentence_review_items:
         # Focus mode: top 7-9 words, warm-up order, phonics grouping.
         FOCUS_WORD_COUNT = 7
-        FOCUS_MODES = ["chinese_to_english", "listen_spell", "missing_letter"]
+        # Mixed mode set: 2 recognition tasks first (build confidence),
+        # then 3 spelling tasks (apply what was just reviewed).
+        # The old set [chinese_to_english, listen_spell, missing_letter]
+        # was 100% spelling — children with many lapsed words would get
+        # stuck in an infinite loop of failing at spelling, creating more
+        # spelling micro-review tasks, and never seeing a recognition task.
+        # english_to_chinese = 57% acc, listen_choose_chinese = 55% acc
+        # — these give the child a chance to succeed before attempting
+        # the harder spelling modes.
+        FOCUS_MODES = [
+            "english_to_chinese",       # 看英文选中文 (57% acc)
+            "listen_choose_chinese",    # 听音选中文 (55% acc)
+            "chinese_to_english",       # 看中文拼英文
+            "listen_spell",             # 听英文拼英文
+            "missing_letter",           # 缺字母填空
+        ]
 
         # P0-1: Warm-up — sort by strength (highest first = easiest words first)
         def _item_strength(item: LearningItemRead) -> float:
