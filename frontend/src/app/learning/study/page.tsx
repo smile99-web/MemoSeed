@@ -58,8 +58,8 @@ const itemTypeLabels: Record<LearningItem["item_type"], string> = {
 
 const STUDY_IDLE_TIMEOUT_MS = 10_000;
 const STUDY_TIME_FLUSH_SECONDS = 10;
-const WORD_PREVIEW_MS = 10000;
-const WORD_MEANING_REVIEW_MS = 5000;
+const WORD_PREVIEW_MS = 5000;
+const WORD_MEANING_REVIEW_MS = 3000;
 const WORD_TRANSLATION_TIMEOUT_MS = 2500;
 const DIFFICULT_WORD_CONFIRMATION_COUNT = 3;
 const INITIAL_REVIEW_QUEUE_LIMIT = 100;
@@ -1470,10 +1470,9 @@ function StudyContent() {
       }
 
       try {
-        const [dueReviewItems, nextItems] = await Promise.all([
-          listDueReviewItems(accessToken, courseId, INITIAL_REVIEW_QUEUE_LIMIT, false, INITIAL_REVIEW_QUEUE_LIMIT, isFocusMode).catch(() => [] as LearningItem[]),
-          listLearningItems(accessToken, courseId),
-        ]);
+        // Always load course items — focus words come first via mergeLearningQueues
+        const nextItems = await listLearningItems(accessToken, courseId).catch(() => [] as LearningItem[]);
+        const dueReviewItems = await listDueReviewItems(accessToken, courseId, INITIAL_REVIEW_QUEUE_LIMIT, false, INITIAL_REVIEW_QUEUE_LIMIT, isFocusMode).catch(() => [] as LearningItem[]);
         queuedReviewItemIdsRef.current = new Set(dueReviewItems.map((item) => item.id));
         const mergedItems = mergeLearningQueues(dueReviewItems, nextItems);
         const savedIndex = Number(window.localStorage.getItem(getStudyProgressKey(courseId)) ?? "0");
@@ -1503,6 +1502,7 @@ function StudyContent() {
   }, [isLoading, items.length, courseId]);
 
   const insertDueReviewItemsAfterCurrent = useCallback(async function insertDueReviewItemsAfterCurrent() {
+    if (isFocusMode) return;  // focus mode has fixed item set
     const accessToken = getAccessToken();
     const activeItem = currentItemRef.current;
     if (!accessToken || !courseId || !activeItem || celebrationSummaryRef.current) {
@@ -1537,17 +1537,20 @@ function StudyContent() {
 
     // Only poll once at session start — no silent mid-session injection.
     // Deferred reviews are shown as a count at session end, not forced mid-flow.
-    const timeoutId = window.setTimeout(() => {
-      void insertDueReviewItemsAfterCurrent();
-    }, 15_000);
-    const intervalId = window.setInterval(() => {
-      void insertDueReviewItemsAfterCurrent();
-    }, 60_000);
+    // In focus mode, skip refill entirely — session has a fixed set of items.
+    if (!isFocusMode) {
+      const timeoutId = window.setTimeout(() => {
+        void insertDueReviewItemsAfterCurrent();
+      }, 15_000);
+      const intervalId = window.setInterval(() => {
+        void insertDueReviewItemsAfterCurrent();
+      }, 900_000);
 
-    return () => {
-      window.clearTimeout(timeoutId);
-      window.clearInterval(intervalId);
-    };
+      return () => {
+        window.clearTimeout(timeoutId);
+        window.clearInterval(intervalId);
+      };
+    }
   }, [courseId, insertDueReviewItemsAfterCurrent, isLoading]);
 
   useEffect(() => {
@@ -1696,12 +1699,34 @@ function StudyContent() {
 
     startVoiceSequence();
     setCurrentIndex((index) => {
-      const nextIndex = (index + 1) % items.length;
-      window.localStorage.setItem(getStudyProgressKey(courseId), String(nextIndex));
-      if (options.completedCurrentItem && nextIndex === 0) {
+      const nextIndex = index + 1;
+      // Focus mode: when all items done (focus + course), rotate and reload
+      if (isFocusMode && nextIndex >= items.length) {
+        updateAnswerState("sentence-complete");
+        setFeedback("🎯 全部完成！正在准备下一轮...", "success");
+        // Rotate all items out
+        const token = getAccessToken();
+        const rotatedIds = new Set<string>();
+        for (const item of items) {
+          if (item.id && !rotatedIds.has(item.id)) {
+            rotatedIds.add(item.id);
+            if (token) {
+              void rotateFocusWord(token, item.id).catch(() => {});
+            }
+          }
+        }
+        window.setTimeout(() => {
+          window.location.reload();
+        }, 2000);
+        return index;
+      }
+      // Normal mode: wrap around to beginning
+      const wrappedIndex = nextIndex % items.length;
+      window.localStorage.setItem(getStudyProgressKey(courseId), String(wrappedIndex));
+      if (options.completedCurrentItem && wrappedIndex === 0) {
         window.setTimeout(showCourseCompletion, 0);
       }
-      return nextIndex;
+      return wrappedIndex;
     });
   }, [courseId, items.length, showCourseCompletion, startVoiceSequence]);
 

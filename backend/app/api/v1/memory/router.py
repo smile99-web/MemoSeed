@@ -14,10 +14,12 @@ from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
 from app.models.study_time_log import StudyTimeLog
 from app.models.user import User
+from app.models.user_points import PointsLog
 from app.schemas.memory import CourseCompletionRequest, CourseProgressStats, FsrsFitResponse, MemoryDashboardResponse, MemoryScheduleResponse, MemoryStateRead, PointsAwardRequest, PointsSummaryResponse, ReviewForecastResponse, ReviewScoreRequest, StudyTimeLogRequest, TodayProgressResponse
 from app.services.memory_dashboard import build_memory_dashboard, build_review_forecast, build_today_progress, check_and_generate_daily_report
 from app.schemas.review import MistakeLogRead, ReviewLogRead
 from app.services.fsrs_fitting import fit_user_fsrs_parameters
+from app.services.learning_replay import record_learning_event
 from app.services.memory_scheduler import schedule_memory_review
 
 router = APIRouter()
@@ -109,6 +111,10 @@ def schedule_next_review(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> MemoryScheduleResponse:
+    learning_item = db.scalar(select(LearningItem).where(LearningItem.id == payload.learning_item_id, LearningItem.user_id == current_user.id))
+    if learning_item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning item not found")
+
     result = schedule_memory_review(
         db=db,
         user_id=current_user.id,
@@ -118,6 +124,8 @@ def schedule_next_review(
         response_text=payload.response_text,
         duration_seconds=payload.duration_seconds,
     )
+    record_learning_event(db, current_user.id, result.review_log, learning_item)
+    db.commit()
 
     return MemoryScheduleResponse(
         memory_state=MemoryStateRead.model_validate(result.memory_state),
@@ -211,6 +219,55 @@ def get_course_progress_stats(
 
 
 # ── Points & Rewards ──
+
+@router.get("/points/heatmap")
+def get_points_heatmap(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    year: int | None = None,
+) -> dict:
+    """Daily points heatmap data for the given year."""
+    from datetime import date, timedelta
+
+    target_year = year or datetime.now(UTC).year
+    start_dt = datetime(target_year, 1, 1, tzinfo=UTC)
+    end_dt = datetime(target_year + 1, 1, 1, tzinfo=UTC)
+
+    rows = db.execute(
+        select(
+            func.date(PointsLog.created_at).label("d"),
+            func.sum(PointsLog.points_changed).label("pts"),
+        )
+        .where(
+            PointsLog.user_id == current_user.id,
+            PointsLog.created_at >= start_dt,
+            PointsLog.created_at < end_dt,
+        )
+        .group_by(func.date(PointsLog.created_at))
+    ).all()
+
+    by_date: dict[str, int] = {str(d): int(p or 0) for d, p in rows}
+    total = sum(by_date.values())
+    active = sum(1 for v in by_date.values() if v > 0)
+
+    first_day = date(target_year, 1, 1)
+    year_days = 366 if (target_year % 4 == 0 and (target_year % 100 != 0 or target_year % 400 == 0)) else 365
+    days = []
+    for i in range(year_days):
+        d = (first_day + timedelta(days=i)).isoformat()
+        pts = by_date.get(d, 0)
+        absPts = abs(pts)
+        color = (
+            "#ebedf0" if absPts == 0
+            else "#dbeafe" if absPts <= 10
+            else "#93c5fd" if absPts <= 30
+            else "#3b82f6" if absPts <= 80
+            else "#1d4ed8"
+        )
+        days.append({"date": d, "points": pts, "color": color})
+
+    return {"year": target_year, "days": days, "total_points": total, "active_days": active}
+
 
 @router.get("/points/summary", response_model=PointsSummaryResponse)
 def get_points_summary_endpoint(

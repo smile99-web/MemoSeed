@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import Integer, func, select
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
@@ -114,7 +114,10 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
     if course_id is not None:
         item_query = item_query.where(LearningItem.course_id == course_id)
     item_rows = db.execute(item_query).all()
-    memory_states = [memory_state for _, memory_state in item_rows if memory_state is not None]
+    memory_states_all = [memory_state for _, memory_state in item_rows if memory_state is not None]
+    # Word-centic: only count word-type items for review stats
+    word_memory_state_ids = {ms.id for item, ms in item_rows if ms is not None and item.item_type == "word"}
+    memory_states = [ms for ms in memory_states_all if ms.id in word_memory_state_ids]
     memory_state_by_id = {memory_state.id: memory_state for memory_state in memory_states}
 
     word_stats: dict[str, WordStats] = {}
@@ -289,7 +292,7 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
         learning_words=learning_words,
         weak_words=weak_words,
         due_now_count=len([s for s in summaries if s.next_review_at is not None and s.next_review_at <= now]),
-        overdue_count=len([state for state in memory_states if state.next_review_at < now - timedelta(hours=1)]),
+        overdue_count=len([s for s in summaries if s.next_review_at is not None and s.next_review_at < now - timedelta(hours=1)]),
         average_memory_strength=round(average(current_memory_strengths), 2),
         average_forget_risk=round(average(current_forget_risks), 2),
         average_interval_days=round(average([state.interval_days for state in memory_states]), 1),
@@ -603,9 +606,92 @@ def build_daily_report(db: Session, user_id: UUID, report_date: date | None = No
     review_count = len(today_reviews)
     correct_count = sum(1 for r in today_reviews if r.is_correct)
     accuracy_rate = round(correct_count / review_count, 2) if review_count else 0.0
-    total_duration_seconds = sum(r.duration_seconds for r in today_reviews)
-    study_minutes = total_duration_seconds // 60
+    # Use StudyTimeLog (real per-session time) instead of ReviewLog.duration_seconds (always 0)
+    study_minutes_rows = db.execute(
+        select(func.coalesce(func.sum(StudyTimeLog.duration_seconds), 0))
+        .where(StudyTimeLog.user_id == user_id, StudyTimeLog.recorded_at >= day_start_utc, StudyTimeLog.recorded_at < day_end_utc)
+    ).scalar() or 0
+    study_minutes = study_minutes_rows // 60
     words_practiced = len({r.learning_item_id for r in today_reviews})
+
+    # New words practiced today: items where the review was the first correct recall (repetition_count == 1)
+    new_words_practiced = db.scalar(
+        select(func.count(func.distinct(ReviewLog.learning_item_id))).where(
+            ReviewLog.user_id == user_id,
+            ReviewLog.reviewed_at >= day_start_utc,
+            ReviewLog.reviewed_at < day_end_utc,
+            ReviewLog.is_correct.is_(True),
+            ReviewLog.score >= 3,
+            ReviewLog.learning_item_id.in_(
+                select(MemoryState.learning_item_id).where(
+                    MemoryState.repetition_count == 1,
+                    MemoryState.last_reviewed_at >= day_start_utc,
+                )
+            ),
+        )
+    ) or 0
+
+    # Per-word review breakdown: each unique word, its review count and accuracy
+    per_word_rows = db.execute(
+        select(LearningItem.english_text, func.count(ReviewLog.id), func.sum(func.cast(ReviewLog.is_correct, Integer)))
+        .join(ReviewLog, ReviewLog.learning_item_id == LearningItem.id)
+        .where(
+            ReviewLog.user_id == user_id,
+            ReviewLog.reviewed_at >= day_start_utc,
+            ReviewLog.reviewed_at < day_end_utc,
+            LearningItem.item_type == "word",
+        )
+        .group_by(LearningItem.english_text)
+        .order_by(func.count(ReviewLog.id).desc())
+        .limit(10)
+    ).all()
+    per_word_breakdown = [
+        {"word": w, "reviews": int(c), "correct": int(corr or 0)}
+        for w, c, corr in per_word_rows
+    ]
+
+    # Review breakdown by question type
+    type_rows = db.execute(
+        select(ReviewLog.review_mode, func.count(ReviewLog.id), func.sum(func.cast(ReviewLog.is_correct, Integer)))
+        .where(
+            ReviewLog.user_id == user_id,
+            ReviewLog.reviewed_at >= day_start_utc,
+            ReviewLog.reviewed_at < day_end_utc,
+        )
+        .group_by(ReviewLog.review_mode)
+    ).all()
+    REVIEW_TYPE_LABELS = {
+        "word-spelling": "拼写题（单词默写）",
+        "word-recall": "拼写题（无提示）",
+        "word-hinted": "拼写题（有提示）",
+        "word-preview": "拼写题（预览后）",
+        "word-context": "拼写题（句子里）",
+        "word-english_to_chinese": "选择题（英选中）",
+        "word-listen_choose_chinese": "选择题（听音选）",
+        "word-match_translation": "选择题（配对）",
+        "word-chinese_to_english": "拼写题（看中文）",
+        "word-listen_spell": "拼写题（听音）",
+        "word-missing_letter": "拼写题（缺字母）",
+        "word-hidden_recall": "拼写题（隐藏）",
+        "sentence-spelling": "拼写题（整句）",
+    }
+    spelling_count = 0
+    spelling_correct = 0
+    choice_count = 0
+    choice_correct = 0
+    per_type_breakdown: list[dict[str, object]] = []
+    for mode, count, corr in type_rows:
+        c = int(count)
+        cr = int(corr or 0)
+        label = REVIEW_TYPE_LABELS.get(mode or "", mode or "其他")
+        kind = "spelling" if "spell" in (mode or "").lower() or "recall" in (mode or "").lower() or "preview" in (mode or "").lower() or "context" in (mode or "").lower() or "missing" in (mode or "").lower() or "hidden" in (mode or "").lower() else "choice"
+        per_type_breakdown.append({"mode": mode, "label": label, "reviews": c, "correct": cr, "kind": kind})
+        if kind == "spelling":
+            spelling_count += c
+            spelling_correct += cr
+        else:
+            choice_count += c
+            choice_correct += cr
 
     today_mistakes = db.execute(
         select(func.count(MistakeLog.id))
@@ -684,6 +770,13 @@ def build_daily_report(db: Session, user_id: UUID, report_date: date | None = No
         "accuracy_rate": accuracy_rate,
         "study_duration_minutes": study_minutes,
         "words_practiced": words_practiced,
+        "new_words_practiced": new_words_practiced,
+        "per_word_breakdown": per_word_breakdown,
+        "per_type_breakdown": per_type_breakdown,
+        "spelling_total": spelling_count,
+        "spelling_correct": spelling_correct,
+        "choice_total": choice_count,
+        "choice_correct": choice_correct,
         "mistake_count": today_mistakes,
         "streak_days": streak_data["current_streak_days"],
         "struggling_words": struggling_words,
@@ -1085,40 +1178,35 @@ def build_error_breakdown(db: Session, user_id: UUID) -> dict[str, object]:
 
 
 def generate_ai_daily_report(db: Session, user_id: UUID, report_date: date | None = None) -> dict[str, object]:
+    # Always compute fresh data from the database
     report_data = build_daily_report(db, user_id, report_date)
     raw = report_data.pop("_raw", {})
 
+    # Delete old record so regenerate always reflects current state
     existing = db.scalar(
         select(AiDailyReport).where(
             AiDailyReport.user_id == user_id,
             AiDailyReport.report_date == report_data["report_date"],
         )
     )
-
     if existing is not None:
-        existing.accuracy_rate = report_data["accuracy_rate"]
-        existing.spelling_error_rate = raw.get("spelling_error_rate", 0.0)  # type: ignore[arg-type]
-        existing.sentence_error_rate = raw.get("sentence_error_rate", 0.0)  # type: ignore[arg-type]
-        existing.study_duration_minutes = report_data["study_duration_minutes"]
-        existing.review_backlog_count = raw.get("review_backlog_count", 0)  # type: ignore[arg-type]
-        existing.high_forget_risk_count = raw.get("high_forget_risk_count", 0)  # type: ignore[arg-type]
-        existing.summary = report_data["summary"]
-        existing.next_day_strategy = report_data["next_day_strategy"]
-    else:
-        db.add(
-            AiDailyReport(
-                user_id=user_id,
-                report_date=report_data["report_date"],
-                accuracy_rate=report_data["accuracy_rate"],
-                spelling_error_rate=raw.get("spelling_error_rate", 0.0),  # type: ignore[arg-type]
-                sentence_error_rate=raw.get("sentence_error_rate", 0.0),  # type: ignore[arg-type]
-                study_duration_minutes=report_data["study_duration_minutes"],
-                review_backlog_count=raw.get("review_backlog_count", 0),  # type: ignore[arg-type]
-                high_forget_risk_count=raw.get("high_forget_risk_count", 0),  # type: ignore[arg-type]
-                summary=report_data["summary"],
-                next_day_strategy=report_data["next_day_strategy"],
-            )
+        db.delete(existing)
+        db.flush()
+
+    db.add(
+        AiDailyReport(
+            user_id=user_id,
+            report_date=report_data["report_date"],
+            accuracy_rate=report_data["accuracy_rate"],
+            spelling_error_rate=raw.get("spelling_error_rate", 0.0),  # type: ignore[arg-type]
+            sentence_error_rate=raw.get("sentence_error_rate", 0.0),  # type: ignore[arg-type]
+            study_duration_minutes=report_data["study_duration_minutes"],
+            review_backlog_count=raw.get("review_backlog_count", 0),  # type: ignore[arg-type]
+            high_forget_risk_count=raw.get("high_forget_risk_count", 0),  # type: ignore[arg-type]
+            summary=report_data["summary"],
+            next_day_strategy=report_data["next_day_strategy"],
         )
+    )
     db.commit()
 
     return report_data

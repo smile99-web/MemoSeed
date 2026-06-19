@@ -47,6 +47,20 @@ class StrugglingWordItem(BaseModel):
     recommendation: str
 
 
+class PerWordBreakdownItem(BaseModel):
+    word: str
+    reviews: int
+    correct: int
+
+
+class PerTypeBreakdownItem(BaseModel):
+    mode: str
+    label: str
+    reviews: int
+    correct: int
+    kind: str  # "spelling" or "choice"
+
+
 class DailyReportResponse(BaseModel):
     report_date: date
     review_count: int
@@ -54,6 +68,13 @@ class DailyReportResponse(BaseModel):
     accuracy_rate: float
     study_duration_minutes: int
     words_practiced: int
+    new_words_practiced: int
+    per_word_breakdown: list[PerWordBreakdownItem]
+    per_type_breakdown: list[PerTypeBreakdownItem]
+    spelling_total: int
+    spelling_correct: int
+    choice_total: int
+    choice_correct: int
     mistake_count: int
     streak_days: int
     struggling_words: list[StrugglingWordItem]

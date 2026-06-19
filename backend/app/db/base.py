@@ -5,6 +5,7 @@ from app.models.course_completion_log import CourseCompletionLog
 from app.models.course_package import CoursePackage
 from app.models.daily_plan import DailyPlan
 from app.models.generated_sentence import GeneratedSentence
+from app.models.learning_event import LearningEvent, LearningMinuteStat
 from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
 from app.models.mistake_log import MistakeLog
@@ -27,6 +28,8 @@ __all__ = [
     "CourseCompletionLog",
     "CoursePackage",
     "DailyPlan",
+    "LearningEvent",
+    "LearningMinuteStat",
     "GeneratedSentence",
     "LearningItem",
     "MemoryState",

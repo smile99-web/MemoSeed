@@ -6,8 +6,10 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { apiRequest } from "@/lib/api";
+import { apiRequest, getFreshAccessToken } from "@/lib/api";
+import { PointsHeatmapCompact } from "./replay/points-heatmap";
 import { getAccessToken } from "@/lib/auth";
+import { DayDetail, Heatmap, HeatmapDay, getDayDetail, getHeatmap } from "@/lib/learning-replay";
 import { getModelSettings, savePersistedModelSettings } from "@/lib/model-settings";
 import {
   DailyReport,
@@ -43,6 +45,9 @@ const statusLabels: Record<WordMasterySummary["status"], string> = {
   near_mastered: "接近掌握",
   mastered: "已掌握",
 };
+
+const replayDayLabels = ["", "Mon", "", "Wed", "", "Fri", ""];
+const replayMonthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 function formatPercent(value: number): string {
   return `${Math.round(value * 100)}%`;
@@ -134,6 +139,171 @@ function StatCard({ label, value, hint }: { label: string; value: string | numbe
       </CardHeader>
       <CardContent>
         <p className="text-sm text-muted-foreground ipad:text-base">{hint}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function buildReplayGrid(heatmap: Heatmap | null): {
+  weeks: Array<Array<HeatmapDay | null>>;
+  monthLabels: Array<{ week: number; label: string }>;
+} {
+  if (!heatmap) {
+    return { weeks: [], monthLabels: [] };
+  }
+  const byDate = new Map(heatmap.days.map((day) => [day.date, day]));
+  const firstDay = new Date(Date.UTC(heatmap.year, 0, 1));
+  const startWeekday = (firstDay.getUTCDay() + 6) % 7;
+  const totalDays = 365 + ((heatmap.year % 4 === 0 && (heatmap.year % 100 !== 0 || heatmap.year % 400 === 0)) ? 1 : 0);
+  const cells: Array<HeatmapDay | null> = [];
+  for (let i = 0; i < startWeekday; i += 1) {
+    cells.push(null);
+  }
+  for (let i = 0; i < totalDays; i += 1) {
+    const day = new Date(firstDay.getTime() + i * 86400000);
+    const key = day.toISOString().slice(0, 10);
+    cells.push(byDate.get(key) ?? { date: key, minutes: 0, events: 0, color: "#ebedf0" });
+  }
+  while (cells.length % 7 !== 0) {
+    cells.push(null);
+  }
+
+  const weeks: Array<Array<HeatmapDay | null>> = [];
+  for (let i = 0; i < cells.length; i += 7) {
+    weeks.push(cells.slice(i, i + 7));
+  }
+
+  const monthLabels: Array<{ week: number; label: string }> = [];
+  weeks.forEach((week, index) => {
+    const firstCell = week.find((cell) => cell !== null);
+    if (!firstCell) {
+      return;
+    }
+    const month = new Date(firstCell.date).getUTCMonth();
+    const previousCell = weeks[index - 1]?.find((cell) => cell !== null);
+    const previousMonth = previousCell ? new Date(previousCell.date).getUTCMonth() : null;
+    if (index === 0 || previousMonth !== month) {
+      monthLabels.push({ week: index, label: replayMonthLabels[month] });
+    }
+  });
+  return { weeks, monthLabels };
+}
+
+function LearningReplayCard({
+  heatmap,
+  selectedDate,
+  dayDetail,
+  onSelectDate,
+}: {
+  heatmap: Heatmap | null;
+  selectedDate: string | null;
+  dayDetail: DayDetail | null;
+  onSelectDate: (date: string) => void;
+}) {
+  const grid = buildReplayGrid(heatmap);
+
+  return (
+    <Card className="border-emerald-200 bg-emerald-50/30">
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <CardTitle className="text-emerald-800">学习热力图</CardTitle>
+            <CardDescription>
+              {heatmap
+                ? `${heatmap.year} 年 · 累计学习 ${heatmap.total_minutes} 分钟 · 活跃 ${heatmap.active_days} 天`
+                : "正在加载年度学习分布"}
+            </CardDescription>
+          </div>
+          <div className="flex items-center gap-1 text-xs text-muted-foreground">
+            <span>少</span>
+            <span className="h-3 w-3 rounded-sm" style={{ background: "#ebedf0" }} />
+            <span className="h-3 w-3 rounded-sm" style={{ background: "#9be9a8" }} />
+            <span className="h-3 w-3 rounded-sm" style={{ background: "#40c463" }} />
+            <span className="h-3 w-3 rounded-sm" style={{ background: "#30a14e" }} />
+            <span className="h-3 w-3 rounded-sm" style={{ background: "#216e39" }} />
+            <span>多</span>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {heatmap ? (
+          <div className="overflow-x-auto pb-1">
+            <div className="inline-block min-w-full">
+              <div className="flex pl-6 text-[10px] text-muted-foreground" style={{ height: 14 }}>
+                {grid.monthLabels.map((month) => (
+                  <div key={`replay-month-${month.week}`} style={{ position: "relative", left: `${month.week * 13}px` }}>
+                    {month.label}
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-[2px]">
+                <div className="flex w-6 flex-col gap-[2px] pr-1 text-[10px] text-muted-foreground">
+                  {replayDayLabels.map((label, index) => (
+                    <div key={`replay-day-${index}`} className="h-[12px] leading-[12px]">{label}</div>
+                  ))}
+                </div>
+                <div className="flex gap-[2px]">
+                  {grid.weeks.map((week, weekIndex) => (
+                    <div key={`replay-week-${weekIndex}`} className="flex flex-col gap-[2px]">
+                      {week.map((cell, dayIndex) => (
+                        <button
+                          type="button"
+                          key={`replay-cell-${weekIndex}-${dayIndex}`}
+                          title={cell ? `${cell.date} · ${cell.minutes} 分钟 · ${cell.events} 次` : ""}
+                          disabled={!cell}
+                          onClick={() => cell && onSelectDate(cell.date)}
+                          className={`h-[12px] w-[12px] rounded-sm border transition ${
+                            selectedDate === cell?.date
+                              ? "border-emerald-700 ring-1 ring-emerald-500"
+                              : "border-transparent hover:border-slate-400"
+                          }`}
+                          style={{ background: cell ? cell.color : "transparent" }}
+                        />
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <Skeleton className="h-28 rounded-lg" />
+        )}
+
+        {selectedDate ? (
+          <div className="rounded-lg border border-emerald-200 bg-white/70 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="font-semibold text-emerald-900">{selectedDate} 学习详情</p>
+                {dayDetail ? (
+                  <p className="text-xs text-muted-foreground">
+                    {dayDetail.total_events} 次练习 · {dayDetail.study_minutes} 分钟 · 正确率 {dayDetail.accuracy}% · 错词 {dayDetail.mistake_count}
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">正在加载当天学习详情...</p>
+                )}
+              </div>
+              <Link href={`/dashboard/replay/${selectedDate}`} className="text-sm font-medium text-emerald-700 hover:underline">
+                分钟级回放
+              </Link>
+            </div>
+            {dayDetail && dayDetail.hours.length > 0 ? (
+              <div className="mt-3 grid gap-2 md:grid-cols-2">
+                {dayDetail.hours.map((hour) => (
+                  <div key={hour.hour} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                    <div className="font-semibold text-slate-700">{hour.label}</div>
+                    <div className="text-muted-foreground">
+                      {hour.minutes.reduce((sum, minute) => sum + minute.total, 0)} 题 ·
+                      拼写 {hour.minutes.reduce((sum, minute) => sum + minute.spelling, 0)} ·
+                      英译中 {hour.minutes.reduce((sum, minute) => sum + minute.english_to_chinese, 0)} ·
+                      中译英 {hour.minutes.reduce((sum, minute) => sum + minute.chinese_to_english, 0)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -276,6 +446,9 @@ export default function DashboardPage() {
   const [todayProgress, setTodayProgress] = useState<TodayProgress | null>(null);
   const [errorBreakdown, setErrorBreakdown] = useState<ErrorBreakdown | null>(null);
   const [studyStreak, setStudyStreak] = useState<StudyStreak | null>(null);
+  const [learningHeatmap, setLearningHeatmap] = useState<Heatmap | null>(null);
+  const [selectedReplayDate, setSelectedReplayDate] = useState<string | null>(null);
+  const [selectedReplayDayDetail, setSelectedReplayDayDetail] = useState<DayDetail | null>(null);
   const [selectedCourseId] = useState<string>("");
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [selectedWordHistory, setSelectedWordHistory] = useState<WordHistoryResponse | null>(null);
@@ -283,7 +456,7 @@ export default function DashboardPage() {
 
   useEffect(() => {
     async function loadDashboard() {
-      const accessToken = getAccessToken();
+      const accessToken = getAccessToken() ?? await getFreshAccessToken();
       if (!accessToken) {
         setErrorMessage("请先登录后再查看数据看板");
         setIsLoading(false);
@@ -292,16 +465,14 @@ export default function DashboardPage() {
 
       try {
         const courseId = selectedCourseId || undefined;
-        const [dashboardData, reportData, planData, curveData, errorData, streakData, forecastData, pointsData, progressData] = await Promise.all([
+        // Phase 1: critical data (show page immediately)
+        const [dashboardData, reportData, planData, curveData, errorData, streakData] = await Promise.all([
           getMemoryDashboardWithCourse(accessToken, courseId),
           getDailyReport(accessToken).catch(() => null),
           getTodayPlan(accessToken).catch(() => null),
           getRetentionCurve(accessToken, courseId).catch(() => null),
           getErrorBreakdown(accessToken).catch(() => null),
           getStudyStreak(accessToken).catch(() => null),
-          getReviewForecast(accessToken).catch(() => null),
-          getPointsSummary(accessToken).catch(() => null),
-          getTodayProgress(accessToken).catch(() => null),
         ]);
         setDashboard(dashboardData);
         setDailyReport(reportData);
@@ -309,9 +480,21 @@ export default function DashboardPage() {
         setRetentionCurve(curveData);
         setErrorBreakdown(errorData);
         setStudyStreak(streakData);
-        setReviewForecast(forecastData);
-        setPointsSummary(pointsData);
-        setTodayProgress(progressData);
+        setIsLoading(false); // Show page now!
+
+        // Phase 2: secondary data (load after page renders, non-blocking)
+        void (async () => {
+          const [forecastData, pointsData, progressData, heatmapData] = await Promise.all([
+            getReviewForecast(accessToken).catch(() => null),
+            getPointsSummary(accessToken).catch(() => null),
+            getTodayProgress(accessToken).catch(() => null),
+            getHeatmap(accessToken).catch(() => null),
+          ]);
+          setReviewForecast(forecastData);
+          setPointsSummary(pointsData);
+          setTodayProgress(progressData);
+          setLearningHeatmap(heatmapData);
+        })();
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "读取数据看板失败");
       } finally {
@@ -415,6 +598,15 @@ export default function DashboardPage() {
     }
   }
 
+  // Force fresh data on every load: trigger a full page reload on first
+  // dashboard visit after the rebuild, so stale chunks never get reused.
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.localStorage.getItem("dashboard_v2_loaded") !== "1") {
+      window.localStorage.setItem("dashboard_v2_loaded", "1");
+      window.location.reload();
+    }
+  }, []);
+
   async function handleGenerateReport() {
     const accessToken = getAccessToken();
     if (!accessToken) {
@@ -445,8 +637,22 @@ export default function DashboardPage() {
     }
   }
 
+  async function handleReplayDateSelect(date: string) {
+    const accessToken = getAccessToken() ?? await getFreshAccessToken();
+    if (!accessToken) {
+      setErrorMessage("请先登录后再查看学习回放");
+      return;
+    }
+    setSelectedReplayDate(date);
+    setSelectedReplayDayDetail(null);
+    try {
+      setSelectedReplayDayDetail(await getDayDetail(accessToken, date));
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "读取学习回放失败");
+    }
+  }
+
   const fsrsFitRecommendation = dashboard ? getFsrsFitRecommendation(dashboard) : null;
-  const maxRetentionCount = retentionCurve ? Math.max(...retentionCurve.bins.map((b) => b.total_reviews), 1) : 1;
   const maxErrorCount = errorBreakdown ? Math.max(...errorBreakdown.items.map((item) => Math.max(item.this_week_count, item.last_week_count)), 1) : 1;
 
   return (
@@ -537,6 +743,13 @@ export default function DashboardPage() {
 
         {dashboard ? (
           <>
+            <LearningReplayCard
+              heatmap={learningHeatmap}
+              selectedDate={selectedReplayDate}
+              dayDetail={selectedReplayDayDetail}
+              onSelectDate={handleReplayDateSelect}
+            />
+
             {dailyReport ? (
               <Card className="border-emerald-200 bg-emerald-50/30">
                 <CardHeader>
@@ -552,17 +765,91 @@ export default function DashboardPage() {
                       正确率 {Math.round(dailyReport.accuracy_rate * 100)}%
                     </span>
                     <span className="rounded-full bg-emerald-100 px-2 py-0.5">
+                      复习 {dailyReport.review_count} 次
+                    </span>
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5">
+                      答对 {dailyReport.correct_count} 次
+                    </span>
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5">
                       学习 {dailyReport.study_duration_minutes} 分钟
                     </span>
                     <span className="rounded-full bg-emerald-100 px-2 py-0.5">
                       练习 {dailyReport.words_practiced} 个单词
                     </span>
+                    {dailyReport.mistake_count > 0 ? (
+                      <span className="rounded-full bg-red-100 px-2 py-0.5 text-red-700">
+                        错词 {dailyReport.mistake_count} 个
+                      </span>
+                    ) : null}
                     {studyStreak ? (
                       <span className="rounded-full bg-orange-100 px-2 py-0.5">
                         连续 {studyStreak.current_streak_days} 天
                       </span>
                     ) : null}
+                    {dailyReport.new_words_practiced > 0 ? (
+                      <span className="rounded-full bg-blue-100 px-2 py-0.5 text-blue-700">
+                        新学 {dailyReport.new_words_practiced} 个
+                      </span>
+                    ) : null}
                   </div>
+                  {dailyReport.per_word_breakdown.length > 0 ? (
+                    <div className="rounded-md border border-emerald-200 bg-white/60 p-2 text-xs">
+                      <p className="mb-1 font-medium text-muted-foreground">今日复习详情（每个词复习了几遍）</p>
+                      <div className="space-y-0.5">
+                        {dailyReport.per_word_breakdown.map((w) => (
+                          <div key={w.word} className="flex items-center justify-between gap-2">
+                            <span className="font-medium text-slate-700">{w.word}</span>
+                            <span className="text-muted-foreground">
+                              {w.reviews} 次 · 答对 {w.correct}
+                              {w.reviews > 0 && ` · ${Math.round((w.correct / w.reviews) * 100)}%`}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  {dailyReport.review_count > 0 ? (
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="rounded-md border border-blue-200 bg-blue-50/50 p-2 text-xs">
+                        <p className="font-semibold text-blue-700">✍️ 拼写题</p>
+                        <p className="text-lg font-bold text-blue-700">
+                          {dailyReport.spelling_total} <span className="text-xs font-normal text-muted-foreground">题 · 答对 {dailyReport.spelling_correct}</span>
+                        </p>
+                        {dailyReport.spelling_total > 0 && (
+                          <p className="text-muted-foreground">
+                            正确率 {Math.round((dailyReport.spelling_correct / dailyReport.spelling_total) * 100)}%
+                          </p>
+                        )}
+                      </div>
+                      <div className="rounded-md border border-purple-200 bg-purple-50/50 p-2 text-xs">
+                        <p className="font-semibold text-purple-700">🔘 选择题</p>
+                        <p className="text-lg font-bold text-purple-700">
+                          {dailyReport.choice_total} <span className="text-xs font-normal text-muted-foreground">题 · 答对 {dailyReport.choice_correct}</span>
+                        </p>
+                        {dailyReport.choice_total > 0 && (
+                          <p className="text-muted-foreground">
+                            正确率 {Math.round((dailyReport.choice_correct / dailyReport.choice_total) * 100)}%
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+                  {dailyReport.per_type_breakdown.length > 0 ? (
+                    <div className="rounded-md border border-slate-200 bg-slate-50/50 p-2 text-xs">
+                      <p className="mb-1 font-medium text-muted-foreground">分题型明细</p>
+                      <div className="space-y-0.5">
+                        {dailyReport.per_type_breakdown.map((t) => (
+                          <div key={t.mode} className="flex items-center justify-between gap-2">
+                            <span className="text-slate-700">{t.label}</span>
+                            <span className="text-muted-foreground">
+                              {t.reviews} 次 · 答对 {t.correct}
+                              {t.reviews > 0 && ` · ${Math.round((t.correct / t.reviews) * 100)}%`}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                   {dailyReport.struggling_words.length > 0 ? (
                     <div className="space-y-1">
                       <p className="text-xs font-medium text-muted-foreground">需要关注的单词</p>
@@ -719,21 +1006,10 @@ export default function DashboardPage() {
                       )}
                     </div>
                   </div>
-                  {pointsSummary.recent_logs.length > 0 && (
-                    <div className="mt-3 border-t pt-2">
-                      <p className="mb-1 text-xs font-medium text-muted-foreground">最近积分记录</p>
-                      <div className="max-h-24 space-y-0.5 overflow-y-auto">
-                        {pointsSummary.recent_logs.slice(0, 8).map((log, i) => (
-                          <div key={i} className="flex items-center justify-between text-xs">
-                            <span className="text-muted-foreground truncate max-w-[200px]">{log.detail || log.reason}</span>
-                            <span className={`ml-2 font-semibold tabular-nums ${log.points_changed > 0 ? "text-emerald-600" : "text-red-500"}`}>
-                              {log.points_changed > 0 ? "+" : ""}{log.points_changed}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
+                  <div className="mt-3 border-t pt-3">
+                    <p className="mb-1 text-xs font-medium text-muted-foreground">积分热力图</p>
+                    <PointsHeatmapCompact />
+                  </div>
                 </CardContent>
               </Card>
             ) : null}
