@@ -407,22 +407,33 @@ def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[s
     if word_state.consecutive_error_count >= 3 and "hidden_recall" not in base_sequence[:2]:
         base_sequence = ["hidden_recall", *base_sequence]
 
-    # Q3: Sentence-spelling demotion. Production data shows sentence-spelling
-    # sits at 33% accuracy — the worst of the 4 real task types and a
-    # consistent time sink. When the child has had a recent failure streak
-    # (consecutive_error_count >= 2), demote the first task from spelling
-    # to a recognition mode. The child gets to build confidence on the
-    # easier mode, then naturally re-attempt spelling in a later session
-    # when their cc resets. The demotion is keyed on the *current* failure
-    # streak rather than cumulative history, so it doesn't trap recovering
-    # words.
+    # --- Demote underperforming words to an easier mode ---
+    # Two triggers compete, with R2 (first-failure) taking priority:
+    #   R2: consecutive_error >= 3  →  force listen_choose_chinese (55% acc)
+    #        The data shows 2522 correct answers came after 11+ prior failures.
+    #        Switching sooner prevents unnecessary frustration.
+    #   Q3: consecutive_error >= 2  →  demote to easiest unpracticed mode
+    #        Sentence-spelling sits at 33% — the worst real task type.
     demoted_to_easier: str | None = None
-    if (word_state.consecutive_error_count or 0) >= 2:
-        # Pick the easier mode the child has had least practice with — gives
-        # variety while still picking a high-success mode.
-        task_counts_for_pick = {str(k): int(v or 0) for k, v in (word_state.task_type_counts or {}).items()}
+    ce = word_state.consecutive_error_count or 0
+    task_counts_for_pick = {str(k): int(v or 0) for k, v in (word_state.task_type_counts or {}).items()}
+    if ce >= 3:
+        # R2: Hard failure streak. Force the highest-success mode.
+        demoted_to_easier = "listen_choose_chinese"
+    elif ce >= 2:
+        # Q3: Moderate failure streak. Pick easiest unpracticed option.
         candidates = ["listen_choose_chinese", "english_to_chinese", "match_translation"]
         demoted_to_easier = min(candidates, key=lambda t: task_counts_for_pick.get(t, 0))
+
+    # --- R3: Time-of-day mode selection ---
+    # Data shows 08-10h and 14-15h are low-efficiency (11-30% accuracy),
+    # while 22-23h is the golden hour (55%). When demotion doesn't apply,
+    # bias the first task toward the difficulty level the child can succeed
+    # at given the current time.
+    local_hour = now_utc.astimezone(LOCAL_TIMEZONE).hour
+    low_efficiency = local_hour in (8, 9, 10, 14, 15)
+    peak_hour = local_hour in (22, 23)
+    easy_modes = ("listen_choose_chinese", "english_to_chinese", "match_translation", "hidden_recall")
 
     task_counts = {str(key): int(value or 0) for key, value in (word_state.task_type_counts or {}).items()}
     decayed_errors = get_decayed_error_weights(word_state, now_utc)
@@ -454,8 +465,19 @@ def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[s
         total_weight = sum(decayed_errors.get(e, 0.0) for e in relevant_errors)
         task_error_weight[t] = total_weight
 
+    # Priority chain: R2 demotion > Q3 demotion > R3 time-of-day > default
     if demoted_to_easier is not None and demoted_to_easier in deduped_sequence:
         first_task = demoted_to_easier
+    elif low_efficiency and not peak_hour:
+        for easy in easy_modes:
+            if easy in deduped_sequence[:4]:
+                first_task = easy
+                break
+        else:
+            first_task = min(
+                deduped_sequence[:4],
+                key=lambda t: (task_counts.get(t, 0), task_error_weight.get(t, 0.0)),
+            )
     else:
         first_task = min(
             deduped_sequence[:4],

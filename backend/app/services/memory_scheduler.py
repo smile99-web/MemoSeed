@@ -514,6 +514,78 @@ def park_stuck_words(db: Session, user_id: UUID, now: datetime | None = None) ->
     return int(result.rowcount or 0)
 
 
+# --- R1: Learning-curve cliff detection --------------------------------------
+# The data shows a hard plateau: from 30 to 100 reviews, memory_strength
+# only improves from 0.68 to 0.70 — a 0.02 gain over 70 additional reviews.
+# 26 words have >100 reviews and are stuck at strength 0.70. These words are
+# consuming time without producing any learning signal.
+#
+# Algorithm:
+#   DETECT:  total_reviews >= 30 AND current_strength < 0.5
+#            AND word is currently due (next_review_at <= now)
+#            AND consecutive_correct_count = 0 (no recent progress)
+#   PARK:    push next_review_at to NOW + 14 days
+#   RELEASE: after 14 days the word gets exactly 1 review.
+#            If correct:  strength += 0.15 (reward plateau break)
+#            If wrong:    lapse += 1, word falls back into stuck-word parking
+#
+# The 14-day park is longer than the 7-day stuck-word park because the word
+# hasn't just failed a lot — it has been TRYING for a long time without
+# moving. A longer break gives consolidation a chance.
+CLIFF_REVIEW_THRESHOLD = 30
+CLIFF_STRENGTH_THRESHOLD = 0.5
+CLIFF_RESCHEDULE_DAYS = 14
+
+
+def park_cliff_words(db: Session, user_id: UUID, now: datetime | None = None) -> int:
+    """Park words that have plateaued: many reviews, still weak, no progress.
+
+    Returns the number of words whose `next_review_at` was moved forward.
+    """
+    from app.models.word_memory_state import WordMemoryState
+    now = now or datetime.now(UTC)
+    target_due = now + timedelta(days=CLIFF_RESCHEDULE_DAYS)
+    # Compute per-word total reviews from the review_logs table so we don't
+    # need a schema migration. Join through learning_item → memory_state.
+    review_count_subquery = (
+        select(
+            ReviewLog.learning_item_id,
+            func.count(ReviewLog.id).label("total_reviews"),
+        )
+        .where(ReviewLog.user_id == user_id)
+        .group_by(ReviewLog.learning_item_id)
+    ).alias("rc")
+    cliff_ids_subquery = (
+        select(LearningItem.id)
+        .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
+        .outerjoin(WordMemoryState, and_(
+            WordMemoryState.learning_item_id == LearningItem.id,
+            WordMemoryState.user_id == user_id,
+        ))
+        .outerjoin(
+            review_count_subquery,
+            review_count_subquery.c.learning_item_id == LearningItem.id,
+        )
+        .where(
+            LearningItem.user_id == user_id,
+            LearningItem.item_type == "word",
+            MemoryState.memory_strength < CLIFF_STRENGTH_THRESHOLD,
+            MemoryState.next_review_at <= now,
+            # Only park if we have enough data to detect the plateau.
+            func.coalesce(review_count_subquery.c.total_reviews, 0) >= CLIFF_REVIEW_THRESHOLD,
+            # Recovery gate: a word with any recent success is NOT on a cliff.
+            WordMemoryState.consecutive_correct_count == 0,
+        )
+    )
+    result = db.execute(
+        update(MemoryState)
+        .where(MemoryState.learning_item_id.in_(cliff_ids_subquery))
+        .values(next_review_at=target_due)
+    )
+    db.commit()
+    return int(result.rowcount or 0)
+
+
 def park_mastered_words(db: Session, user_id: UUID, now: datetime | None = None) -> int:
     """Push `next_review_at` to NOW + 30 days for all currently-mastered words.
 
