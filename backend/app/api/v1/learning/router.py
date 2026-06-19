@@ -847,11 +847,19 @@ def list_due_review_items(
             ]
 
         focus_items: list[LearningItemRead] = []
+        seen_main_words: set[str] = set()
         for item in top_items:
             words = tokenize_words(item.english_text)
             if not words:
                 continue
             main_word = words[0].strip().lower()
+            # Skip if this word already has a focus slot in this session.
+            # Without this, four sentences starting with 'I' (e.g.
+            # 'I am a teacher' + 'I go to school' + ...) each generate
+            # 5 tasks, making 'I' appear 20+ times in one session.
+            if main_word in seen_main_words:
+                continue
+            seen_main_words.add(main_word)
             chinese_meaning = word_translations.get(main_word, "")
             for mode in FOCUS_MODES:
                 # Set chinese_text to the actual meaning, not the task prompt.
