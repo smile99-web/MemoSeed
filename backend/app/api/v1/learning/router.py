@@ -774,12 +774,7 @@ def list_due_review_items(
 
     if focus and sentence_review_items:
         # Focus mode: top 7-9 words, warm-up order, phonics grouping.
-        FOCUS_WORD_COUNT = 7
-        # Rotate sessions: shuffle the top candidates so every session
-        # draws different words. Also push selected items to tomorrow so
-        # next session naturally picks fresh content. Without the push,
-        # the top priority items (like "Drink some water now." which is
-        # 5 days overdue) would always dominate the candidate pool.
+        FOCUS_WORD_COUNT = 3   # small batch = quick wins for the child
         import random
         pool = sentence_review_items[:max(FOCUS_WORD_COUNT * 3, len(sentence_review_items))]
         random.shuffle(pool)
@@ -794,11 +789,9 @@ def list_due_review_items(
         # — these give the child a chance to succeed before attempting
         # the harder spelling modes.
         FOCUS_MODES = [
+            "listen_choose_chinese",    # 听音选中文 (55% acc) — easiest, build confidence
             "english_to_chinese",       # 看英文选中文 (57% acc)
-            "listen_choose_chinese",    # 听音选中文 (55% acc)
             "chinese_to_english",       # 看中文拼英文
-            "listen_spell",             # 听英文拼英文
-            "missing_letter",           # 缺字母填空
         ]
 
         # P0-1: Warm-up — sort by strength (highest first = easiest words first)
@@ -912,7 +905,7 @@ def list_due_review_items(
         # appears in the word review section is excluded from the
         # sentence section so the child doesn't see 'your' in 20
         # different sentences during word practice.
-        sentences_for_session = [s for s in sentence_review_items[:15]
+        sentences_for_session = [s for s in sentence_review_items[:3]
                                 if tokenize_words(s.english_text) and tokenize_words(s.english_text)[0].strip().lower() not in seen_main_words]
         return sentences_for_session + focus_items
 
