@@ -149,12 +149,24 @@ def calculate_word_memory_priority(word_state: WordMemoryState, now: datetime) -
 
 
 def derive_word_status(word_state: WordMemoryState) -> str:
+    # Mastered: cumulative recall evidence + spaced practice + (mostly) clean
+    # recent error streak.
+    #
+    # NOTE: previously required `consecutive_correct_count >= 3 AND
+    # consecutive_error_count == 0`. Both are reset-on-error counters: any
+    # single mistake would demote a mastered word. This caused the
+    # "mastered count drops as child learns more" bug — see
+    # docs/fsrs_verification_report.md and tests/test_mastery_status.py.
+    #
+    # Minimum fix: collapse the two buggy reset-based conditions into the
+    # single non-reset equivalent `consecutive_error_count <= 1` (tolerate
+    # one natural slip). Cumulative thresholds (memory_strength,
+    # recall_correct_count, no_hint_correct_date_count) are unchanged.
     if (
         word_state.memory_strength >= 0.82
         and word_state.recall_correct_count >= 3
         and word_state.no_hint_correct_date_count >= 3
-        and word_state.consecutive_correct_count >= 3
-        and word_state.consecutive_error_count == 0
+        and word_state.consecutive_error_count <= 1
     ):
         return "mastered"
     if word_state.memory_strength >= 0.72 and word_state.recall_correct_count >= 2 and word_state.no_hint_correct_date_count >= 2 and word_state.consecutive_error_count == 0:

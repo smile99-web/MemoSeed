@@ -345,7 +345,24 @@ def summarize_word(stats: WordStats, now: datetime) -> WordMasterySummary:
     priority_score = calculate_word_priority(stats, strength, risk, next_review_at, now)
     dominant_error_type = get_dominant_error_type(stats)
     # Mastered: strong memory + enough correct reviews + proven retention over time
-    if strength >= 0.80 and stats.recall_correct_count >= 3 and stats.no_hint_correct_date_count >= 3 and stats.consecutive_correct_count >= 5:
+    #
+    # NOTE: previously used `consecutive_correct_count >= 3`, which resets to 0
+    # on any single error (see memory_scheduler.update_memory_counters AND
+    # the WordStats aggregation below at line 219 which does the same reset).
+    # That caused the "mastered count drops as child learns more" bug — see
+    # docs/fsrs_verification_report.md and the regression test in
+    # tests/test_mastery_status.py.
+    #
+    # Minimum fix: replace the buggy `consecutive_correct_count >= 3` with the
+    # semantically equivalent `consecutive_error_count <= 1` (tolerate one
+    # natural slip). The other 3 thresholds (strength, recall, dates) are
+    # cumulative metrics and are kept as-is.
+    if (
+        strength >= 0.75
+        and stats.recall_correct_count >= 3
+        and stats.no_hint_correct_date_count >= 3
+        and stats.consecutive_error_count <= 1
+    ):
         status = "mastered"
     # Near-mastered: good memory + some correct reviews + no recent errors
     elif strength >= 0.68 and stats.recall_correct_count >= 2 and stats.no_hint_correct_date_count >= 2 and stats.consecutive_error_count == 0:
