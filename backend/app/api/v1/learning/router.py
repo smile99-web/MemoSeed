@@ -877,14 +877,21 @@ def list_due_review_items(
                     "focus_words": [main_word],
                 })
                 focus_items.append(focus_item)
-        # Push selected sentences to tomorrow so the next session
-        # draws fresh content. Without this, the same 7 sentences
-        # (top priority, always in the pool) reappear every session.
+        # Push the served focus items to tomorrow — but ONLY if
+        # they haven't already been pushed further by a park
+        # function. Without this guard, park_mastered_words
+        # (sets +30d) would be immediately overwritten by
+        # the focus push (sets +1d), pulling mastered words
+        # back into the queue tomorrow after just one session.
+        tomorrow = now + timedelta(days=1)
         for item in top_items:
             db.execute(
                 update(MemoryState)
-                .where(MemoryState.learning_item_id == item.id)
-                .values(next_review_at=now + timedelta(days=1))
+                .where(
+                    MemoryState.learning_item_id == item.id,
+                    MemoryState.next_review_at < tomorrow,  # ← don't overwrite park
+                )
+                .values(next_review_at=tomorrow)
             )
         db.commit()
         return task_review_items[:3] + focus_items
