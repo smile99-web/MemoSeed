@@ -1405,12 +1405,13 @@ def create_word_review(
         except Exception:
             pass  # points failure should never block learning
     if not result.review_log.is_correct:
-        # Disabled: the focus mode (7 words × 5 modes) provides sufficient
-        # correction practice. Creating 5 additional micro-review tasks per
-        # mistake was generating 50+ new WordReviewTask rows per session,
-        # flooding the task history and confusing the child with duplicate
-        # review items.
-        # schedule_micro_review_tasks_for_mistake(db, current_user.id, word_state, learning_item.chinese_text, learning_item.id, error_type or "spelling")
+        # Only create micro-review correction tasks during sentence
+        # learning (sentence-spelling) — the child encounters new
+        # words in context and needs immediate practice. Word-only
+        # review in the focus mode already provides 3 modes per word,
+        # so no extra tasks are needed there.
+        if review_mode == "sentence-spelling":
+            schedule_micro_review_tasks_for_mistake(db, current_user.id, word_state, learning_item.chinese_text, learning_item.id, error_type or "spelling")
         # Deduct points for wrong answer
         try:
             from app.services.points_service import POINTS_WRONG, award_points
