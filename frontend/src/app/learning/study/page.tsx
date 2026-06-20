@@ -7,6 +7,7 @@ import { KeyboardEvent, MouseEvent, Suspense, useCallback, useEffect, useMemo, u
 import { Button } from "@/components/ui/button";
 import { useDevice } from "@/hooks/use-device";
 import { getAccessToken } from "@/lib/auth";
+import { useRouter, usePathname } from "next/navigation";
 import { addCourseCompletion } from "@/lib/course-progress";
 import { Course, listCoursePackages, listCourses } from "@/lib/courses";
 import { generateDynamicSentence, generateLearningEncouragement, getWordTranslations, LearningItem, listDueReviewItems, listLearningItems, logWordMistake, logWordReview, translateLearningText } from "@/lib/learning";
@@ -96,6 +97,14 @@ type AnswerState = "typing" | "mistake-word-practice" | "word-meaning-review" | 
 type EncodingStage = "meaning_intro" | "listen" | "chunk_trace" | "whole_recall";
 type WordStatus = "idle" | "correct" | "incorrect" | "skipped";
 type MistakePracticeStatus = "idle" | "incorrect";
+type StudyMode = "mix" | "review" | "learn";
+
+function normalizeStudyMode(value: string | null | undefined): StudyMode {
+  if (value === "review" || value === "learn" || value === "mix") {
+    return value;
+  }
+  return "mix";
+}
 
 
 
@@ -409,7 +418,10 @@ function StudyContent() {
   const courseId = searchParams.get("course_id") ?? "";
   const packageIdFromUrl = searchParams.get("package_id") ?? "";
   const courseName = searchParams.get("course_name") ?? "本课";
+  const studyMode = normalizeStudyMode(searchParams.get("mode"));
   const device = useDevice();
+  const router = useRouter();
+  const pathname = usePathname();
   const [items, setItems] = useState<LearningItem[]>([]);
   const [packageCourses, setPackageCourses] = useState<Course[]>([]);
   const [resolvedPackageId, setResolvedPackageId] = useState("");
@@ -456,7 +468,19 @@ function StudyContent() {
   const [activeStudySeconds, setActiveStudySeconds] = useState(0);
   const [isStudyPaused, setIsStudyPaused] = useState(false);
   const [isDictationMode, setIsDictationMode] = useState(false);
-  const [isFocusMode, setIsFocusMode] = useState(true);  // default ON for struggling learners
+  // Focus mode defaults ON for struggling learners, but OFF in "learn" mode —
+  // new-sentence learning should cover the full new course content, not just
+  // the 7 highest-priority focus words.
+  const [isFocusMode, setIsFocusMode] = useState(() => studyMode !== "learn");
+  // Re-sync isFocusMode when the user navigates between modes via the
+  // switchStudyMode buttons. The lazy initializer above only runs once on
+  // mount — without this effect, switching from `mix` to `learn` via the
+  // URL would leave isFocusMode at its initial value and serve the wrong
+  // queue shape. The dependency is on studyMode only so we don't clobber
+  // the user's manual toggle inside a single mode.
+  useEffect(() => {
+    setIsFocusMode(studyMode !== "learn");
+  }, [studyMode]);
   const [celebrationSummary, setCelebrationSummary] = useState<CelebrationSummary | null>(null);
   const [isStudyFullscreen, setIsStudyFullscreen] = useState(true);
   const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
@@ -1290,6 +1314,32 @@ function StudyContent() {
     setIsDictationMode((current) => !current);
   }
 
+  function switchStudyMode(targetMode: StudyMode) {
+    if (targetMode === studyMode) {
+      return;
+    }
+    const params = new URLSearchParams(searchParams.toString());
+    if (targetMode === "mix") {
+      params.delete("mode");
+    } else {
+      params.set("mode", targetMode);
+    }
+    if (targetMode === "review") {
+      // Global review — drop course-specific params so backend returns reviews from all courses.
+      params.delete("course_id");
+      params.delete("package_id");
+      params.delete("course_name");
+    } else if (targetMode === "learn") {
+      // Pure new-content learning — make sure a course is selected.
+      if (!courseId) {
+        router.push("/learning");
+        return;
+      }
+    }
+    const queryString = params.toString();
+    router.push(queryString ? `${pathname}?${queryString}` : pathname);
+  }
+
   const flushStudyTime = useCallback(async function flushStudyTime(force = false) {
     if (isFlushingStudyTimeRef.current) {
       return;
@@ -1456,39 +1506,104 @@ function StudyContent() {
   }, [answerState, mistakePracticeIndex]);
 
   useEffect(() => {
-    async function loadStudyItems() {
+    // Race-condition guard: when the user rapidly switches studyMode /
+    // courseId / isFocusMode, multiple async loads can be in flight. Without
+    // this guard, a stale response from the previous request can overwrite
+    // the items array and currentIndex from the latest request. We use a
+    // monotonically increasing load-id and discard any response that doesn't
+    // match the latest load at the time the awaited promises resolve.
+    let loadId = 0;
+    let cancelled = false;
+
+    async function loadStudyItems(currentLoadId: number) {
       const accessToken = getAccessToken();
       if (!accessToken) {
         setErrorMessage("请先登录后再学习");
         setIsLoading(false);
         return;
       }
-      if (!courseId) {
+      if (studyMode !== "review" && !courseId) {
         setErrorMessage("缺少课程信息，请从课程目录选择课程后开始学习");
         setIsLoading(false);
         return;
       }
 
       try {
-        // Always load course items — focus words come first via mergeLearningQueues
-        const nextItems = await listLearningItems(accessToken, courseId).catch(() => [] as LearningItem[]);
-        const dueReviewItems = await listDueReviewItems(accessToken, courseId, INITIAL_REVIEW_QUEUE_LIMIT, false, INITIAL_REVIEW_QUEUE_LIMIT, isFocusMode).catch(() => [] as LearningItem[]);
+        let mergedItems: LearningItem[] = [];
+        let dueReviewItems: LearningItem[] = [];
+        let nextItems: LearningItem[] = [];
+
+        if (studyMode === "review") {
+          // Pure review: all due review items across all courses, no course-specific filtering.
+          dueReviewItems = await listDueReviewItems(
+            accessToken,
+            undefined,
+            INITIAL_REVIEW_QUEUE_LIMIT,
+            false,
+            INITIAL_REVIEW_QUEUE_LIMIT,
+            isFocusMode,
+          ).catch(() => [] as LearningItem[]);
+          mergedItems = dueReviewItems;
+        } else if (studyMode === "learn") {
+          // Pure new-content learning: only the selected course's items, excluding review tasks.
+          nextItems = await listLearningItems(accessToken, courseId).catch(() => [] as LearningItem[]);
+          // Review tasks carry a review_task_type; new course content doesn't.
+          mergedItems = nextItems.filter((item) => !item.review_task_type);
+        } else {
+          // Default mixed behavior: review + new content interleaved.
+          nextItems = await listLearningItems(accessToken, courseId).catch(() => [] as LearningItem[]);
+          dueReviewItems = await listDueReviewItems(accessToken, courseId, INITIAL_REVIEW_QUEUE_LIMIT, false, INITIAL_REVIEW_QUEUE_LIMIT, isFocusMode).catch(() => [] as LearningItem[]);
+          mergedItems = mergeLearningQueues(dueReviewItems, nextItems);
+        }
+
+        // Discard the response if the user has triggered a newer load or the
+        // effect has been cleaned up. This prevents a slow in-flight request
+        // from clobbering a fast follow-up's results.
+        if (cancelled || currentLoadId !== loadId) {
+          return;
+        }
+
         queuedReviewItemIdsRef.current = new Set(dueReviewItems.map((item) => item.id));
-        const mergedItems = mergeLearningQueues(dueReviewItems, nextItems);
-        const savedIndex = Number(window.localStorage.getItem(getStudyProgressKey(courseId)) ?? "0");
-        const safeIndex = dueReviewItems.length === 0 && Number.isInteger(savedIndex) && savedIndex >= 0 && savedIndex < mergedItems.length ? savedIndex : 0;
+        const savedIndex = Number(window.localStorage.getItem(getStudyProgressKey(courseId || "global")) ?? "0");
+        // Restore saved progress across all modes. The previous version
+        // forced safeIndex = 0 in review mode, which combined with the
+        // localStorage key mismatch (read used "global", write used "")
+        // caused review-mode users to always restart from item 0 — never
+        // resuming where they left off. Now read and write share the same
+        // key, and the same bounds check applies in every mode.
+        const safeIndex = dueReviewItems.length === 0
+          && Number.isInteger(savedIndex)
+          && savedIndex >= 0
+          && savedIndex < mergedItems.length
+            ? savedIndex
+            : 0;
         setItems(mergedItems);
         setCurrentIndex(safeIndex);
-        setFeedback(dueReviewItems.length > 0 ? `先复习 ${dueReviewItems.length} 条历史错词/到期内容，再进入当前课程。` : null);
+        if (studyMode === "review") {
+          setFeedback(mergedItems.length > 0 ? `开始复习 ${mergedItems.length} 条到期单词。` : "目前没有需要复习的单词，太棒了！");
+        } else if (studyMode === "learn") {
+          setFeedback(mergedItems.length > 0 ? `本课共有 ${mergedItems.length} 条新内容待学习。` : "这门课还没有新内容可学。");
+        } else {
+          setFeedback(dueReviewItems.length > 0 ? `先复习 ${dueReviewItems.length} 条历史错词/到期内容，再进入当前课程。` : null);
+        }
       } catch (error) {
+        if (cancelled || currentLoadId !== loadId) {
+          return;
+        }
         setErrorMessage(error instanceof Error ? error.message : "读取学习内容失败");
       } finally {
-        setIsLoading(false);
+        if (!cancelled && currentLoadId === loadId) {
+          setIsLoading(false);
+        }
       }
     }
 
-    void loadStudyItems();
-  }, [courseId, isFocusMode]);
+    const currentLoadId = ++loadId;
+    void loadStudyItems(currentLoadId);
+    return () => {
+      cancelled = true;
+    };
+  }, [courseId, isFocusMode, studyMode]);
 
   // Prefetch course audio in background after study items are loaded
   useEffect(() => {
@@ -1503,9 +1618,10 @@ function StudyContent() {
 
   const insertDueReviewItemsAfterCurrent = useCallback(async function insertDueReviewItemsAfterCurrent() {
     if (isFocusMode) return;  // focus mode has fixed item set
+    if (studyMode === "learn") return;  // learn mode only shows new content
     const accessToken = getAccessToken();
     const activeItem = currentItemRef.current;
-    if (!accessToken || !courseId || !activeItem || celebrationSummaryRef.current) {
+    if (!accessToken || studyMode === "review" || !courseId || !activeItem || celebrationSummaryRef.current) {
       return;
     }
 
@@ -1528,17 +1644,18 @@ function StudyContent() {
       return nextItems;
     });
     setFeedback(`已插入 ${freshReviewItems.length} 条新的到期复习内容，完成当前题后会优先复习。`);
-  }, [courseId]);
+  }, [courseId, studyMode]);
 
   useEffect(() => {
-    if (!courseId || isLoading) {
+    if (studyMode === "review" || !courseId || isLoading) {
       return;
     }
 
     // Only poll once at session start — no silent mid-session injection.
     // Deferred reviews are shown as a count at session end, not forced mid-flow.
     // In focus mode, skip refill entirely — session has a fixed set of items.
-    if (!isFocusMode) {
+    // In learn mode, skip refill entirely — only new content, no silent review injection.
+    if (!isFocusMode && studyMode !== "learn") {
       const timeoutId = window.setTimeout(() => {
         void insertDueReviewItemsAfterCurrent();
       }, 15_000);
@@ -1551,7 +1668,7 @@ function StudyContent() {
         window.clearInterval(intervalId);
       };
     }
-  }, [courseId, insertDueReviewItemsAfterCurrent, isLoading]);
+  }, [courseId, insertDueReviewItemsAfterCurrent, isLoading, studyMode]);
 
   useEffect(() => {
     async function loadPackageCourses() {
@@ -1720,9 +1837,18 @@ function StudyContent() {
         }, 2000);
         return index;
       }
-      // Normal mode: wrap around to beginning
+      // Normal mode: wrap around to beginning.
+      // Use the same key derivation as the read site (loadStudyItems) so that
+      // progress saved in review mode (courseId === "") is keyed under
+      // "global" and is actually restored on reload. Previously the write
+      // used getStudyProgressKey("") and the read used
+      // getStudyProgressKey("global") — the two never matched, so review
+      // mode silently lost progress between sessions.
       const wrappedIndex = nextIndex % items.length;
-      window.localStorage.setItem(getStudyProgressKey(courseId), String(wrappedIndex));
+      window.localStorage.setItem(
+        getStudyProgressKey(courseId || "global"),
+        String(wrappedIndex),
+      );
       if (options.completedCurrentItem && wrappedIndex === 0) {
         window.setTimeout(showCourseCompletion, 0);
       }
@@ -2723,6 +2849,59 @@ function StudyContent() {
       `}</style>
       <MiniCelebrationConfetti key={`streak-${streakCelebrateKey}`} triggerKey={streakCelebrateKey} />
       <MiniCelebrationConfetti key={`milestone-${milestoneCelebrateKey}`} triggerKey={milestoneCelebrateKey} speakMessage="太厉害了！" />
+      {(() => {
+        const modeConfig: Record<StudyMode, { label: string; description: string; color: string; bg: string; border: string }> = {
+          review: {
+            label: "📚 单词复习",
+            description: "只显示所有课程的到期复习单词",
+            color: "text-violet-700",
+            bg: "bg-violet-50",
+            border: "border-violet-200",
+          },
+          learn: {
+            label: "📝 新句子学",
+            description: "只显示本课的新内容（句子/短语/单词）",
+            color: "text-amber-700",
+            bg: "bg-amber-50",
+            border: "border-amber-200",
+          },
+          mix: {
+            label: "🔄 混合模式",
+            description: "复习 + 新内容一起",
+            color: "text-slate-700",
+            bg: "bg-slate-50",
+            border: "border-slate-200",
+          },
+        };
+        const current = modeConfig[studyMode];
+        const otherModes = (["review", "learn", "mix"] as StudyMode[]).filter((m) => m !== studyMode);
+        return (
+          <div className={`mx-4 mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border ${current.border} ${current.bg} px-4 py-2.5 ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3`}>
+            <div className="flex items-center gap-3">
+              <span className={`text-sm font-bold ipad:text-base ${current.color}`}>{current.label}</span>
+              <span className="text-xs text-slate-600 ipad:text-sm">{current.description}</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-slate-500 ipad:text-sm">切换：</span>
+              {otherModes.map((m) => {
+                const cfg = modeConfig[m];
+                return (
+                  <Button
+                    key={m}
+                    className="h-7 px-2.5 text-xs ipad:h-8 ipad:px-3 ipad:text-sm"
+                    onClick={() => switchStudyMode(m)}
+                    onMouseDown={keepStudyInputFocus}
+                    type="button"
+                    variant="outline"
+                  >
+                    {cfg.label}
+                  </Button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
       <main className={isStudyFullscreen ? "flex min-h-[100dvh] flex-col overflow-y-auto bg-white text-slate-950" : "flex min-h-[100dvh] flex-col overflow-y-auto bg-slate-50 text-slate-950"}>
       {celebrationSummary ? <CelebrationModal nextCourse={nextCourse} summary={celebrationSummary} /> : null}
       {focusRotatedMessage ? (
