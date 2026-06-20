@@ -9,7 +9,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { getAccessToken } from "@/lib/auth";
 import { CourseCompletionStats, formatCourseDuration, loadCourseCompletionStats } from "@/lib/course-progress";
 import { Course, CoursePackage, listCoursePackages, listCourses } from "@/lib/courses";
-import { LearningItem, listLearningItems } from "@/lib/learning";
+import { LearningItem, listDueReviewItems, listLearningItems } from "@/lib/learning";
 import { CourseProgressStats, listCourseProgressStats } from "@/lib/memory";
 
 interface CourseWithItems {
@@ -59,6 +59,7 @@ export default function LearningStartPage() {
   const [isLoadingCourses, setIsLoadingCourses] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [packageCompletionStats, setPackageCompletionStats] = useState<Record<string, CourseCompletionStats>>({});
+  const [globalDueReviewCount, setGlobalDueReviewCount] = useState(0);
 
   const packagesRef = useRef<CoursePackage[]>([]);
   packagesRef.current = packages;
@@ -93,6 +94,9 @@ export default function LearningStartPage() {
           }),
         );
         setPackageCompletionStats(Object.fromEntries(nextPackageCompletionStats));
+        // Load global due review count (across all courses) for the top-level review button.
+        const dueItems = await listDueReviewItems(accessToken, undefined, 200, false, 200, false).catch(() => [] as LearningItem[]);
+        setGlobalDueReviewCount(dueItems.length);
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "读取课程包失败");
       } finally {
@@ -104,6 +108,13 @@ export default function LearningStartPage() {
   }, []);
 
   useEffect(() => {
+    // Race-condition guard: if the user rapidly switches selectedPackageId,
+    // multiple async loads can be in flight. The latest load wins by tracking
+    // a monotonically increasing loadId and discarding stale responses.
+    let loadId = 0;
+    let cancelled = false;
+    const currentLoadId = ++loadId;
+
     async function loadPackageCourses(packageId: string) {
       const accessToken = getAccessToken();
       if (!accessToken) {
@@ -135,13 +146,24 @@ export default function LearningStartPage() {
             };
           }),
         );
+        // Discard the response if a newer load has started or the effect
+        // has been cleaned up — otherwise a slow stale request would
+        // clobber the latest result.
+        if (cancelled || currentLoadId !== loadId) {
+          return;
+        }
         setCourseRows(nextRows);
         setPackageCompletionStats((prev) => ({ ...prev, [packageId]: sumStats(nextRows.map((row) => row.completionStats)) }));
       } catch (error) {
+        if (cancelled || currentLoadId !== loadId) {
+          return;
+        }
         setErrorMessage(error instanceof Error ? error.message : "读取课程内容失败");
         setCourseRows([]);
       } finally {
-        setIsLoadingCourses(false);
+        if (!cancelled && currentLoadId === loadId) {
+          setIsLoadingCourses(false);
+        }
       }
     }
 
@@ -151,6 +173,9 @@ export default function LearningStartPage() {
     }
 
     void loadPackageCourses(selectedPackageId);
+    return () => {
+      cancelled = true;
+    };
   }, [selectedPackageId]);
 
   const refreshCompletionStats = useCallback(async function refreshCompletionStats() {
@@ -188,6 +213,12 @@ export default function LearningStartPage() {
     function handleVisibilityChange() {
       if (document.visibilityState === "visible") {
         void refreshCompletionStats();
+        const accessToken = getAccessToken();
+        if (accessToken) {
+          void listDueReviewItems(accessToken, undefined, 200, false, 200, false)
+            .then((items) => setGlobalDueReviewCount(items.length))
+            .catch(() => undefined);
+        }
       }
     }
 
@@ -209,6 +240,45 @@ export default function LearningStartPage() {
           <Button asChild variant="secondary" className="ipad:text-lg ipad:px-6 ipad:py-3">
             <Link href="/learning/import">导入/管理课程</Link>
           </Button>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <Link
+            className={`flex items-center justify-between gap-3 rounded-xl border px-5 py-4 shadow-sm transition-colors ipad:px-6 ipad:py-5 ${
+              globalDueReviewCount > 0
+                ? "border-violet-300 bg-violet-50 hover:border-violet-500"
+                : "border-slate-200 bg-white hover:border-primary"
+            }`}
+            href="/learning/study?mode=review"
+          >
+            <div>
+              <p className={`text-base font-bold ipad:text-lg ${globalDueReviewCount > 0 ? "text-violet-700" : "text-slate-700"}`}>
+                📚 单词复习
+              </p>
+              <p className="mt-1 text-xs text-slate-600 ipad:text-sm">
+                {globalDueReviewCount > 0
+                  ? `所有课程共有 ${globalDueReviewCount} 条到期单词需要复习`
+                  : "目前没有需要复习的单词，太棒了！"}
+              </p>
+            </div>
+            <span className={`shrink-0 rounded-full px-3 py-1 text-sm font-bold ipad:text-base ${
+              globalDueReviewCount > 0 ? "bg-violet-500 text-white" : "bg-slate-200 text-slate-500"
+            }`}>
+              {globalDueReviewCount}
+            </span>
+          </Link>
+
+          <div className="flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-5 py-4 ipad:px-6 ipad:py-5">
+            <div>
+              <p className="text-base font-bold text-amber-700 ipad:text-lg">📝 新句子学</p>
+              <p className="mt-1 text-xs text-slate-600 ipad:text-sm">
+                选中下方某门课程后，点击该课的「学新句子」按钮进入
+              </p>
+            </div>
+            <span className="shrink-0 rounded-full bg-amber-500 px-3 py-1 text-sm font-bold text-white ipad:text-base">
+              课程
+            </span>
+          </div>
         </div>
 
         {errorMessage ? <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 ipad:px-6 ipad:py-4 ipad:text-base">{errorMessage}</p> : null}
@@ -302,12 +372,18 @@ export default function LearningStartPage() {
               </Card>
             ) : courseRows.length > 0 ? (
               <div className="grid gap-4 md:grid-cols-2">
-                {courseRows.map(({ course, itemCount, previewItems, completionStats }) => (
-                  <Link
+                {courseRows.map(({ course, itemCount, previewItems, completionStats }) => {
+                  const studyHref = itemCount > 0
+                    ? `/learning/study?course_id=${course.id}&package_id=${course.package_id}&course_name=${encodeURIComponent(course.name)}`
+                    : "#";
+                  const learnHref = itemCount > 0
+                    ? `/learning/study?course_id=${course.id}&package_id=${course.package_id}&course_name=${encodeURIComponent(course.name)}&mode=learn`
+                    : "#";
+                  return (
+                  <div
                     className={`rounded-lg border bg-card p-5 shadow-sm transition-colors hover:border-primary ipad:p-6 ${
                       itemCount === 0 ? "pointer-events-none opacity-60" : ""
                     }`}
-                    href={itemCount > 0 ? `/learning/study?course_id=${course.id}&package_id=${course.package_id}&course_name=${encodeURIComponent(course.name)}` : "#"}
                     key={course.id}
                     aria-disabled={itemCount === 0}
                   >
@@ -325,8 +401,20 @@ export default function LearningStartPage() {
 
                     <div className="mt-4 flex items-center justify-between gap-3 text-sm ipad:text-base">
                       <span className="font-medium text-foreground">{itemCount} 条学习内容</span>
-                      <span className="text-primary ipad:font-semibold">{itemCount > 0 ? "进入学习" : "暂无内容"}</span>
                     </div>
+
+                    {itemCount > 0 ? (
+                      <div className="mt-4 grid grid-cols-2 gap-2 border-t pt-4">
+                        <Button asChild className="h-9 w-full ipad:h-10" variant="default">
+                          <Link href={learnHref}>📝 学新句子</Link>
+                        </Button>
+                        <Button asChild className="h-9 w-full ipad:h-10" variant="outline">
+                          <Link href={studyHref}>🔄 进入学习</Link>
+                        </Button>
+                      </div>
+                    ) : (
+                      <p className="mt-4 border-t pt-4 text-sm text-muted-foreground">暂无内容</p>
+                    )}
 
                     <div className="mt-4 grid grid-cols-2 gap-3 border-t pt-4 text-sm">
                       <div>
@@ -348,8 +436,9 @@ export default function LearningStartPage() {
                         ))}
                       </div>
                     ) : null}
-                  </Link>
-                ))}
+                  </div>
+                  );
+                })}
               </div>
             ) : (
               <Card>

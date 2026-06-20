@@ -659,14 +659,28 @@ export default function HomePage() {
             基于艾宾浩斯记忆曲线、FSRS算法推荐 和 AI 动态调度，专注中小学阶段英语基础薄弱学生的单词、短语与简单句长期记忆。
           </p>
           <div className="mt-8 flex flex-wrap gap-3">
-            <Button asChild>
-              <Link href={isLoggedIn ? "/learning" : "/login"}>开始学习</Link>
-            </Button>
-            {!isLoggedIn ? (
-              <Button asChild variant="outline">
-                <Link href="/register">创建账号</Link>
-              </Button>
-            ) : null}
+            {isLoggedIn ? (
+              <>
+                <Button asChild size="lg" className="ipad:text-lg ipad:px-6 ipad:py-6">
+                  <Link href="/learning/study?mode=review">📚 单词复习</Link>
+                </Button>
+                <Button asChild size="lg" variant="secondary" className="ipad:text-lg ipad:px-6 ipad:py-6">
+                  <Link href="/learning">📝 新句子学</Link>
+                </Button>
+                <Button asChild variant="outline" className="ipad:text-lg ipad:px-6 ipad:py-6">
+                  <Link href="/learning">开始学习</Link>
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button asChild>
+                  <Link href="/login">开始学习</Link>
+                </Button>
+                <Button asChild variant="outline">
+                  <Link href="/register">创建账号</Link>
+                </Button>
+              </>
+            )}
             <Button asChild variant="secondary">
               <Link href="/learning/import">导入/查看内容</Link>
             </Button>
