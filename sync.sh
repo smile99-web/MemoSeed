@@ -71,11 +71,15 @@ sync_frontend() {
   ok "Frontend files synced"
 
   say "Installing dependencies..."
-  run_vps "cd ${VPS_PATH}/frontend && npm install --production 2>&1 | tail -5"
+  run_vps "cd ${VPS_PATH}/frontend && npm install 2>&1 | tail -5"
   ok "Dependencies checked"
 
-  say "Building Next.js..."
-  run_vps "cd ${VPS_PATH}/frontend && npm run build 2>&1 | tail -10"
+  say "Building Next.js (standalone + copy static assets)..."
+  # scripts/build-standalone.sh runs `npm run build`, copies .next/static ->
+  # .next/standalone/.next/static (otherwise the standalone server 404s on
+  # every CSS/JS chunk), and restarts the service. Plain `npm run build`
+  # leaves static assets in the wrong place for the standalone server.
+  run_vps "cd ${VPS_PATH}/frontend && bash scripts/build-standalone.sh 2>&1 | tail -20"
   ok "Next.js built"
 
   say "Restarting frontend..."
@@ -93,10 +97,10 @@ sync_full() {
   ok "Backend restarted"
 
   say "Installing frontend dependencies..."
-  run_vps "cd ${VPS_PATH}/frontend && npm install --production 2>&1 | tail -5"
+  run_vps "cd ${VPS_PATH}/frontend && npm install 2>&1 | tail -5"
 
-  say "Building Next.js..."
-  run_vps "cd ${VPS_PATH}/frontend && npm run build 2>&1 | tail -10"
+  say "Building Next.js (standalone + copy static assets)..."
+  run_vps "cd ${VPS_PATH}/frontend && bash scripts/build-standalone.sh 2>&1 | tail -20"
 
   say "Restarting frontend..."
   run_vps "systemctl restart memoseed-frontend"
