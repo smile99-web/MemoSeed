@@ -389,9 +389,18 @@ export interface TodayProgress {
 }
 
 export async function rotateFocusWord(accessToken: string, learningItemId: string): Promise<void> {
-  await fetchWithAuth(`${getApiBaseUrl()}/memory/focus-rotate?learning_item_id=${learningItemId}`, {
-    method: "POST",
-  }, accessToken);
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/memory/focus-rotate?learning_item_id=${learningItemId}`,
+    { method: "POST" },
+    accessToken,
+  );
+  // Without this check, a backend error (401 after refresh exhaustion,
+  // 5xx, validation error) is silently swallowed by the caller's
+  // `.catch(() => {})` chain — the UI shows "next batch" even when the
+  // rotation never actually happened server-side.
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
 }
 
 export async function getTodayProgress(accessToken: string): Promise<TodayProgress> {

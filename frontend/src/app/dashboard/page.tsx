@@ -50,6 +50,13 @@ const replayDayLabels = ["", "Mon", "", "Wed", "", "Fri", ""];
 const replayMonthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 function formatPercent(value: number): string {
+  // Guard against NaN/Infinity: backend can return NaN if a stat is
+  // computed from an empty set (e.g. average_forget_risk over zero
+  // memory_states). `Math.round(NaN * 100) === NaN` would otherwise
+  // render as the literal "NaN%" in the dashboard.
+  if (!Number.isFinite(value)) {
+    return "0%";
+  }
   return `${Math.round(value * 100)}%`;
 }
 
@@ -598,11 +605,28 @@ export default function DashboardPage() {
     }
   }
 
-  // Force fresh data on every load: trigger a full page reload on first
-  // dashboard visit after the rebuild, so stale chunks never get reused.
+  // Force a full page reload on the FIRST visit per browser so stale
+  // chunks after a rebuild never get reused. The flag is versioned with
+  // a build tag so a new deployment can invalidate previous builds by
+  // bumping DASHBOARD_RELOAD_VERSION. Without the version suffix, a user
+  // who already saw v1 would never reload on a v2 build, defeating the
+  // purpose. The previous version wrote a permanent "dashboard_v2_loaded"
+  // flag that never cleared — once tripped it would never re-trigger,
+  // and on a fresh browser the user got a jarring mid-render reload.
   useEffect(() => {
-    if (typeof window !== "undefined" && window.localStorage.getItem("dashboard_v2_loaded") !== "1") {
-      window.localStorage.setItem("dashboard_v2_loaded", "1");
+    if (typeof window === "undefined") return;
+    const RELOAD_VERSION = "v3";
+    const flagKey = `dashboard_reload_${RELOAD_VERSION}`;
+    if (window.localStorage.getItem(flagKey) !== "1") {
+      window.localStorage.setItem(flagKey, "1");
+      // Clear the older-version flag so storage doesn't accumulate over
+      // time across many releases.
+      for (let i = 0; i < window.localStorage.length; i++) {
+        const key = window.localStorage.key(i);
+        if (key && key.startsWith("dashboard_reload_") && key !== flagKey) {
+          window.localStorage.removeItem(key);
+        }
+      }
       window.location.reload();
     }
   }, []);
