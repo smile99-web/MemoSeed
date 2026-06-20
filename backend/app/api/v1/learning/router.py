@@ -316,6 +316,12 @@ def calculate_due_word_task_priority(word_state: WordMemoryState, memory_state: 
     if memory_state is not None:
         risk = calculate_current_forget_risk(memory_state, now)
         strength = round(1 - risk, 2)
+        # IMPORTANT: use the long-term MemoryState.next_review_at for the
+        # overdue calculation. Using next_micro_review_at here would let
+        # the micro-review clock (typically set to +1d after a mistake)
+        # dominate a mastered word's long-term 30-day schedule and pull it
+        # back into the queue. The micro-review clock should only feed
+        # ensure_due_word_review_tasks, not the priority score itself.
         next_review_at = memory_state.next_review_at
     else:
         risk = word_state.forget_risk
@@ -435,9 +441,34 @@ def refresh_pending_word_review_task_priorities(db: Session, user_id: UUID, now:
     return updated
 
 
+VALID_WORD_ERROR_TYPES: frozenset[str] = frozenset({
+    "spelling",
+    "first-letter",
+    "meaning",
+    "middle",
+    "ending",
+    "sequence",
+    "missing-letter",
+    "extra-letter",
+    "unknown",
+})
+
+
 def normalize_word_error_type(value: str | None) -> str:
-    normalized = "".join(char for char in (value or "spelling").strip().lower() if char.isalnum() or char == "-")
-    return normalized[:24] or "spelling"
+    """Normalize and validate a per-word error_type.
+
+    The previous implementation only stripped non-alphanumeric chars and
+    truncated to 24 chars, which let arbitrary 24-char garbage reach the
+    database. That value then leaked into the WordReviewTask.source string
+    and the dashboard's "build_review_reason" labels via
+    ERROR_TYPE_LABELS.get(...) — falling through to the "拼写错误" default
+    while still being recorded as a unique error_type in the DB. The
+    whitelist below ensures only known error types are stored.
+    """
+    cleaned = "".join(char for char in (value or "").strip().lower() if char.isalnum() or char == "-")
+    if cleaned in VALID_WORD_ERROR_TYPES:
+        return cleaned
+    return "spelling"
 
 
 def get_or_create_word_memory_item(
@@ -594,7 +625,12 @@ def list_due_review_items(
     effective_review_cap = review_cap if review_cap is not None else capped_limit
     now = datetime.now(UTC)
     # Local-day boundary (Asia/Shanghai) for the per-day review cap.
-    today_start = (now + timedelta(hours=8)).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=8)
+    # Use the actual LOCAL_TIMEZONE (not a hardcoded +8h offset) so this
+    # survives any future timezone change without code edits.
+    from app.services.memory_scheduler import LOCAL_TIMEZONE
+    today_start = now.astimezone(LOCAL_TIMEZONE).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).astimezone(UTC)
     item_by_id: dict[UUID, LearningItem] = {}
     focus_words_by_item_id: dict[UUID, list[str]] = {}
 
@@ -651,17 +687,29 @@ def list_due_review_items(
     # dozens of times with no variety. The focus mode (7 words × 5 modes =
     # 35 items) already provides sufficient practice per session.
     # has_task_updates = ensure_due_word_review_tasks(db, ...) or has_task_updates
-    # Garbage-collect stale pending tasks: if a word's micro-review clock has
-    # already moved past the task's due_at (e.g. the word was reviewed via
-    # another path), the old pending task is dead weight. Cancel all pending
-    # tasks whose due_at is more than 1 day in the past — the word has moved on.
-    _gc_count = db.execute(
-        update(WordReviewTask)
+    # Garbage-collect stale pending tasks: only supersede a pending task when
+    # the word's micro-review clock has moved PAST the task's due_at, meaning
+    # the word has been reviewed through another path. The previous version
+    # deleted any task whose due_at was > 1 day old — which meant a long
+    # break (e.g. 3 days away) nuked all queued micro-reviews on the next
+    # visit, including the highest-priority ones. Now we require the
+    # associated WordMemoryState.next_micro_review_at to be after the
+    # task's due_at (i.e. the word has progressed).
+    from app.models.word_memory_state import WordMemoryState
+    stale_task_subq = (
+        select(WordReviewTask.id)
+        .join(WordMemoryState, WordMemoryState.id == WordReviewTask.word_memory_state_id)
         .where(
             WordReviewTask.user_id == current_user.id,
             WordReviewTask.status == "pending",
             WordReviewTask.due_at < now - timedelta(days=1),
+            WordMemoryState.next_micro_review_at.isnot(None),
+            WordMemoryState.next_micro_review_at > WordReviewTask.due_at,
         )
+    )
+    _gc_count = db.execute(
+        update(WordReviewTask)
+        .where(WordReviewTask.id.in_(stale_task_subq))
         .values(status="superseded", updated_at=now)
     ).rowcount
     if _gc_count:
@@ -1340,19 +1388,17 @@ def create_word_mistake_log(
     # schedule_micro_review_tasks_for_mistake(db, current_user.id, word_state, learning_item.chinese_text, learning_item.id, error_type)
     try:
         from app.services.learning_replay import record_learning_event
-        now = datetime.now(UTC)
-        last_review = db.execute(
-            select(ReviewLog.reviewed_at).where(
-                ReviewLog.user_id == current_user.id,
-                ReviewLog.id != result.review_log.id,
-                ReviewLog.reviewed_at.isnot(None),
-            ).order_by(ReviewLog.reviewed_at.desc()).limit(1)
-        ).scalar()
-        if last_review and result.review_log.reviewed_at:
-            gap_seconds = (result.review_log.reviewed_at - last_review).total_seconds()
-            duration_ms = int(min(gap_seconds, 60) * 1000) if 0 < gap_seconds < 300 else 20000
+        # Same duration-source fix as create_word_review: prefer the
+        # client-reported duration over the gap-to-last-review heuristic,
+        # which collapses to ~0 ms for consecutive submissions.
+        total_seconds = int(result.review_log.duration_seconds or 0)
+        encoding_ms = int(result.review_log.encoding_duration_ms or 0)
+        if encoding_ms > 0:
+            duration_ms = min(encoding_ms, 5 * 60 * 1000)
+        elif total_seconds > 0:
+            duration_ms = min(total_seconds * 1000, 5 * 60 * 1000)
         else:
-            duration_ms = 20000
+            duration_ms = 20_000
         record_learning_event(db, current_user.id, result.review_log, word_item, duration_ms=duration_ms)
     except Exception as exc:
         logger.warning("Failed to record learning replay event for word mistake: %s", exc)
@@ -1418,26 +1464,25 @@ def create_word_review(
             award_points(db, current_user.id, POINTS_WRONG, "word_wrong", f"拼写错误 {POINTS_WRONG}", word_item.id)
         except Exception:
             pass  # points failure should never block learning
-    # Learning Replay: record event + estimate duration from gap to previous event
+    # Learning Replay: record event with the actual review duration.
     try:
         from app.services.learning_replay import record_learning_event
-        now = datetime.now(UTC)
-        # Estimate duration from gap to last review (or default 20s)
-        last_review = db.execute(
-            select(ReviewLog.reviewed_at).where(
-                ReviewLog.user_id == current_user.id,
-                ReviewLog.id != result.review_log.id,
-                ReviewLog.reviewed_at.isnot(None),
-            ).order_by(ReviewLog.reviewed_at.desc()).limit(1)
-        ).scalar()
-        if last_review and result.review_log.reviewed_at:
-            gap_seconds = (result.review_log.reviewed_at - last_review).total_seconds()
-            if 0 < gap_seconds < 300:
-                duration_ms = int(min(gap_seconds, 60) * 1000)
-            else:
-                duration_ms = 20000
+        # Prefer the client-reported encoding duration (precise ms timing of
+        # the encoding stage), then fall back to the total review duration
+        # captured by the client, then to a sensible default. The previous
+        # implementation derived duration_ms from the gap to the user's LAST
+        # review of any item, which (a) is not "time spent on this question"
+        # and (b) collapses to ~0 ms when reviews are submitted back-to-back
+        # in a single session — the timeline then shows every event as
+        # instantaneous.
+        encoding_ms = int(result.review_log.encoding_duration_ms or 0)
+        total_seconds = int(result.review_log.duration_seconds or 0)
+        if encoding_ms > 0:
+            duration_ms = min(encoding_ms, 5 * 60 * 1000)
+        elif total_seconds > 0:
+            duration_ms = min(total_seconds * 1000, 5 * 60 * 1000)
         else:
-            duration_ms = 20000
+            duration_ms = 20_000  # default for legacy clients
         record_learning_event(db, current_user.id, result.review_log, word_item, duration_ms=duration_ms)
     except Exception as exc:
         logger.warning("Failed to record learning replay event for word review: %s", exc)
