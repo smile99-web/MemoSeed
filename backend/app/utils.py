@@ -1,7 +1,7 @@
 """Shared utility functions used across services and routers."""
 
 import re
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 
@@ -33,12 +33,25 @@ def average(values: list[float] | list[int]) -> float:
 
 
 def parse_datetime_setting(value: object) -> datetime | None:
+    """Parse an ISO 8601 datetime string from a settings JSONB column.
+
+    Returns a timezone-aware datetime in UTC. Naive datetimes (from legacy
+    imports that pre-date the timezone-aware migration) are assumed to
+    already be in UTC, NOT local time. This is intentional: settings
+    snapshots are server-generated and were never in local time to begin
+    with. Returning naive datetimes here would force every consumer to
+    guard with `.astimezone()` to avoid TypeError, which is exactly the
+    bug that bit `build_review_status_note` in memory_dashboard.
+    """
     if not isinstance(value, str) or not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 def parse_date_param(value: str) -> date | None:

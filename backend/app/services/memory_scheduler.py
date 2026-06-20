@@ -403,15 +403,31 @@ def count_paused_words(db: Session, user_id: UUID) -> int:
     Surfaced to the dashboard so the user/parent knows the system is
     intentionally stepping away from a small set of words rather than
     silently dropping them.
+
+    IMPORTANT: this must use the SAME detection algorithm as
+    `park_stuck_words` (the Q1 algorithm in the module-level comment),
+    otherwise the dashboard count and the actual parking will diverge.
+    The previous version used the old `lapse_count >= 10 AND
+    memory_strength < 0.3` check, which the Q1 algorithm deliberately
+    replaced with stricter "currently abandoned" criteria.
     """
+    from app.models.word_memory_state import WordMemoryState
+    now = datetime.now(UTC)
+    abandoned_cutoff = now - timedelta(days=STUCK_WORD_ABANDONED_DAYS)
     return int(
         db.scalar(
             select(func.count(MemoryState.id))
             .join(LearningItem, LearningItem.id == MemoryState.learning_item_id)
+            .outerjoin(WordMemoryState, and_(
+                WordMemoryState.learning_item_id == LearningItem.id,
+                WordMemoryState.user_id == user_id,
+            ))
             .where(
                 LearningItem.user_id == user_id,
-                MemoryState.lapse_count >= STUCK_WORD_LAPSE_THRESHOLD,
+                LearningItem.item_type == "word",
                 MemoryState.memory_strength < STUCK_WORD_STRENGTH_THRESHOLD,
+                WordMemoryState.consecutive_correct_count == 0,
+                MemoryState.last_reviewed_at < abandoned_cutoff,
             )
         )
         or 0
@@ -557,12 +573,20 @@ def park_cliff_words(db: Session, user_id: UUID, now: datetime | None = None) ->
     target_due = now + timedelta(days=CLIFF_RESCHEDULE_DAYS)
     # Compute per-word total reviews from the review_logs table so we don't
     # need a schema migration. Join through learning_item → memory_state.
+    # IMPORTANT: only count word-typed reviews (review_mode starts with
+    # 'word-'). Otherwise a word that has never been reviewed in isolation
+    # but appears in 30+ sentence-context reviews would trivially meet the
+    # 30-review cliff threshold and get parked while still in-progress
+    # through sentence learning.
     review_count_subquery = (
         select(
             ReviewLog.learning_item_id,
             func.count(ReviewLog.id).label("total_reviews"),
         )
-        .where(ReviewLog.user_id == user_id)
+        .where(
+            ReviewLog.user_id == user_id,
+            ReviewLog.review_mode.like("word-%"),
+        )
         .group_by(ReviewLog.learning_item_id)
     ).alias("rc")
     cliff_ids_subquery = (
@@ -851,10 +875,17 @@ def calculate_failure_delay(score: int, lapse_count: int, now: datetime, memory_
         delay = max(delay, timedelta(hours=2))
     else:
         local_now = now.astimezone(LOCAL_TIMEZONE)
-        end_of_day = local_now.replace(hour=20, minute=0, second=0, microsecond=0)
-        if end_of_day <= local_now:
-            end_of_day = local_now.replace(hour=21, minute=30, second=0, microsecond=0)
-        end_of_day_delay = end_of_day.astimezone(UTC) - now
+        # Cap same-day failures so they don't extend past bedtime. The previous
+        # implementation computed `end_of_day = 20:00` and fell back to 21:30
+        # if `end_of_day <= now` — but for a failure at 22:00 the fallback
+        # (21:30) is *earlier* than now, producing a negative delay that the
+        # final `max(..., timedelta(minutes=2))` collapsed to 2 minutes. The
+        # child then got the same word back 2 minutes later in a rapid-fire
+        # failure loop. Use a forward-looking window instead.
+        bedtime = local_now.replace(hour=20, minute=30, second=0, microsecond=0)
+        if bedtime <= local_now:
+            bedtime = local_now + timedelta(hours=2)
+        end_of_day_delay = bedtime.astimezone(UTC) - now
         delay = max(min(delay, end_of_day_delay), timedelta(minutes=2))
 
     return delay
@@ -941,20 +972,26 @@ def adjust_delay_for_item_type(delay: timedelta, item_type: str) -> timedelta:
 
 def adjust_delay_for_learning_item(delay: timedelta, learning_item: LearningItem, memory_state: MemoryState) -> timedelta:
     delay = adjust_delay_for_item_type(delay, learning_item.item_type)
-    if delay < timedelta(days=1):
-        return delay
+    # The previous version had `if delay < timedelta(days=1): return delay`
+    # here, which silently skipped every downstream optimization (time-of-day
+    # routing, hint-dependency penalty, danger-zone shortening) for new /
+    # weak items whose initial delay is sub-day. The final clamp to ≥1 day
+    # is still in place at the return statement — removing the early return
+    # simply lets the multipliers run before that clamp.
+    was_sub_day = delay < timedelta(days=1)
 
     words = tokenize_words(learning_item.english_text)
-    if learning_item.item_type == "word":
+    if learning_item.item_type == "word" and not was_sub_day:
         word = normalize_word(words[0]) if words else ""
         if word in EASY_FUNCTION_WORDS and memory_state.lapse_count == 0:
             delay *= 1.25
         if len(word) >= 8 or word in HARD_ABSTRACT_WORDS or memory_state.lapse_count >= 2:
             delay *= 0.75
-    if learning_item.difficulty_level >= 4:
-        delay *= 0.85
-    elif learning_item.difficulty_level <= 2 and memory_state.lapse_count == 0:
-        delay *= 1.1
+    if not was_sub_day:
+        if learning_item.difficulty_level >= 4:
+            delay *= 0.85
+        elif learning_item.difficulty_level <= 2 and memory_state.lapse_count == 0:
+            delay *= 1.1
 
     # P0-1: Time-aware scheduling — adjust based on historical time-of-day efficiency.
     # Data shows children perform best 22:00-23:00 (60%) and 10:00-11:00 (57%),
@@ -1128,8 +1165,14 @@ def schedule_memory_review(
         # Q2: pass current memory_strength so weak/in-progress words get
         # shorter intervals (more frequent reviews) — fills the 0.30-0.70
         # in-progress band that the data showed was empty.
-        current_strength = constrain_stability(
-            1.0 - calculate_current_forget_risk(memory_state, now)
+        # IMPORTANT: strength is a [0, 1] ratio — clamp to that range, NOT to
+        # the [MIN_STABILITY_DAYS, MAX_STABILITY_DAYS] day-bounds that
+        # constrain_stability uses. Using constrain_stability here would
+        # clamp every strength to ~0.003 (MIN_STABILITY_DAYS) and force
+        # *every* successful review into the "0.5x interval" branch.
+        current_strength = clamp(
+            1.0 - calculate_current_forget_risk(memory_state, now),
+            0.0, 1.0,
         )
         review_delay = calculate_fsrs_interval(
             next_stability_days, fsrs_target_retention, current_strength
@@ -1193,13 +1236,25 @@ def schedule_memory_review(
 
     mistake_log = None
     if not is_correct:
+        # For word-level reviews, normalize expected/actual so the dashboard
+        # can join MistakeLog → WordMemoryState.english_text without case
+        # mismatches. Without this, an uppercase "Apple" child response
+        # would store as-is, and `extract_mistake_words` would return an
+        # empty list when the dashboard tries to look it up against the
+        # lowercase "apple" stored in WordMemoryState.
+        if review_mode.startswith("word-"):
+            expected_answer = learning_item.english_text.strip().lower()
+            actual_answer = (response_text or "").strip().lower()
+        else:
+            expected_answer = learning_item.english_text
+            actual_answer = response_text or ""
         mistake_log = MistakeLog(
             user_id=user_id,
             learning_item_id=learning_item.id,
             mistake_type=review_mode,
             error_type=error_type,
-            expected_answer=learning_item.english_text,
-            actual_answer=response_text or "",
+            expected_answer=expected_answer,
+            actual_answer=actual_answer,
             is_resolved=False,
         )
         db.add(mistake_log)

@@ -64,6 +64,18 @@ def error_count_value(value: object) -> int:
         return 0
 
 
+def _to_local(value: datetime) -> datetime:
+    """Coerce a datetime to LOCAL_TIMEZONE, treating naive values as UTC.
+
+    Legacy rows imported before the timezone-aware migration may carry naive
+    datetimes. `astimezone()` on those raises TypeError; defaulting to UTC
+    keeps the dashboard rendering path safe.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC).astimezone(LOCAL_TIMEZONE)
+    return value.astimezone(LOCAL_TIMEZONE)
+
+
 def dominant_error_type(error_type_counts: dict[str, object] | None) -> str | None:
     if not error_type_counts:
         return None
@@ -154,7 +166,13 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
         stats.direct_risks.append(current_word_risk)
         if word_state.next_micro_review_at is not None:
             stats.direct_next_reviews.append(word_state.next_micro_review_at)
-            stats.next_reviews.append(word_state.next_micro_review_at)
+            # NOTE: do NOT append to stats.next_reviews here. The micro-review
+            # clock (next_micro_review_at) is a much shorter interval than the
+            # long-term next_review_at on MemoryState (typically 30d for
+            # mastered words via park_mastered_words). Mixing them makes
+            # min(next_reviews) in summarize_word collapse to tomorrow, which
+            # surfaces mastered words as "due" and pulls them back into the
+            # review queue.
         stats.consecutive_correct_count = max(stats.consecutive_correct_count, word_state.consecutive_correct_count)
         stats.consecutive_error_count = max(stats.consecutive_error_count, word_state.consecutive_error_count)
         stats.recall_correct_count = max(stats.recall_correct_count, word_state.recall_correct_count)
@@ -204,6 +222,14 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
         for learning_item, _ in item_rows
         if learning_item.item_type == "word" and learning_item.source == WORD_MEMORY_SOURCE
     }
+    # Track which words already have a WordMemoryState. For those words,
+    # WordMemoryState.error_type_counts is the canonical per-word aggregate
+    # (updated by sync_word_memory_from_review on every word-level review).
+    # Adding ReviewLog + MistakeLog counts on top would triple-count the same
+    # events. The fallback paths (ReviewLog / MistakeLog walks) only apply
+    # to words that have NO WordMemoryState yet — typically words seen only
+    # in sentence-context reviews.
+    words_with_state: set[str] = {ws.word for ws in word_state_rows}
     review_rows = db.execute(
         select(ReviewLog.learning_item_id, ReviewLog.review_mode, ReviewLog.error_type, ReviewLog.is_correct, ReviewLog.reviewed_at)
         .where(ReviewLog.user_id == user_id, ReviewLog.learning_item_id.in_(direct_word_item_ids))
@@ -212,9 +238,15 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
     for learning_item_id, review_mode, error_type, is_correct, reviewed_at in review_rows:
         for word in item_word_map.get(learning_item_id, set()):
             stats = get_word_stats(word_stats, word)
-            stats.error_type_counts = stats.error_type_counts or {}
-            if error_type:
-                stats.error_type_counts[error_type] = stats.error_type_counts.get(error_type, 0) + 1
+            # Skip error_type_counts aggregation when the word already has a
+            # WordMemoryState row — that row is the canonical per-word
+            # aggregate and was updated by sync_word_memory_from_review at
+            # review time. Re-counting from ReviewLog here would
+            # triple-count the same event.
+            if word not in words_with_state:
+                stats.error_type_counts = stats.error_type_counts or {}
+                if error_type:
+                    stats.error_type_counts[error_type] = stats.error_type_counts.get(error_type, 0) + 1
             stats.review_count += 1
             stats.last_reviewed_at = reviewed_at
             if not is_correct:
@@ -249,9 +281,12 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
         for word in mistake_words:
             stats = get_word_stats(word_stats, word)
             stats.mistake_count += 1
-            stats.error_type_counts = stats.error_type_counts or {}
-            if error_type:
-                stats.error_type_counts[error_type] = stats.error_type_counts.get(error_type, 0) + 2
+            # Same deduplication as the ReviewLog walk: words with a
+            # WordMemoryState already have the canonical error_type_counts.
+            if word not in words_with_state:
+                stats.error_type_counts = stats.error_type_counts or {}
+                if error_type:
+                    stats.error_type_counts[error_type] = stats.error_type_counts.get(error_type, 0) + 2
 
     summaries = [summarize_word(stats, now) for stats in word_stats.values()]
     mastered_words = len([summary for summary in summaries if summary.status == "mastered"])
@@ -445,16 +480,22 @@ def build_review_status_note(stats: WordStats, next_review_at: datetime | None, 
         return f"已到期，当前复习队列第 {stats.queue_rank} 位{due_count_text}。"
 
     if stats.last_reviewed_at is not None:
-        local_review_date = stats.last_reviewed_at.astimezone(LOCAL_TIMEZONE).date()
+        # Guard against naive datetimes from legacy imports: astimezone() on
+        # a naive datetime raises TypeError. Default to UTC for legacy rows
+        # that pre-date the timezone-aware migration.
+        last_reviewed = stats.last_reviewed_at
+        if last_reviewed.tzinfo is None:
+            last_reviewed = last_reviewed.replace(tzinfo=UTC)
+        local_review_date = last_reviewed.astimezone(LOCAL_TIMEZONE).date()
         local_today = now.astimezone(LOCAL_TIMEZONE).date()
         if local_review_date == local_today and next_review_at is not None and next_review_at > now:
-            local_next = next_review_at.astimezone(LOCAL_TIMEZONE).strftime("%m/%d %H:%M")
+            local_next = _to_local(next_review_at).strftime("%m/%d %H:%M")
             return f"今天已复习，下一次安排在 {local_next}。"
 
     if next_review_at is not None:
         if next_review_at <= now:
             return "已到期，但暂未生成专项任务；开始学习时会重新检查并插入。"
-        local_next = next_review_at.astimezone(LOCAL_TIMEZONE).strftime("%m/%d %H:%M")
+        local_next = _to_local(next_review_at).strftime("%m/%d %H:%M")
         return f"暂不需要复习，下一次安排在 {local_next}。"
 
     if stats.scheduled_task_count > 0:

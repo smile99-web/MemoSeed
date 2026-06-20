@@ -68,9 +68,17 @@ def get_or_create_word_memory_state(
     normalized_word = normalize_word(word)
     word_state = db.scalar(select(WordMemoryState).where(WordMemoryState.user_id == user_id, WordMemoryState.word == normalized_word))
     if word_state is not None:
-        if learning_item_id is not None:
+        # IMPORTANT: only set the FK link if it isn't already established.
+        # Overwriting an existing learning_item_id would silently destroy the
+        # word's history: sync_word_memory_from_review later copies values
+        # (memory_strength, recall_correct_count, etc.) FROM the *new*
+        # memory_state — which may be a different (weaker) item — overwriting
+        # counters the child built up against the original item. This was the
+        # root cause of the "mastered count drops" bug for words that appear
+        # in multiple learning_items.
+        if word_state.learning_item_id is None and learning_item_id is not None:
             word_state.learning_item_id = learning_item_id
-        if memory_state_id is not None:
+        if word_state.memory_state_id is None and memory_state_id is not None:
             word_state.memory_state_id = memory_state_id
         return word_state
 
@@ -404,7 +412,13 @@ def get_decayed_error_weights(word_state: WordMemoryState, now: datetime) -> dic
 def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[str]:
     now_utc = datetime.now(UTC)
     base_sequence = ERROR_TYPE_TASK_STRATEGIES.get(error_type, ["chinese_to_english", "listen_spell", "missing_letter"])
-    if word_state.consecutive_error_count >= 3 and "hidden_recall" not in base_sequence[:2]:
+    # Check the WHOLE base_sequence for hidden_recall, not just [:2]. The
+    # previous `[:2]` check missed e.g. error_type="unknown" whose strategy
+    # places hidden_recall at index 1, producing
+    # ["hidden_recall", "english_to_chinese", "hidden_recall", ...] — the
+    # later dedup loop strips the duplicate but in doing so shifts the
+    # intended strategy order. Now we simply don't add a duplicate.
+    if word_state.consecutive_error_count >= 3 and "hidden_recall" not in base_sequence:
         base_sequence = ["hidden_recall", *base_sequence]
 
     # --- Demote underperforming words to an easier mode ---
@@ -551,11 +565,32 @@ def mask_middle_letters(word: str) -> str:
 
 
 def mask_learning_letters(word: str) -> str:
-    if len(word) <= 2:
-        return "_ " * len(word)
-    if len(word) <= 5:
+    """Render a word as a "fill-in-the-blank" hint for the missing_letter task.
+
+    Pattern: show first and last letter, hide the middle. The number of
+    visible middle letters scales with word length so children still get a
+    length cue but the spelling challenge stays meaningful.
+    """
+    n = len(word)
+    if n <= 2:
+        return "_ " * n
+    if n <= 5:
+        # 3-5 letters: show first letter only.
         return " ".join([word[0], *("_" for _ in word[1:])])
-    return " ".join([word[0], "_", "_", *list(word[3:-2]), "_", word[-1]])
+    # 6+ letters: show first letter, ONE middle letter, and last letter.
+    # The previous formula used word[3:-2] which leaks 1-2 letters for
+    # 6-7 letter words (e.g. 'abcdef' → 'a _ _ d _ f') — too easy.
+    # Show one anchored middle letter (position n//2) so the child can
+    # count letters but still has to recall most of the word.
+    mid = n // 2
+    parts: list[str] = [word[0]]
+    for i in range(1, n - 1):
+        if i == mid:
+            parts.append(word[i])
+        else:
+            parts.append("_")
+    parts.append(word[-1])
+    return " ".join(parts)
 
 
 def complete_word_review_task(db: Session, user_id: UUID, task_id: UUID | None, is_correct: bool) -> None:
