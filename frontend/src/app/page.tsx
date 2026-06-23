@@ -670,6 +670,9 @@ export default function HomePage() {
                 <Button asChild variant="outline" className="ipad:text-lg ipad:px-6 ipad:py-6">
                   <Link href="/learning">开始学习</Link>
                 </Button>
+                <Button asChild size="lg" variant="outline" className="ipad:text-lg ipad:px-6 ipad:py-6">
+                  <Link href="/grammar">📐 语法练习</Link>
+                </Button>
               </>
             ) : (
               <>
