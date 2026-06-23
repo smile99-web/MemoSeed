@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.v1.auth.router import router as auth_router
 from app.api.v1.courses.router import router as courses_router
+from app.api.v1.grammar.router import router as grammar_router
 from app.api.v1.learning.router import router as learning_router
 from app.api.v1.learning_replay.router import router as learning_replay_router
 from app.api.v1.memory.router import router as memory_router
@@ -22,3 +23,4 @@ api_router.include_router(memory_router, prefix="/memory", tags=["memory"])
 api_router.include_router(reports_router, prefix="/reports", tags=["reports"])
 api_router.include_router(settings_router, prefix="/settings", tags=["settings"])
 api_router.include_router(tts_router, prefix="/tts", tags=["tts"])
+api_router.include_router(grammar_router, prefix="/grammar", tags=["grammar"])
