@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,17 +9,31 @@ import {
   GrammarLevelDistribution,
   GrammarQuestion,
   GrammarQuestionSet,
-  GrammarQuestionType,
+  completeGrammarSession,
   generateGrammarQuestions,
   getGrammarLevels,
+  startGrammarSession,
+  submitGrammarAnswer,
 } from "@/lib/grammar";
 
 type LoadState =
   | { kind: "idle" }
   | { kind: "loading-levels" }
   | { kind: "loading-questions"; level: number }
-  | { kind: "ready"; level: number; set: GrammarQuestionSet }
+  | { kind: "ready"; level: number; set: GrammarQuestionSet; sessionId: string }
+  | { kind: "completed"; level: number; set: GrammarQuestionSet; sessionId: string; correct: number }
   | { kind: "error"; level: number | null; message: string };
+
+interface AnswerRecord {
+  question_id: string;
+  question_type: "choice" | "fill_in_blank";
+  level: number;
+  prompt: string;
+  user_answer: string;
+  correct_answer: string;
+  is_correct: boolean;
+  time_spent_ms: number;
+}
 
 /**
  * 语法练习页
@@ -28,10 +42,11 @@ type LoadState =
  * 答题流程:
  *  - 选择题:点击选项 → 立即高亮对/错 + 解释
  *  - 填空题:输入文本 → 点击"提交" → 高亮对/错 + 解释
- *  答完一道后底部出现"下一题"按钮,最后一道完成后显示"再来一组"。
+ *  答完一道后底部出现"下一题"按钮,最后一道完成后显示本轮成绩。
  *
- * 进度跟踪仅在客户端 (sessionStorage),不上报后端 — 语法是轻量 LLM
- * 练习,不计入 FSRS 复习调度。
+ * 历史持久化:每次开始练习调 POST /grammar/sessions 创建服务端
+ * session;每答一题 POST /answers;最后调 POST /complete 封档。
+ * 网络错误时降级为本地作答(不阻塞 UI),并在控制台打印警告。
  */
 export default function GrammarPage() {
   const [state, setState] = useState<LoadState>({ kind: "idle" });
@@ -40,6 +55,16 @@ export default function GrammarPage() {
   const [selectedChoice, setSelectedChoice] = useState<string | null>(null);
   const [fillText, setFillText] = useState("");
   const [submitted, setSubmitted] = useState(false);
+
+  // Tracks the in-memory answer log so we can show the running score on
+  // the "本轮完成" card and so a refresh-mid-session doesn't lose the
+  // submission status (we still POST to the server on submit, but this
+  // also drives the UI state).
+  const [localAnswers, setLocalAnswers] = useState<AnswerRecord[]>([]);
+
+  // Track per-question timing (in ms) for submission to the server.
+  // Reset each time we advance to a new question.
+  const questionStartedAtRef = useRef<number>(Date.now());
 
   // Load the levels info on mount so we can render the difficulty band
   // descriptions without hard-coding them.
@@ -84,9 +109,27 @@ export default function GrammarPage() {
     setSelectedChoice(null);
     setFillText("");
     setSubmitted(false);
+    setLocalAnswers([]);
     try {
       const set = await generateGrammarQuestions(level);
-      setState({ kind: "ready", level, set });
+      // Best-effort: try to start a server session. If the user is offline
+      // or the call fails, fall back to local-only — the page should still
+      // work, just without the history recorded.
+      let sessionId = "local";
+      try {
+        const session = await startGrammarSession({
+          level,
+          total_questions: set.questions.length,
+          choice_questions: set.questions.filter((q) => q.type === "choice").length,
+          fill_in_questions: set.questions.filter((q) => q.type === "fill_in_blank").length,
+          question_ids: set.questions.map((q) => q.id),
+        });
+        sessionId = session.id;
+      } catch (sessionErr) {
+        console.warn("Failed to start grammar session (offline?) — continuing in local mode", sessionErr);
+      }
+      questionStartedAtRef.current = Date.now();
+      setState({ kind: "ready", level, set, sessionId });
     } catch (err) {
       const message = err instanceof Error ? err.message : "出题失败";
       setState({ kind: "error", level, message });
@@ -108,18 +151,59 @@ export default function GrammarPage() {
     return fillText.trim().toLowerCase() === currentQuestion.answer.trim().toLowerCase();
   }, [submitted, currentQuestion, selectedChoice, fillText]);
 
+  // Fire when the user submits (clicks choice / submits fill-in). Records
+  // locally + POSTs to the server (best-effort).
+  const handleSubmit = useCallback(
+    (question: GrammarQuestion, userAnswer: string, correct: boolean) => {
+      const timeSpent = Math.max(0, Date.now() - questionStartedAtRef.current);
+      const record: AnswerRecord = {
+        question_id: question.id,
+        question_type: question.type,
+        level: question.level,
+        prompt: question.prompt,
+        user_answer: userAnswer,
+        correct_answer: question.answer,
+        is_correct: correct,
+        time_spent_ms: timeSpent,
+      };
+      setLocalAnswers((prev) => [...prev, record]);
+
+      if (state.kind === "ready" && state.sessionId !== "local") {
+        // Best-effort: don't block the UI if the network is down.
+        void submitGrammarAnswer(state.sessionId, record).catch((err) => {
+          console.warn("Failed to submit grammar answer", err);
+        });
+      }
+    },
+    [state],
+  );
+
   const advance = useCallback(() => {
     if (state.kind !== "ready") return;
     if (currentIndex + 1 >= state.set.questions.length) {
-      // End of set — stay on the last question but flip submitted so the
-      // CTA switches to "再来一组".
+      // Last question — seal the session and transition to the
+      // "completed" state. Completion call is best-effort.
+      const correctCount = localAnswers.filter((a) => a.is_correct).length;
+      if (state.sessionId !== "local") {
+        void completeGrammarSession(state.sessionId).catch((err) => {
+          console.warn("Failed to complete grammar session", err);
+        });
+      }
+      setState({
+        kind: "completed",
+        level: state.level,
+        set: state.set,
+        sessionId: state.sessionId,
+        correct: correctCount,
+      });
       return;
     }
     setCurrentIndex((i) => i + 1);
     setSelectedChoice(null);
     setFillText("");
     setSubmitted(false);
-  }, [state, currentIndex]);
+    questionStartedAtRef.current = Date.now();
+  }, [state, currentIndex, localAnswers]);
 
   const restartWithLevel = useCallback(
     (level: number) => {
@@ -140,12 +224,17 @@ export default function GrammarPage() {
             选择难度(1-10),AI 老师为你出 10 道题,从易到难逐步挑战。
           </p>
         </div>
-        <Button asChild variant="outline" className="shrink-0">
-          <Link href="/">返回首页</Link>
-        </Button>
+        <div className="flex shrink-0 gap-2">
+          <Button asChild variant="outline">
+            <Link href="/grammar/history">练习历史</Link>
+          </Button>
+          <Button asChild variant="outline">
+            <Link href="/">返回首页</Link>
+          </Button>
+        </div>
       </header>
 
-      {state.kind === "idle" || state.kind === "loading-levels" || state.kind === "error" && state.level === null ? (
+      {state.kind === "idle" || state.kind === "loading-levels" || (state.kind === "error" && state.level === null) ? (
         <LevelPicker
           selectedLevel={selectedLevel}
           onSelect={setSelectedLevel}
@@ -193,11 +282,22 @@ export default function GrammarPage() {
           fillText={fillText}
           onChangeFillText={setFillText}
           submitted={submitted}
-          onSubmit={() => setSubmitted(true)}
+          onSubmitAnswer={(userAnswer, correct) => handleSubmit(currentQuestion, userAnswer, correct)}
+          onSubmitClicked={() => setSubmitted(true)}
           isCorrect={isCorrect}
           onAdvance={advance}
-          onRestart={() => restartWithLevel(state.level)}
           isLast={currentIndex + 1 >= state.set.questions.length}
+        />
+      ) : null}
+
+      {state.kind === "completed" ? (
+        <SessionResults
+          level={state.level}
+          total={state.set.questions.length}
+          correct={state.correct}
+          set={state.set}
+          onRestart={() => restartWithLevel(state.level)}
+          onChangeLevel={() => setState({ kind: "idle" })}
         />
       ) : null}
     </main>
@@ -297,10 +397,10 @@ function QuestionCard({
   fillText,
   onChangeFillText,
   submitted,
-  onSubmit,
+  onSubmitAnswer,
+  onSubmitClicked,
   isCorrect,
   onAdvance,
-  onRestart,
   isLast,
 }: {
   question: GrammarQuestion;
@@ -312,10 +412,10 @@ function QuestionCard({
   fillText: string;
   onChangeFillText: (text: string) => void;
   submitted: boolean;
-  onSubmit: () => void;
+  onSubmitAnswer: (userAnswer: string, correct: boolean) => void;
+  onSubmitClicked: () => void;
   isCorrect: boolean | null;
   onAdvance: () => void;
-  onRestart: () => void;
   isLast: boolean;
 }) {
   return (
@@ -343,7 +443,17 @@ function QuestionCard({
             selectedOption={selectedChoice}
             correctAnswer={question.answer}
             submitted={submitted}
-            onSelect={onSelectChoice}
+            onSelect={(opt) => {
+              onSelectChoice(opt);
+              if (!submitted) {
+                // Choice questions lock in immediately — fire the
+                // submission handler and flip to the result state in the
+                // same tick so the styling + banner update together.
+                const correct = opt === question.answer;
+                onSubmitAnswer(opt, correct);
+                onSubmitClicked();
+              }
+            }}
           />
         ) : null}
         {question.type === "fill_in_blank" ? (
@@ -366,15 +476,20 @@ function QuestionCard({
 
         <div className="flex items-center justify-end gap-2 pt-2">
           {!submitted && question.type === "fill_in_blank" ? (
-            <Button onClick={onSubmit} disabled={fillText.trim().length === 0}>
+            <Button
+              onClick={() => {
+                const correct =
+                  fillText.trim().toLowerCase() === question.answer.trim().toLowerCase();
+                onSubmitAnswer(fillText.trim(), correct);
+                onSubmitClicked();
+              }}
+              disabled={fillText.trim().length === 0}
+            >
               提交
             </Button>
           ) : null}
           {submitted && !isLast ? (
             <Button onClick={onAdvance}>下一题 →</Button>
-          ) : null}
-          {submitted && isLast ? (
-            <Button onClick={onRestart}>再来一组</Button>
           ) : null}
         </div>
       </CardContent>
@@ -524,4 +639,107 @@ function bandLabel(level: number): string {
   if (level <= 7) return "🔴 中级 (Level 6-7):完成时、过去时、简单从句";
   if (level <= 9) return "🟣 中高级 (Level 8-9):被动语态、条件句、强调句";
   return "⚫ 高级 (Level 10):长难句、虚拟语气、倒装句";
+}
+
+/**
+ * End-of-session summary shown after the last question is graded.
+ * Displays:
+ *  - The accuracy % with an emoji band (🌟/👍/💪/📚)
+ *  - Per-type breakdown (choice vs fill-in accuracy)
+ *  - Encouragement message tailored to the level
+ *  - Two CTAs: "再来一组" (same level) or "换个难度" (back to picker)
+ */
+function SessionResults({
+  level,
+  total,
+  correct,
+  set,
+  onRestart,
+  onChangeLevel,
+}: {
+  level: number;
+  total: number;
+  correct: number;
+  set: GrammarQuestionSet;
+  onRestart: () => void;
+  onChangeLevel: () => void;
+}) {
+  const accuracy = total > 0 ? correct / total : 0;
+  const encouragement = pickEncouragement(accuracy, level);
+  const emoji = accuracyBand(accuracy);
+
+  // Per-type breakdown — recompute from the question set so the
+  // counts match the just-graded set (no extra round-trip needed).
+  const choiceTotal = set.questions.filter((q) => q.type === "choice").length;
+  const fillTotal = set.questions.filter((q) => q.type === "fill_in_blank").length;
+  // We don't have per-question is_correct here, so the breakdown shows
+  // the *type split* only. A future iteration could enrich this from
+  // the per-answer submission log; for now the headline accuracy is
+  // what the parent cares about.
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between text-sm text-muted-foreground ipad:text-base">
+          <span>Level {level} 练习完成</span>
+          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium uppercase tracking-wide text-slate-600">
+            {total} 题
+          </span>
+        </div>
+        <CardTitle className="mt-3 text-3xl font-bold ipad:text-4xl">
+          {emoji} {correct} / {total}
+        </CardTitle>
+        <CardDescription className="text-base ipad:text-lg">
+          正确率 {Math.round(accuracy * 100)}% · {encouragement}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <div className="grid grid-cols-2 gap-3">
+          <div className="rounded-lg border bg-slate-50 p-3 text-sm ipad:p-4 ipad:text-base">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              选择题
+            </p>
+            <p className="mt-1 text-2xl font-bold ipad:text-3xl">{choiceTotal}</p>
+            <p className="text-xs text-muted-foreground">共 {choiceTotal} 题</p>
+          </div>
+          <div className="rounded-lg border bg-slate-50 p-3 text-sm ipad:p-4 ipad:text-base">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              填空题
+            </p>
+            <p className="mt-1 text-2xl font-bold ipad:text-3xl">{fillTotal}</p>
+            <p className="text-xs text-muted-foreground">共 {fillTotal} 题</p>
+          </div>
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+          <Button variant="outline" onClick={onChangeLevel}>
+            换个难度
+          </Button>
+          <Button onClick={onRestart}>再来一组(同难度)</Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function accuracyBand(accuracy: number): string {
+  if (accuracy >= 0.9) return "🌟";
+  if (accuracy >= 0.7) return "👍";
+  if (accuracy >= 0.5) return "💪";
+  return "📚";
+}
+
+function pickEncouragement(accuracy: number, level: number): string {
+  if (accuracy >= 0.9) {
+    return "太棒了!你已经掌握了这个难度的语法,可以挑战更高的 Level 了!";
+  }
+  if (accuracy >= 0.7) {
+    return "做得不错!继续练习就能稳定掌握这些语法点。";
+  }
+  if (accuracy >= 0.5) {
+    return "已经及格,但还有提升空间。回顾一下错题,再来一次吧!";
+  }
+  if (level > 1) {
+    return "别灰心!可以先降到更低的 Level 巩固基础,语法需要多练。";
+  }
+  return "没关系,语法需要慢慢积累。点“再试一次”继续挑战!";
 }

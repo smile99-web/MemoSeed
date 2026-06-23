@@ -40,6 +40,35 @@ export interface GrammarLevelsInfo {
   distribution: GrammarLevelDistribution[];
 }
 
+export interface GrammarSessionSummary {
+  id: string;
+  level: number;
+  total_questions: number;
+  correct_count: number;
+  choice_questions: number;
+  fill_in_questions: number;
+  started_at: string;
+  completed_at: string | null;
+  accuracy: number;
+}
+
+export interface GrammarLevelStat {
+  level: number;
+  total_sessions: number;
+  total_questions: number;
+  correct_count: number;
+  accuracy: number;
+  avg_time_per_question_ms: number;
+}
+
+export interface GrammarHistoryResponse {
+  recent_sessions: GrammarSessionSummary[];
+  per_level: GrammarLevelStat[];
+  total_sessions: number;
+  total_questions: number;
+  overall_accuracy: number;
+}
+
 async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   const accessToken = getAccessToken();
   const headers: Record<string, string> = {
@@ -78,4 +107,46 @@ export async function generateGrammarQuestions(level: number): Promise<GrammarQu
     method: "POST",
     body: JSON.stringify({ level }),
   });
+}
+
+export async function startGrammarSession(payload: {
+  level: number;
+  total_questions: number;
+  choice_questions: number;
+  fill_in_questions: number;
+  question_ids: string[];
+}): Promise<GrammarSessionSummary> {
+  return fetchJson<GrammarSessionSummary>("/grammar/sessions", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function submitGrammarAnswer(
+  sessionId: string,
+  payload: {
+    question_id: string;
+    question_type: GrammarQuestionType;
+    level: number;
+    prompt: string;
+    user_answer: string;
+    correct_answer: string;
+    is_correct: boolean;
+    time_spent_ms: number;
+  },
+): Promise<GrammarSessionSummary> {
+  return fetchJson<GrammarSessionSummary>(`/grammar/sessions/${sessionId}/answers`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function completeGrammarSession(sessionId: string): Promise<GrammarSessionSummary> {
+  return fetchJson<GrammarSessionSummary>(`/grammar/sessions/${sessionId}/complete`, {
+    method: "POST",
+  });
+}
+
+export async function getGrammarHistory(): Promise<GrammarHistoryResponse> {
+  return fetchJson<GrammarHistoryResponse>("/grammar/history");
 }
