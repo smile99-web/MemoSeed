@@ -14,7 +14,9 @@ API and frontend can agree on what to expect for any given level.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -49,12 +51,62 @@ class GrammarQuestionSetRequest(BaseModel):
 
 
 class GrammarAnswerSubmission(BaseModel):
-    """User's answer to a single question — used for scoring on the client.
+    """User's answer to a single question — submitted as they go.
 
-    The backend intentionally does NOT persist submissions; grammar is a
-    lightweight LLM-driven drill, not a tracked learning unit. Stats live
-    on the client (sessionStorage) if the parent wants to see accuracy.
+    Stored on the server in `grammar_answers` for analytics
+    (per-question-type accuracy, time-per-question trends, etc).
     """
 
     question_id: str
-    answer: str
+    question_type: GrammarQuestionType
+    level: int = Field(..., ge=1, le=10)
+    prompt: str
+    user_answer: str
+    correct_answer: str
+    is_correct: bool
+    time_spent_ms: int = Field(default=0, ge=0)
+
+
+class GrammarSessionStart(BaseModel):
+    """Client → server: declare a new session right after the LLM returns questions."""
+
+    level: int = Field(..., ge=1, le=10)
+    total_questions: int = Field(..., ge=1, le=20)
+    choice_questions: int = Field(..., ge=0)
+    fill_in_questions: int = Field(..., ge=0)
+    question_ids: list[str] = Field(..., min_length=1, max_length=20)
+
+
+class GrammarSessionSummary(BaseModel):
+    """A completed (or in-progress) grammar practice session."""
+
+    id: UUID
+    level: int
+    total_questions: int
+    correct_count: int
+    choice_questions: int
+    fill_in_questions: int
+    started_at: datetime
+    completed_at: datetime | None
+    accuracy: float = Field(..., description="correct_count / total_questions, 0.0-1.0")
+
+
+class GrammarLevelStat(BaseModel):
+    """Aggregated stats for a single difficulty level."""
+
+    level: int
+    total_sessions: int
+    total_questions: int
+    correct_count: int
+    accuracy: float
+    avg_time_per_question_ms: float
+
+
+class GrammarHistoryResponse(BaseModel):
+    """Recent sessions + per-level aggregate stats."""
+
+    recent_sessions: list[GrammarSessionSummary] = Field(default_factory=list)
+    per_level: list[GrammarLevelStat] = Field(default_factory=list)
+    total_sessions: int
+    total_questions: int
+    overall_accuracy: float
