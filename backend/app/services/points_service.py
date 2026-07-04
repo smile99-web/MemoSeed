@@ -1,14 +1,25 @@
 """Points & reward system for motivating young English learners."""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.learning_item import LearningItem
 from app.models.user_points import PointsLog, UserPoints
+
+# Daily awards are by LOCAL day, not UTC. The product's intent is "the
+# child gets credit for studying today (in their timezone)", so we use
+# the configured local timezone throughout this module. On a VPS
+# deployed in Asia/Shanghai this resolves to CST; on a US server it
+# would follow the user's expectation. The previous implementation
+# used date.today() (naive local) but compared against last_awarded
+# converted to UTC, which broke the "once per local day" contract on
+# any non-UTC server (e.g. 8am Shanghai vs 0am UTC).
+LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 # --- Points rules ---
 POINTS_CORRECT_NO_HINT = 10      # correct spelling without hint
@@ -97,20 +108,46 @@ def award_points(
 
 
 def award_daily_study_points(db: Session, user_id: UUID) -> dict[str, Any]:
-    """Award points for today's study session (once per day)."""
+    """Award points for today's study session (once per local day).
+
+    Compares the user's last-awarded date against the LOCAL timezone
+    (Asia/Shanghai), not UTC. Without this fix, on a UTC server the
+    child could not claim the day's points until 8am local time, and
+    the streak counters on UserPoints were never actually incremented
+    (the previous 'yesterday' calculation always yielded today).
+    """
     user_points = _get_or_create_points(db, user_id)
-    today = date.today()
+    today = datetime.now(LOCAL_TIMEZONE).date()
 
+    # Compute the date of the previous award in LOCAL time. The
+    # last_awarded_date column is stored as a tz-aware UTC timestamp
+    # (server_default=now() on PostgreSQL writes timestamptz); convert
+    # to local before extracting the date.
+    last_local_date: date | None = None
     if user_points.last_awarded_date is not None:
-        last_date = user_points.last_awarded_date.astimezone(UTC).date() if hasattr(user_points.last_awarded_date, 'astimezone') else user_points.last_awarded_date.date()
-        if last_date >= today:
-            return {"already_awarded": True, **award_points(db, user_id, 0, "daily_study")}
+        last_dt = user_points.last_awarded_date
+        if last_dt.tzinfo is None:
+            # Defensive: legacy naive rows assume UTC.
+            last_dt = last_dt.replace(tzinfo=UTC)
+        last_local_date = last_dt.astimezone(LOCAL_TIMEZONE).date()
 
-    # Update streak
-    yesterday = today
-    if user_points.last_awarded_date is not None:
-        last_d = user_points.last_awarded_date.astimezone(UTC).date() if hasattr(user_points.last_awarded_date, 'astimezone') else user_points.last_awarded_date.date()
-        yesterday = today if last_d >= today else today
+    # Already awarded today — no-op, but still return updated state so
+    # the caller can confirm "already_awarded" without an extra round-trip.
+    if last_local_date is not None and last_local_date >= today:
+        return {"already_awarded": True, **award_points(db, user_id, 0, "daily_study")}
+
+    # Update streak.
+    #   - Never awarded before OR gap > 1 day → reset streak to 1
+    #   - Awarded yesterday → increment streak
+    #   - Awarded today (caught above by early return) → no change
+    if last_local_date is None or (today - last_local_date) > timedelta(days=1):
+        new_streak = 1
+    else:
+        # last_local_date is exactly yesterday (today-1)
+        new_streak = (user_points.current_streak_days or 0) + 1
+    user_points.current_streak_days = new_streak
+    if new_streak > (user_points.longest_streak_days or 0):
+        user_points.longest_streak_days = new_streak
 
     result = award_points(db, user_id, POINTS_DAILY_STUDY, "daily_study", f"每日学习奖励 +{POINTS_DAILY_STUDY}")
     user_points.last_awarded_date = datetime.now(UTC)

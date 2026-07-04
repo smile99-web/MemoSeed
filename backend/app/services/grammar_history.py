@@ -196,7 +196,13 @@ def get_user_history(
 
     # --- Per-level aggregate ---
     # Use SQL aggregation rather than per-level Python loop so the
-    # whole thing is one round-trip to the DB.
+    # whole thing is one round-trip to the DB. Filter to COMPLETED
+    # sessions only — in-progress sessions have correct_count = 0
+    # (the user just started, no answers yet) which would drag the
+    # accuracy denominator down. The previous implementation
+    # included in-progress rows, which made per-level accuracy
+    # disagree with the overall_accuracy (which already filtered
+    # by completed_at IS NOT NULL).
     per_level_rows = db.execute(
         select(
             GrammarSession.level,
@@ -204,7 +210,10 @@ def get_user_history(
             func.coalesce(func.sum(GrammarSession.total_questions), 0).label("total_questions"),
             func.coalesce(func.sum(GrammarSession.correct_count), 0).label("correct_count"),
         )
-        .where(GrammarSession.user_id == user_id)
+        .where(
+            GrammarSession.user_id == user_id,
+            GrammarSession.completed_at.isnot(None),
+        )
         .group_by(GrammarSession.level)
         .order_by(GrammarSession.level.asc())
     ).all()
