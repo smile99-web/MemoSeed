@@ -14,7 +14,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -32,6 +33,8 @@ from app.services.word_memory import (
     choose_task_sequence,
     mask_learning_letters,
 )
+from app.services.grammar_generator import generate_grammar_questions
+from app.services.grammar_history import complete_session
 from app.utils import parse_datetime_setting
 
 
@@ -268,3 +271,105 @@ class TestChooseTaskSequenceNoDuplicate:
         assert sequence[0] != "hidden_recall", (
             f"Low-error word should not start with hidden_recall, got {sequence[0]}"
         )
+
+
+# --- M-BE-2: complete_session should refresh before returning ---
+class TestCompleteSessionRefresh:
+    """`complete_session` must refresh the ORM session before returning.
+
+    Without the refresh, callers that subsequently access `completed_at`
+    may see a stale value (the previous SELECT, not the freshly-committed
+    row). The early-return path for already-completed sessions is the
+    most common call — must refresh there too.
+    """
+
+    def test_idempotent_complete_refreshes_session(self):
+        """Calling complete_session on an already-completed session should
+        return the session with completed_at populated, regardless of
+        whether the caller loaded a stale snapshot."""
+        original_completed_at = datetime(2026, 6, 23, 10, 0, tzinfo=UTC)
+        session = SimpleNamespace(
+            id=uuid4(),
+            user_id=uuid4(),
+            completed_at=original_completed_at,
+        )
+
+        # Lightweight inline mock — complete_session needs .scalar(),
+        # .commit(), and .refresh().
+        class _InlineMockDB:
+            def __init__(self, scalar_result):
+                self.scalar_result = scalar_result
+                self.refreshed = False
+            def scalar(self, _stmt):
+                return self.scalar_result
+            def commit(self):
+                pass
+            def refresh(self, _obj):
+                self.refreshed = True
+
+        db = _InlineMockDB(scalar_result=session)
+        # First call seals it (no-op since already completed_at)
+        result = complete_session(db, user_id=session.user_id, session_id=session.id)
+        # The session must be refreshable; verify the mock received refresh
+        assert db.refreshed, "complete_session must call db.refresh() before returning"
+
+
+# --- M-BE-3: grammar_generator should reject null elements ---
+class TestNullElementDefense:
+    """If the LLM emits a `null` inside its JSON array response, the
+    generator must raise a clear ValueError instead of crashing with
+    AttributeError inside _normalize_question.
+    """
+
+    def test_null_element_raises_value_error(self):
+        # Simulate the LLM returning [valid, null, valid] — _parse_questions_payload
+        # would yield this list. The generator must catch the None and raise
+        # ValueError before any attribute access.
+        raw_items = [
+            {"id": "q1", "type": "choice", "level": 1, "prompt": "?",
+             "options": ["A", "B", "C", "D"], "answer": "A", "explanation": "x"},
+            None,
+            {"id": "q3", "type": "choice", "level": 1, "prompt": "?",
+             "options": ["A", "B", "C", "D"], "answer": "A", "explanation": "x"},
+        ]
+        # We patch _parse_questions_payload to return our crafted list
+        with patch("app.services.grammar_generator._parse_questions_payload", return_value=raw_items):
+            with patch("app.services.grammar_generator.call_llm_generate", return_value="[]"):
+                with pytest.raises(ValueError, match="null element"):
+                    generate_grammar_questions(
+                        level=1,
+                        settings=SimpleNamespace(provider="ollama", base_url="x", model="x", api_key=None),
+                    )
+
+
+# --- M-BE-6: ProgrammingError vs OperationalError distinction ---
+class TestProgrammingErrorHandling:
+    """The `except ProgrammingError` pattern in FSRS settings lookup
+    silently swallows REAL query bugs (column missing, bad SQL). The
+    fix narrows it to OperationalError (table/connection issues only)
+    so genuine bugs surface instead of being masked as "settings missing".
+    """
+
+    def test_operational_error_returns_defaults(self):
+        """OperationalError (e.g. table missing on fresh install) still
+        falls back to defaults — preserving the original safety net."""
+        from sqlalchemy.exc import OperationalError
+        from app.services.memory_scheduler import (
+            get_user_fsrs_weights,
+            FSRS_WEIGHTS,
+        )
+
+        db = SimpleNamespace(scalar=Mock(side_effect=OperationalError("table missing", None, None)))
+        result = get_user_fsrs_weights(db, user_id=uuid4())  # type: ignore[arg-type]
+        assert result == FSRS_WEIGHTS
+
+    def test_programming_error_propagates(self):
+        """ProgrammingError (query syntax / column missing) should NOT
+        be swallowed — it indicates a real bug. This test pins that the
+        fix doesn't catch ProgrammingError anymore."""
+        from sqlalchemy.exc import ProgrammingError
+        from app.services.memory_scheduler import get_user_fsrs_weights
+
+        db = SimpleNamespace(scalar=Mock(side_effect=ProgrammingError("syntax error", None, None)))
+        with pytest.raises(ProgrammingError):
+            get_user_fsrs_weights(db, user_id=uuid4())  # type: ignore[arg-type]

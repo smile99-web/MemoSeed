@@ -89,11 +89,13 @@ class TestSchedulerTypeSelection:
         assert meta.scheduler_type == SCHEDULER_TYPE_CHILD_PROFILE
 
     def test_db_error_falls_back_to_child_profile(self, mock_db, user_id):
-        """ProgrammingError (e.g. table missing) → child_profile as safe default."""
-        from sqlalchemy.exc import ProgrammingError
+        """OperationalError (e.g. table missing on fresh install) → child_profile
+        as safe default. ProgrammingError (real query bug) is NOT swallowed —
+        see test_programming_error_propagates_in_get_scheduler_metadata."""
+        from sqlalchemy.exc import OperationalError
 
         # The first scalar call is the metadata lookup; raise on it.
-        mock_db.scalar.side_effect = ProgrammingError("SELECT 1", {}, Exception("table missing"))
+        mock_db.scalar.side_effect = OperationalError("SELECT 1", {}, Exception("table missing"))
         meta = get_scheduler_metadata(mock_db, user_id)
         assert meta.scheduler_type == SCHEDULER_TYPE_CHILD_PROFILE
         # Snapshot still populated with child profile weights.

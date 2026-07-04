@@ -3,10 +3,11 @@ from datetime import UTC, datetime, timedelta
 from math import ceil, exp, log
 from uuid import UUID
 from zoneinfo import ZoneInfo
+import logging
 
 from fastapi import HTTPException, status
 from sqlalchemy import ColumnElement, and_, func, not_, or_, select, update
-from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
 from app.models.learning_item import LearningItem
@@ -15,6 +16,8 @@ from app.models.mistake_log import MistakeLog
 from app.models.review_log import ReviewLog
 from app.models.user_model_settings import UserModelSettings
 from app.utils import clamp, normalize_word, tokenize_words
+
+logger = logging.getLogger(__name__)
 
 FSRS_AGAIN = 1
 FSRS_HARD = 2
@@ -218,7 +221,13 @@ def normalize_fsrs_weights(value: object) -> tuple[float, ...] | None:
 def get_user_fsrs_weights(db: Session, user_id: UUID) -> tuple[float, ...]:
     try:
         stored_settings = db.scalar(select(UserModelSettings).where(UserModelSettings.user_id == user_id))
-    except ProgrammingError:
+    except OperationalError:
+        # OperationalError = table/index/connection issue (e.g. table
+        # missing on a fresh install before migrations ran). Fall back to
+        # built-in weights so the app still works. We deliberately do NOT
+        # catch ProgrammingError here — that's raised for query syntax
+        # errors and indicates a real bug, not a "table missing" state.
+        logger.warning("FSRS weights lookup hit OperationalError; using built-in weights")
         return FSRS_WEIGHTS
     if stored_settings is None:
         return FSRS_WEIGHTS
@@ -233,7 +242,8 @@ def get_effective_fsrs_params(db: Session, user_id: UUID) -> tuple[tuple[float, 
     """
     try:
         stored_settings = db.scalar(select(UserModelSettings).where(UserModelSettings.user_id == user_id))
-    except ProgrammingError:
+    except OperationalError:
+        logger.warning("FSRS effective params lookup hit OperationalError; using child defaults")
         return (CHILD_FSRS_WEIGHTS, CHILD_TARGET_RETENTION)
 
     if stored_settings is None:
@@ -292,7 +302,9 @@ def get_scheduler_metadata(db: Session, user_id: UUID) -> SchedulerMetadata:
     weights, target_retention = get_effective_fsrs_params(db, user_id)
     try:
         stored_settings = db.scalar(select(UserModelSettings).where(UserModelSettings.user_id == user_id))
-    except ProgrammingError:
+    except OperationalError:
+        # OperationalError = table/connection issue. Real query bugs
+        # (ProgrammingError) propagate so they're not silently masked.
         stored_settings = None
 
     settings = dict(stored_settings.settings) if stored_settings is not None else {}

@@ -278,6 +278,18 @@ def generate_grammar_questions(
 
     questions: list[GrammarQuestion] = []
     for index, raw_item in enumerate(items):
+        # Defensive: some LLMs occasionally emit a JSON `null` element in
+        # the array (e.g. when the model aborts mid-stream and continues
+        # with placeholders). Without this filter, _normalize_question
+        # would call `raw.get(...)` on None and raise AttributeError,
+        # surfacing as a 502 to the client. We surface it as a clear
+        # "LLM response invalid" error instead, which the router maps to
+        # 502 with a useful message.
+        if raw_item is None:
+            raise ValueError(
+                f"LLM returned a null element at index {index}; aborting normalization. "
+                "Common cause: model emitted an incomplete JSON array."
+            )
         questions.append(_normalize_question(raw_item, index, level))
 
     return GrammarQuestionSet(level=level, questions=questions)

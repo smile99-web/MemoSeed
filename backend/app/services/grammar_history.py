@@ -139,7 +139,12 @@ def complete_session(
     if session.completed_at is None:
         session.completed_at = datetime.now(UTC)
         db.commit()
-        db.refresh(session)
+    # Always refresh — the caller may have a stale ORM snapshot from a
+    # previous read in the same request (e.g. _session_to_summary ->
+    # call another service that calls back into this). Without refresh,
+    # subsequent attribute access could trigger a lazy load with the
+    # session already in an invalid state (e.g. after commit).
+    db.refresh(session)
     return session
 
 
