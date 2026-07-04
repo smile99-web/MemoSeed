@@ -468,21 +468,32 @@ function StudyContent() {
   const [activeStudySeconds, setActiveStudySeconds] = useState(0);
   const [isStudyPaused, setIsStudyPaused] = useState(false);
   const [isDictationMode, setIsDictationMode] = useState(false);
-  // Focus mode defaults ON for struggling learners, but OFF in "learn" mode —
-  // new-sentence learning should cover the full new course content, not just
-  // the 7 highest-priority focus words.
-  const [isFocusMode, setIsFocusMode] = useState(() => studyMode !== "learn");
-  // Re-sync isFocusMode when the user navigates between modes via the
-  // switchStudyMode buttons. The lazy initializer above only runs once on
-  // mount — without this effect, switching from `mix` to `learn` via the
-  // URL would leave isFocusMode at its initial value and serve the wrong
-  // queue shape. The dependency is on studyMode only so we don't clobber
-  // the user's manual toggle inside a single mode.
+  // Focus mode defaults OFF — user must click the "聚焦模式" button to
+  // enable it. Previously this defaulted ON for struggling learners (and
+  // OFF in 'learn' mode), but the forced-on behaviour surprised users
+  // who expected to see the full new-course queue first. Now the child
+  // gets the full content every time and can opt into the focused
+  // 7-word × 3-mode subset when they want concentrated practice.
+  const [isFocusMode, setIsFocusMode] = useState(false);
+  // Reset focus mode to OFF when the user navigates between study modes
+  // via the switchStudyMode buttons. The lazy initializer above only runs
+  // once on mount — without this effect, switching from one mode to
+  // another would carry over the previous mode's focus-mode toggle.
+  // We intentionally reset to OFF (not preserve the previous value) so
+  // the child always starts each mode with a full queue.
   useEffect(() => {
-    setIsFocusMode(studyMode !== "learn");
+    setIsFocusMode(false);
   }, [studyMode]);
   const [celebrationSummary, setCelebrationSummary] = useState<CelebrationSummary | null>(null);
-  const [isStudyFullscreen, setIsStudyFullscreen] = useState(true);
+  // Immersive (沉浸) mode defaults OFF — user must click the "沉浸模式"
+  // button to enable it. Previously this defaulted ON, but the forced
+  // fullscreen view hid the page chrome (course info, progress
+  // indicators, exit button) which made it harder for the parent to
+  // peek at progress or for the child to back out without a keyboard
+  // shortcut. Now the child gets the bordered "card" view by default
+  // and can opt into the full-bleed fullscreen view when they want
+  // distraction-free practice.
+  const [isStudyFullscreen, setIsStudyFullscreen] = useState(false);
   const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
   const mistakePracticeInputRef = useRef<HTMLInputElement | null>(null);
   const activeStudyMsRef = useRef(0);
