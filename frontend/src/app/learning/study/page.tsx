@@ -2958,9 +2958,6 @@ function StudyContent() {
                 <span>{currentStreak}</span>
               </div>
             ) : null}
-            <Button className={`h-8 px-2.5 text-xs shadow-sm backdrop-blur ipad:h-9 ipad:px-3 ipad:text-sm ${isFocusMode ? "border-emerald-500 bg-emerald-50 text-emerald-700" : "bg-white/90"}`} onClick={() => setIsFocusMode(!isFocusMode)} onMouseDown={keepStudyInputFocus} type="button" variant="outline">
-              {isFocusMode ? "🎯 聚焦" : "聚焦"}
-            </Button>
             <Button className={`h-8 px-2.5 text-xs shadow-sm backdrop-blur ipad:h-9 ipad:px-3 ipad:text-sm ${isDictationMode ? "border-violet-500 bg-violet-50 text-violet-700" : "bg-white/90"}`} onClick={toggleDictationMode} onMouseDown={keepStudyInputFocus} type="button" variant="outline">
               {isDictationMode ? "✎ 默写中" : "默写"}
             </Button>
@@ -2988,9 +2985,6 @@ function StudyContent() {
             </div>
             <div className="flex flex-wrap items-center justify-end gap-3 text-sm font-semibold text-slate-600 ipad:text-base">
               <span>{device.isIPad ? "⌨ 空格判定单词 · 完成后点击按钮继续" : "单词输入完成按空格判定，完成后点击按钮继续"}</span>
-              <Button className={`h-9 px-3 text-sm ipad:h-9 ipad:px-3 ipad:text-sm ${isFocusMode ? "border-emerald-500 bg-emerald-50 text-emerald-700" : ""}`} onClick={() => setIsFocusMode(!isFocusMode)} onMouseDown={keepStudyInputFocus} type="button" variant="outline">
-                {isFocusMode ? "🎯 聚焦中" : "聚焦模式"}
-              </Button>
               <Button className={`h-9 px-3 text-sm ipad:h-9 ipad:px-3 ipad:text-sm ${isDictationMode ? "border-violet-500 bg-violet-50 text-violet-700" : ""}`} onClick={toggleDictationMode} onMouseDown={keepStudyInputFocus} type="button" variant="outline">
                 {isDictationMode ? "✎ 默写中" : "默写模式"}
               </Button>
@@ -3059,11 +3053,6 @@ function StudyContent() {
               ) : null}
               {encodingStage === "whole_recall" && previewCountdownSeconds > 0 ? (
                 <div className="mx-auto rounded-md bg-amber-100 px-6 py-3 text-4xl font-bold text-amber-950 ipad:text-5xl ipad-lg:text-6xl">{encodingWord}</div>
-              ) : null}
-              {isFocusMode ? (
-                <div className="mx-auto max-w-2xl rounded-lg bg-emerald-50 border border-emerald-200 px-4 py-2">
-                  <p className="text-sm font-semibold text-emerald-700">🎯 聚焦模式 · 每次7个核心词 · 反复练习直到掌握</p>
-                </div>
               ) : null}
               {reviewTaskModeLabel || reviewTaskInstruction ? (
                 <div className="mx-auto max-w-2xl space-y-2">
