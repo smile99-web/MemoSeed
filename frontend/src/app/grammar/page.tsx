@@ -112,6 +112,19 @@ export default function GrammarPage() {
     setLocalAnswers([]);
     try {
       const set = await generateGrammarQuestions(level);
+      // Defensive: an LLM may return a non-empty payload with zero usable
+      // questions (e.g. all entries were null after parsing). Without
+      // this check, the page would render an empty 'ready' state with
+      // no UI to advance, soft-locking the user into a refresh. Surface
+      // it as an error with a clear retry path instead.
+      if (!set.questions || set.questions.length === 0) {
+        setState({
+          kind: "error",
+          level,
+          message: "AI 没有返回任何题目,请重试或换一个难度。",
+        });
+        return;
+      }
       // Best-effort: try to start a server session. If the user is offline
       // or the call fails, fall back to local-only — the page should still
       // work, just without the history recorded.
@@ -460,6 +473,12 @@ function QuestionCard({
           <FillInput
             value={fillText}
             onChange={onChangeFillText}
+            onSubmit={() => {
+              const correct =
+                fillText.trim().toLowerCase() === question.answer.trim().toLowerCase();
+              onSubmitAnswer(fillText.trim(), correct);
+              onSubmitClicked();
+            }}
             submitted={submitted}
             correctAnswer={question.answer}
             disabled={submitted}
@@ -561,37 +580,40 @@ function ChoiceList({
 function FillInput({
   value,
   onChange,
+  onSubmit,
   submitted,
   correctAnswer,
   disabled,
 }: {
   value: string;
   onChange: (text: string) => void;
+  onSubmit: () => void;
   submitted: boolean;
   correctAnswer: string;
   disabled: boolean;
 }) {
   return (
     <div className="flex flex-col gap-2">
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-        placeholder="在此输入答案..."
-        className="w-full rounded-lg border-2 border-slate-200 bg-white px-4 py-3 text-base focus:border-primary focus:outline-none disabled:bg-slate-50 disabled:text-slate-500 ipad:px-5 ipad:py-4 ipad:text-lg"
-        autoComplete="off"
-        autoCapitalize="off"
-        spellCheck={false}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !submitted && value.trim().length > 0) {
-            e.preventDefault();
-            // The parent owns the submit click — dispatch a synthetic click
-            // on the submit button by submitting through the form.
-            (e.target as HTMLInputElement).blur();
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!submitted && value.trim().length > 0) {
+            onSubmit();
           }
         }}
-      />
+      >
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
+          placeholder="在此输入答案..."
+          className="w-full rounded-lg border-2 border-slate-200 bg-white px-4 py-3 text-base focus:border-primary focus:outline-none disabled:bg-slate-50 disabled:text-slate-500 ipad:px-5 ipad:py-4 ipad:text-lg"
+          autoComplete="off"
+          autoCapitalize="off"
+          spellCheck={false}
+        />
+      </form>
       {submitted ? (
         <p className="text-sm text-slate-500">
           正确答案: <span className="font-semibold text-slate-700">{correctAnswer}</span>

@@ -85,7 +85,14 @@ export function getAuthUser(): AuthUser | null {
   try {
     return JSON.parse(storedUser) as AuthUser;
   } catch {
-    clearAuthSession();
+    // User blob is corrupt (truncated write, schema mismatch, etc).
+    // Clear ONLY the user key — leave the access/refresh tokens alone
+    // since they may still be valid. Previously we called
+    // clearAuthSession() here which nuked everything and forced a
+    // re-login even though the user's session was technically still
+    // usable. Now we just clear the broken user metadata; the next
+    // /users/me call will repopulate it.
+    window.localStorage.removeItem(userKey);
     return null;
   }
 }

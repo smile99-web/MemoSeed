@@ -620,12 +620,19 @@ export default function DashboardPage() {
     if (window.localStorage.getItem(flagKey) !== "1") {
       window.localStorage.setItem(flagKey, "1");
       // Clear the older-version flag so storage doesn't accumulate over
-      // time across many releases.
+      // time across many releases. Collect keys first then remove in a
+      // second pass — calling removeItem inside the original for-loop
+      // mutated the indexed storage length and skipped every other key
+      // (off-by-one in the loop index vs the actual length).
+      const staleKeys: string[] = [];
       for (let i = 0; i < window.localStorage.length; i++) {
         const key = window.localStorage.key(i);
         if (key && key.startsWith("dashboard_reload_") && key !== flagKey) {
-          window.localStorage.removeItem(key);
+          staleKeys.push(key);
         }
+      }
+      for (const key of staleKeys) {
+        window.localStorage.removeItem(key);
       }
       window.location.reload();
     }

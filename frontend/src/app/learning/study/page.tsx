@@ -1731,7 +1731,12 @@ function StudyContent() {
     setMistakePracticeTranslations({});
     setPendingMistakePractice([], {});
     setHasFinalizedCurrentItem(false);
-    setStartedAt(Date.now());
+    // NOTE: do NOT reset startedAt here. resetAnswer() runs between
+    // individual words within a sentence (e.g. when the child finishes
+    // one word and the input for the next word takes focus). Resetting
+    // startedAt here would make the duration_seconds reported for the
+    // second word effectively zero. startedAt is properly reset on item
+    // change in the [currentItem] effect above.
     setActiveWordIndex(dynamicReviewWordIndexes[0] ?? 0);
     updateAnswerState("typing");
     isCompletingSentenceRef.current = false;
