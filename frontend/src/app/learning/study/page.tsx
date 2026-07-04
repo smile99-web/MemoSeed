@@ -1754,7 +1754,18 @@ function StudyContent() {
       return;
     }
 
-    courseRunCorrectWordKeysRef.current.add(`${item.id}:${index}:${normalizedWord}`);
+    // Key on the normalized word alone, NOT on (item.id, index, word).
+    // The previous composite key counted the same English word as
+    // distinct "correct" entries every time it appeared in a different
+    // sentence (e.g. "the" in 5 sentences → 5 "correct words" instead
+    // of 1). This inflated the course-completion `correct_word_count`
+    // and confused downstream FSRS metrics that aggregate by word.
+    // Now: a unique word counts once per course run, regardless of
+    // how many sentences contain it. The `item` and `index` params
+    // are kept for caller compatibility but intentionally unused.
+    void item;
+    void index;
+    courseRunCorrectWordKeysRef.current.add(normalizedWord);
   }
 
   const generateAndSpeakCompletionEncouragement = useCallback(async function generateAndSpeakCompletionEncouragement(durationSeconds: number) {
