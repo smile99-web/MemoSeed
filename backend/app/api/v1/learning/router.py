@@ -576,32 +576,6 @@ def _get_phonics_group(word: str) -> str | None:
     return None
 
 
-def list_learning_items(
-    current_user: Annotated[User, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
-    course_id: UUID | None = None,
-    limit: int | None = None,
-) -> list[LearningItemRead]:
-    statement = (
-        select(LearningItem)
-        .outerjoin(MemoryState, MemoryState.learning_item_id == LearningItem.id)
-        .where(LearningItem.user_id == current_user.id)
-    )
-    if course_id is not None:
-        statement = statement.where(LearningItem.course_id == course_id)
-    # Sort overdue items first (nulls last = never-reviewed/new items go after due items)
-    statement = statement.order_by(
-        MemoryState.next_review_at.is_(None),
-        MemoryState.next_review_at.asc(),
-        LearningItem.sort_order.asc(),
-        LearningItem.created_at.asc(),
-    )
-    if limit is not None and limit > 0:
-        statement = statement.limit(limit)
-    items = db.scalars(statement).all()
-    return [LearningItemRead.model_validate(item) for item in items]
-
-
 @router.get("/review-items", response_model=list[LearningItemRead])
 def list_due_review_items(
     current_user: Annotated[User, Depends(get_current_user)],

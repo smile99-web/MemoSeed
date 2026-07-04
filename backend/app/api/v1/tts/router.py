@@ -101,6 +101,19 @@ def synthesize_kokoro_speech(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Kokoro API URL is invalid")
     if parsed_url.hostname not in LOCAL_KOKORO_HOSTS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Kokoro API URL must point to localhost")
+    # SSRF hardening: reject any client-supplied URL that carries
+    # credentials, a path, query, or fragment. The path is appended
+    # server-side as /v1/audio/speech, so allowing user paths here
+    # would let an authenticated user probe other services running on
+    # the same container (e.g. http://kokoro:3000/admin). The hostname
+    # allowlist above stops cross-container probing; this stops
+    # same-container probing on non-standard paths.
+    if parsed_url.username or parsed_url.password:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Kokoro API URL must not contain credentials")
+    if parsed_url.path and parsed_url.path not in ("", "/"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Kokoro API URL must not contain a path")
+    if parsed_url.query or parsed_url.fragment:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Kokoro API URL must not contain query/fragment")
 
     api_url = payload.api_url.strip().rstrip("/")
     request_body: dict[str, object] = {
