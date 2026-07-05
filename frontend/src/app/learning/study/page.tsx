@@ -2868,7 +2868,10 @@ function StudyContent() {
 	    function handleWindowKeyDown(event: globalThis.KeyboardEvent) {
 	      const isSpace = event.key === " ";
 	      const isEnter = event.key === "Enter";
-		      const isDigit = event.key >= "1" && event.key <= "6";
+			      // Detect number keys from BOTH main keyboard AND numeric keypad
+			      const digitMatch = /^(Digit|Numpad)([1-6])$/.exec(event.code);
+			      const isDigit = (event.key >= "1" && event.key <= "6") || digitMatch !== null;
+			      const digitFromKey = digitMatch ? parseInt(digitMatch[2], 10) : parseInt(event.key, 10);
 		      if (!isSpace && !isEnter && !isDigit) {
 	        return;
 	      }
@@ -2881,7 +2884,7 @@ function StudyContent() {
 		      // Number keys 1-6: select choice (choice review tasks in typing state)
 		      if (isDigit && isChoiceTask && currentState === "typing") {
 		        event.preventDefault();
-		        const digitIdx = parseInt(event.key, 10) - 1;
+		        const digitIdx = digitFromKey - 1;
 		        const choiceItems = choiceOptionsRef.current;
 		        if (choiceItems && digitIdx < choiceItems.length) {
 		          setSelectedChoice(choiceItems[digitIdx]);
@@ -2897,7 +2900,7 @@ function StudyContent() {
 		      // Number keys 1-6: select meaning quiz option in mistake practice
 		      if (isDigit && currentState === "mistake-meaning-quiz") {
 		        event.preventDefault();
-		        const digitIdx = parseInt(event.key, 10) - 1;
+		        const digitIdx = digitFromKey - 1;
 		        if (digitIdx >= 0 && digitIdx < mistakeMeaningQuizOptionsRef.current.length && mistakeMeaningQuizSelectedRef.current === null) {
 		          handleMistakeMeaningChoice(mistakeMeaningQuizOptionsRef.current[digitIdx]);
 		        }
@@ -3225,7 +3228,7 @@ function StudyContent() {
                           }`}
                           disabled={hasResult || answerState !== "typing" }
                           key={`${choice}-${index}`}
-                          onClick={() => { if (answerState === "typing" && !hasResult) { setSelectedChoice(choice); setFeedback(null); void confirmChoiceSelection(choice); } }}
+                          onClick={() => { if (answerState === "typing" && !hasResult) { setSelectedChoice(choice); setFeedback(null); } }}
                           type="button"
                           variant={showCorrect || (!hasResult && isSelected) ? "default" : "outline"}
                         >
