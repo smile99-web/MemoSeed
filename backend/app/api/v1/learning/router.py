@@ -532,6 +532,7 @@ def list_learning_items(
     db: Annotated[Session, Depends(get_db)],
     course_id: UUID | None = None,
     limit: int | None = None,
+    include_choices: bool = False,
 ) -> list[LearningItemRead]:
     statement = (
         select(LearningItem)
@@ -550,7 +551,126 @@ def list_learning_items(
     if limit is not None and limit > 0:
         statement = statement.limit(limit)
     items = db.scalars(statement).all()
-    return [LearningItemRead.model_validate(item) for item in items]
+    result = [LearningItemRead.model_validate(item) for item in items]
+
+    if include_choices:
+        # For each word-type item, prepend an english_to_chinese
+        # choice variant with database-random distractors. Uses the
+        # same _enrich_review_choices logic as the micro-review task
+        # system — distractors come from WordTranslation (user's own
+        # word list), NOT from a fixed pool.
+        stored_settings = get_private_model_settings(db, current_user.id)
+        cloze_settings = build_llm_translation_settings(None, None, None, None, stored_settings)
+
+        enriched: list[LearningItemRead] = []
+        seen_words: set[str] = set()
+        for item in items:
+            if item.item_type != "word":
+                enriched.append(LearningItemRead.model_validate(item))
+                continue
+            normalized = normalize_word(item.english_text or "")
+            if not normalized or normalized in seen_words:
+                enriched.append(LearningItemRead.model_validate(item))
+                continue
+            seen_words.add(normalized)
+
+            # Build distractors from the user's own word database
+            choices, correct_answer = _enrich_choices_for_word(
+                db, current_user.id, normalized, item, cloze_settings
+            )
+            choice_item = LearningItemRead(
+                id=uuid4(),
+                user_id=current_user.id,
+                course_id=item.course_id,
+                item_type="word",
+                english_text=normalized,
+                chinese_text=correct_answer if correct_answer else (item.chinese_text or ""),
+                phonetic=item.phonetic,
+                syllables=item.syllables,
+                grapheme_phoneme_map=item.grapheme_phoneme_map,
+                difficulty_level=item.difficulty_level,
+                source="AI 动态复习",
+                review_task_type="english_to_chinese",
+                review_prompt=f"选择 {normalized} 的中文意思",
+                review_choices=choices,
+                review_answer=correct_answer,
+                focus_words=[normalized],
+                created_at=item.created_at,
+                updated_at=item.updated_at,
+            )
+            enriched.append(choice_item)
+            enriched.append(LearningItemRead.model_validate(item))
+
+        # Prune to limit if needed
+        if limit is not None and limit > 0:
+            return enriched[:limit]
+        return enriched
+
+    return result
+
+
+def _enrich_choices_for_word(
+    db: Session,
+    user_id: UUID,
+    normalized_word: str,
+    learning_item: LearningItem,
+    settings: LlmTranslationSettings | None,
+) -> tuple[list[str], str]:
+    """Generate 6 Chinese-meaning choices for a word, with DB-random distractors.
+
+    Mirrors _enrich_review_choices but works with a plain learning_item
+    instead of a WordReviewTask. Distractors come from WordTranslation
+    (user's own database) with func.random() — NOT a fixed pool.
+    """
+    from sqlalchemy import func as sa_func, select as sa_select
+
+    # Step 1: correct answer from WordTranslation or BASIC_WORD_TRANSLATIONS
+    try:
+        cached = get_cached_word_translations(db, user_id, [normalized_word])
+    except ProgrammingError:
+        db.rollback()
+        cached = {}
+    correct_answer = sanitize_word_choice(
+        cached.get(normalized_word, "")
+        or learning_item.chinese_text
+        or ""
+    )
+    if not correct_answer:
+        correct_answer = normalized_word
+
+    rebuilt: list[str] = [correct_answer]
+
+    # Step 2: DB-random distractors from user's other words
+    try:
+        rows = db.execute(
+            sa_select(WordTranslation.chinese_text)
+            .where(
+                WordTranslation.user_id == user_id,
+                WordTranslation.word != normalized_word,
+                WordTranslation.chinese_text != correct_answer,
+            )
+            .order_by(sa_func.random())
+            .limit(10)
+        ).scalars().all()
+    except ProgrammingError:
+        db.rollback()
+        rows = []
+
+    for distractor in rows:
+        distractor = sanitize_word_choice(distractor)
+        if distractor and distractor not in rebuilt:
+            rebuilt.append(distractor)
+        if len(rebuilt) >= 6:
+            return rebuilt, correct_answer
+
+    # Step 3: fallback to GENERIC_WORD_DISTRACTORS
+    for choice in GENERIC_WORD_DISTRACTORS:
+        if choice and choice != correct_answer and choice not in rebuilt:
+            rebuilt.append(choice)
+        if len(rebuilt) >= 6:
+            return rebuilt, correct_answer
+
+    return rebuilt[:6], correct_answer
 
 
 # Phonics pattern groups for batch teaching

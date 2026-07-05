@@ -11,6 +11,8 @@ import { useRouter, usePathname } from "next/navigation";
 import { addCourseCompletion } from "@/lib/course-progress";
 import { Course, listCoursePackages, listCourses } from "@/lib/courses";
 import { generateDynamicSentence, generateLearningEncouragement, getWordTranslations, LearningItem, listDueReviewItems, listLearningItems, logWordMistake, logWordReview, translateLearningText } from "@/lib/learning";
+import { fetchWithAuth, parseApiError } from "@/lib/api";
+import { getApiBaseUrl } from "@/lib/api-base-url";
 import { recordCourseCompletion, recordStudyTime, rotateFocusWord, scheduleMemoryReview } from "@/lib/memory";
 import { ModelSettings, defaultModelSettings, getModelSettings, loadPersistedModelSettings } from "@/lib/model-settings";
 import { playAudioBlob, prefetchCourseAudio, stopAudioPlayback, synthesizeCosyVoiceSpeech, synthesizeKokoroSpeech, synthesizeVolcengineSpeech, TtsSynthesisOptions } from "@/lib/tts";
@@ -1599,33 +1601,24 @@ function StudyContent() {
           ).catch(() => [] as LearningItem[]);
           mergedItems = dueReviewItems;
         } else if (studyMode === "learn") {
-          // Learn mode: for each word, show a recognition question
-          // (english_to_chinese choice) BEFORE the spelling question.
-          // The choice item shows the English word and 6 Chinese
-          // options; the spelling item shows Chinese and lets the
-          // child type the English word. Sentences pass through unchanged.
-          nextItems = await listLearningItems(accessToken, courseId).catch(() => [] as LearningItem[]);
-          const plainItems = nextItems.filter((item) => !item.review_task_type);
-          const result: LearningItem[] = [];
-          for (const item of plainItems) {
-            if (item.item_type === "word" && item.english_text) {
-              result.push({
-                id: `choice-${item.id}`,
-                user_id: item.user_id,
-                course_id: item.course_id,
-                item_type: "word",
-                english_text: item.english_text,
-                chinese_text: item.chinese_text || "",
-                review_task_type: "english_to_chinese",
-                source: item.source,
-                focus_words: [],
-                created_at: item.created_at,
-                updated_at: item.updated_at,
-              } as unknown as LearningItem);
-            }
-            result.push(item);
+          // Learn mode: the backend now supports include_choices=true,
+          // which prepends an english_to_chinese choice item before each
+          // word-type item. The distractors come from the user's own
+          // word database (WordTranslation ORDER BY random()), NOT from
+          // a fixed pool. No frontend choice generation needed.
+          // Fetch course items with include_choices=true — the backend
+          // generates english_to_chinese items with DB-random distractors
+          // prepended before each word-type item. No frontend fallback pool needed.
+          const choiceParams = new URLSearchParams({ course_id: courseId, include_choices: "true" });
+          const response = await fetchWithAuth(
+            `${getApiBaseUrl()}/learning/items?${choiceParams.toString()}`,
+            { cache: "no-store" },
+            accessToken,
+          );
+          if (!response.ok) {
+            throw new Error(await parseApiError(response));
           }
-          mergedItems = result;
+          mergedItems = (await response.json()) as LearningItem[];
         } else {
           // Default mixed behavior: review + new content interleaved.
           nextItems = await listLearningItems(accessToken, courseId).catch(() => [] as LearningItem[]);
