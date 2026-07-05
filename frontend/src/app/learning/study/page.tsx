@@ -539,8 +539,9 @@ function StudyContent() {
   // closure in the window keydown handler.
   const mistakeMeaningQuizOptionsRef = useRef<string[]>([]);
   const mistakeMeaningQuizSelectedRef = useRef<string | null>(null);
-  useEffect(() => { mistakeMeaningQuizOptionsRef.current = mistakeMeaningQuizOptions; }, [mistakeMeaningQuizOptions]);
-  useEffect(() => { mistakeMeaningQuizSelectedRef.current = mistakeMeaningQuizSelected; }, [mistakeMeaningQuizSelected]);
+  // Sync at render time (not useEffect) — same race as choiceOptionsRef
+  mistakeMeaningQuizOptionsRef.current = mistakeMeaningQuizOptions;
+  mistakeMeaningQuizSelectedRef.current = mistakeMeaningQuizSelected;
   const activeStudyMsRef = useRef(0);
   const pendingStudyMsRef = useRef(0);
   const courseRunStartedActiveMsRef = useRef(0);
@@ -634,7 +635,11 @@ function StudyContent() {
     const translatedChoices = correctAnswer ? [correctAnswer, "老师", "学生", "学校", "书", "朋友"].filter((choice, index, values) => values.indexOf(choice) === index) : [];
     return rotateChoices(translatedChoices.length > 0 ? translatedChoices : choicesWithAnswer, `${currentItem.id}-${currentFocusedReviewWord}`);
   }, [currentFocusedReviewWord, currentItem, isChoiceReviewTask, reviewTaskWordTranslation]);
-  useEffect(() => { choiceOptionsRef.current = choiceReviewOptions; }, [choiceReviewOptions]);
+  // Sync the ref at RENDER time (not in useEffect) so the keydown
+  // handler sees the current options on the VERY FIRST keypress.
+  // The useEffect approach ran AFTER render — the first keypress
+  // after an item change saw an empty array and was silently ignored.
+  choiceOptionsRef.current = choiceReviewOptions;
 
   const reviewTaskInstruction = buildReviewTaskInstruction(currentItem?.review_task_type, currentFocusedReviewWord);
   const reviewTaskModeLabel = getReviewTaskModeLabel(currentItem?.review_task_type);
@@ -2752,8 +2757,8 @@ function StudyContent() {
     window.setTimeout(() => inputRefs.current[firstRespellIdx]?.focus(), 0);
   }
 
-  const confirmChoiceSelection = useCallback(async function confirmChoiceSelection(explicitChoice?: string) {
-    const choice = explicitChoice ?? selectedChoice;
+  const confirmChoiceSelection = useCallback(async function confirmChoiceSelection() {
+    const choice = selectedChoice;
     if (!currentItem || !isChoiceReviewTask || !choice) {
       return;
     }
@@ -2767,9 +2772,7 @@ function StudyContent() {
     // feedback (choice button highlighting). When called from the
     // number-key handler with an explicitChoice, selectedChoice state
     // hasn't been set yet — we set it here before the result render.
-    if (explicitChoice) {
-      setSelectedChoice(explicitChoice);
-    }
+    
 
     // Visual feedback: show correct/incorrect on the choice button
     setChoiceResult(isCorrect ? "correct" : "incorrect");
@@ -2783,7 +2786,7 @@ function StudyContent() {
             word,
             score: isCorrect ? 4 : 1,
             review_mode: `word-${currentItem.review_task_type}`,
-            response_text: choice,
+            response_text: selectedChoice,
             error_type: isCorrect ? undefined : "meaning",
             // Real elapsed time, not 0. See the comment in
             // recordWordMemoryReview above.
@@ -2870,8 +2873,8 @@ function StudyContent() {
 	      const isEnter = event.key === "Enter";
 			      // Detect number keys from BOTH main keyboard AND numeric keypad
 			      const digitMatch = /^(Digit|Numpad)([1-6])$/.exec(event.code);
-			      const isDigit = (event.key >= "1" && event.key <= "6") || digitMatch !== null;
-			      const digitFromKey = digitMatch ? parseInt(digitMatch[2], 10) : parseInt(event.key, 10);
+			      const isDigit = digitMatch !== null || (event.key >= "1" && event.key <= "6");
+			      const digitIdx = digitMatch ? parseInt(digitMatch[2], 10) - 1 : (parseInt(event.key, 10) || 0) - 1;
 		      if (!isSpace && !isEnter && !isDigit) {
 	        return;
 	      }
@@ -2884,13 +2887,12 @@ function StudyContent() {
 		      // Number keys 1-6: select choice (choice review tasks in typing state)
 		      if (isDigit && isChoiceTask && currentState === "typing") {
 		        event.preventDefault();
-		        const digitIdx = digitFromKey - 1;
+		        // digitIdx computed from event.code above
 		        const choiceItems = choiceOptionsRef.current;
 		        if (choiceItems && digitIdx < choiceItems.length) {
 		          setSelectedChoice(choiceItems[digitIdx]);
 		          setFeedback(null);
 
-		          void confirmChoiceSelection(choiceItems[digitIdx]);
 		        }
 		        return;
 		      }
@@ -2900,7 +2902,7 @@ function StudyContent() {
 		      // Number keys 1-6: select meaning quiz option in mistake practice
 		      if (isDigit && currentState === "mistake-meaning-quiz") {
 		        event.preventDefault();
-		        const digitIdx = digitFromKey - 1;
+		        // digitIdx computed from event.code above
 		        if (digitIdx >= 0 && digitIdx < mistakeMeaningQuizOptionsRef.current.length && mistakeMeaningQuizSelectedRef.current === null) {
 		          handleMistakeMeaningChoice(mistakeMeaningQuizOptionsRef.current[digitIdx]);
 		        }
