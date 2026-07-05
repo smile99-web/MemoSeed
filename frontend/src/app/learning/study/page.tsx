@@ -449,28 +449,29 @@ function StudyContent() {
   const [mistakeMeaningQuizSelected, setMistakeMeaningQuizSelected] = useState<string | null>(null);
   const [mistakeMeaningQuizCorrect, setMistakeMeaningQuizCorrect] = useState<string>("");
   const buildMeaningQuizOptions = useCallback(function buildMeaningQuizOptions(correctTranslation: string): string[] {
-    // Pool of child-friendly Chinese words as distractors. When the
-    // correct answer is also in this pool it's removed. The pool size
-    // is kept small and friendly — no 成语 or 高级词汇 that the child
-    // would never have seen.
+    // Reuse the same 6-option pattern as the existing choice-review
+    // tasks (see choiceReviewOptions memo above). The pool of
+    // child-friendly Chinese distractors mirrors the frontend fallback
+    // used for english_to_chinese / listen_choose_chinese tasks.
     const distractorPool = [
-      "猫", "狗", "鱼", "鸟", "花", "树", "草",
-      "苹果", "香蕉", "面包", "米饭", "牛奶", "水", "果汁",
+      "老师", "学生", "学校", "书", "朋友",
+      "猫", "狗", "鱼", "鸟", "花", "树",
+      "苹果", "香蕉", "面包", "米饭", "牛奶", "水",
       "红色", "蓝色", "绿色", "黄色", "白色", "黑色",
-      "大", "小", "高", "矮", "快", "慢",
-      "爸爸", "妈妈", "姐姐", "哥哥", "老师", "同学",
-      "学校", "家", "公园", "商店", "医院",
-      "书", "笔", "桌子", "椅子", "门", "窗",
-      "唱歌", "跳舞", "跑步", "游泳", "画画", "读书",
+      "大", "小", "高", "快", "慢",
+      "爸爸", "妈妈", "姐姐", "哥哥", "同学",
+      "家", "公园", "商店", "医院",
+      "桌子", "椅子", "门", "窗",
+      "唱歌", "跳舞", "跑步", "游泳",
       "昨天", "今天", "明天", "早上", "晚上",
     ].filter((w) => w !== correctTranslation);
-    // Fisher-Yates shuffle then take 3
+    // Fisher-Yates shuffle then take 5 distractors
     for (let i = distractorPool.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [distractorPool[i], distractorPool[j]] = [distractorPool[j], distractorPool[i]];
     }
-    const options = [correctTranslation, ...distractorPool.slice(0, 3)];
-    // Shuffle the final 4 so the correct answer isn't always option #1
+    const options = [correctTranslation, ...distractorPool.slice(0, 5)];
+    // Shuffle the final 6 so the correct answer isn't always option #1
     for (let i = options.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [options[i], options[j]] = [options[j], options[i]];
@@ -532,6 +533,12 @@ function StudyContent() {
   const [isStudyFullscreen, setIsStudyFullscreen] = useState(false);
   const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
   const mistakePracticeInputRef = useRef<HTMLInputElement | null>(null);
+  // Refs for meaning-quiz state, synced in useEffect — avoids stale
+  // closure in the window keydown handler.
+  const mistakeMeaningQuizOptionsRef = useRef<string[]>([]);
+  const mistakeMeaningQuizSelectedRef = useRef<string | null>(null);
+  useEffect(() => { mistakeMeaningQuizOptionsRef.current = mistakeMeaningQuizOptions; }, [mistakeMeaningQuizOptions]);
+  useEffect(() => { mistakeMeaningQuizSelectedRef.current = mistakeMeaningQuizSelected; }, [mistakeMeaningQuizSelected]);
   const activeStudyMsRef = useRef(0);
   const pendingStudyMsRef = useRef(0);
   const courseRunStartedActiveMsRef = useRef(0);
@@ -2849,6 +2856,17 @@ function StudyContent() {
 		      }
 
 
+
+		      // Number keys 1-6: select meaning quiz option in mistake practice
+		      if (isDigit && currentState === "mistake-meaning-quiz") {
+		        event.preventDefault();
+		        const digitIdx = parseInt(event.key, 10) - 1;
+		        if (digitIdx >= 0 && digitIdx < mistakeMeaningQuizOptionsRef.current.length && mistakeMeaningQuizSelectedRef.current === null) {
+		          handleMistakeMeaningChoice(mistakeMeaningQuizOptionsRef.current[digitIdx]);
+		        }
+		        return;
+		      }
+
 	      // Space: confirm choice selection
 	      if (isSpace && isChoiceTask && currentState === "typing") {
 	        event.preventDefault();
@@ -3220,41 +3238,30 @@ function StudyContent() {
                 </div>
               ) : answerState === "mistake-meaning-quiz" ? (
                 <div className="mx-auto flex max-w-md flex-col items-center gap-4">
-                  <p className="text-sm font-bold text-muted-foreground">
-                    {currentMistakePracticeWord} 的中文意思是？
-                  </p>
-                  <div className="grid w-full grid-cols-2 gap-3">
-                    {mistakeMeaningQuizOptions.map((option) => {
+                  <p className="text-sm font-medium text-slate-500 ipad:text-base">按数字键 1-6 选择中文意思</p>
+                  <div className="grid w-full max-w-md grid-cols-2 gap-3">
+                    {mistakeMeaningQuizOptions.map((option, index) => {
                       const isSelected = option === mistakeMeaningQuizSelected;
                       const showCorrect = mistakeMeaningQuizSelected !== null && option === mistakeMeaningQuizCorrect;
                       const isWrongSelected = isSelected && option !== mistakeMeaningQuizCorrect;
-                      let cls = "border-slate-200 bg-white hover:border-primary/50";
-                      if (showCorrect && mistakeMeaningQuizSelected !== null) {
-                        cls = "border-emerald-500 bg-emerald-50 text-emerald-700";
-                      }
-                      if (isWrongSelected) {
-                        cls = "border-red-500 bg-red-50 text-red-700";
-                      }
                       return (
-                        <button
+                        <Button
                           key={option}
                           type="button"
                           disabled={mistakeMeaningQuizSelected !== null}
-                          className={`rounded-lg border-2 px-4 py-3 text-lg font-semibold transition-colors ${cls}`}
+                          className={`justify-center px-3 py-3 text-sm font-bold ipad:text-base transition-colors ${
+                            showCorrect ? "border-2 border-emerald-500 bg-emerald-100 text-emerald-800 shadow-sm" : ""
+                          } ${
+                            isWrongSelected ? "border-2 border-red-500 bg-red-100 text-red-800 shadow-sm" : ""
+                          }`}
+                          variant={showCorrect ? "default" : "outline"}
                           onClick={() => handleMistakeMeaningChoice(option)}
                         >
-                          {option}
-                        </button>
+                          {showCorrect ? "✓ " : isWrongSelected ? "✗ " : ""}{index + 1}. {option}
+                        </Button>
                       );
                     })}
                   </div>
-                  {mistakeMeaningQuizSelected !== null ? (
-                    <p className={`text-sm font-bold ${mistakeMeaningQuizSelected === mistakeMeaningQuizCorrect ? "text-emerald-600" : "text-red-600"}`}>
-                      {mistakeMeaningQuizSelected === mistakeMeaningQuizCorrect
-                        ? "✅ 正确！"
-                        : `❌ 正确意思是「${mistakeMeaningQuizCorrect}」`}
-                    </p>
-                  ) : null}
                 </div>
               ) : (
                 <div className={isStudyFullscreen ? "flex flex-wrap items-end justify-center gap-x-5 gap-y-7 ipad:gap-x-7 ipad:gap-y-8 ipad-lg:gap-x-8 ipad-lg:gap-y-10" : "flex flex-wrap items-end justify-center gap-x-4 gap-y-5 ipad:gap-x-4 ipad:gap-y-5 ipad-lg:gap-x-5 ipad-lg:gap-y-6"}>
