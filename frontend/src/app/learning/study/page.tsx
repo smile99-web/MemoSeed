@@ -93,7 +93,7 @@ function isCorrectChoiceAnswer(choice: string, answer: string | null | undefined
   return Boolean(normalizedChoice && normalizedAnswer && normalizedChoice === normalizedAnswer);
 }
 
-type AnswerState = "typing" | "mistake-word-practice" | "word-meaning-review" | "sentence-complete";
+type AnswerState = "typing" | "mistake-word-practice" | "mistake-meaning-quiz" | "word-meaning-review" | "sentence-complete";
 type EncodingStage = "meaning_intro" | "listen" | "chunk_trace" | "whole_recall";
 type WordStatus = "idle" | "correct" | "incorrect" | "skipped";
 type MistakePracticeStatus = "idle" | "incorrect";
@@ -441,6 +441,42 @@ function StudyContent() {
   const [mistakePracticeErrorCount, setMistakePracticeErrorCount] = useState(0);
   const [wordConsecutiveCorrect, setWordConsecutiveCorrect] = useState<number[]>([]);
   const [mistakePracticeConsecutiveCorrect, setMistakePracticeConsecutiveCorrect] = useState(0);
+  const MISTAKE_PRACTICE_REQUIRED_CONSECUTIVE = 3;
+  // Meaning-quiz sub-state: after the child spells the same word correctly
+  // 3 times in a row, we show a Chinese-meaning multiple-choice question
+  // for that word before advancing to the next one.
+  const [mistakeMeaningQuizOptions, setMistakeMeaningQuizOptions] = useState<string[]>([]);
+  const [mistakeMeaningQuizSelected, setMistakeMeaningQuizSelected] = useState<string | null>(null);
+  const [mistakeMeaningQuizCorrect, setMistakeMeaningQuizCorrect] = useState<string>("");
+  const buildMeaningQuizOptions = useCallback(function buildMeaningQuizOptions(correctTranslation: string): string[] {
+    // Pool of child-friendly Chinese words as distractors. When the
+    // correct answer is also in this pool it's removed. The pool size
+    // is kept small and friendly — no 成语 or 高级词汇 that the child
+    // would never have seen.
+    const distractorPool = [
+      "猫", "狗", "鱼", "鸟", "花", "树", "草",
+      "苹果", "香蕉", "面包", "米饭", "牛奶", "水", "果汁",
+      "红色", "蓝色", "绿色", "黄色", "白色", "黑色",
+      "大", "小", "高", "矮", "快", "慢",
+      "爸爸", "妈妈", "姐姐", "哥哥", "老师", "同学",
+      "学校", "家", "公园", "商店", "医院",
+      "书", "笔", "桌子", "椅子", "门", "窗",
+      "唱歌", "跳舞", "跑步", "游泳", "画画", "读书",
+      "昨天", "今天", "明天", "早上", "晚上",
+    ].filter((w) => w !== correctTranslation);
+    // Fisher-Yates shuffle then take 3
+    for (let i = distractorPool.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [distractorPool[i], distractorPool[j]] = [distractorPool[j], distractorPool[i]];
+    }
+    const options = [correctTranslation, ...distractorPool.slice(0, 3)];
+    // Shuffle the final 4 so the correct answer isn't always option #1
+    for (let i = options.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [options[i], options[j]] = [options[j], options[i]];
+    }
+    return options;
+  }, []);
   const [mistakePracticeTranslations, setMistakePracticeTranslations] = useState<Record<string, string>>({});
   const [sentenceWordMeanings, setSentenceWordMeanings] = useState<Record<number, string>>({});
   const [reviewTaskWordTranslation, setReviewTaskWordTranslation] = useState("");
@@ -2531,10 +2567,11 @@ function StudyContent() {
 
     const isCorrect = normalizedAnswer === normalizeTypedWord(expectedWord);
     if (!isCorrect) {
+      // Reset progress — the child must get 3 consecutive correct.
+      setMistakePracticeConsecutiveCorrect(0);
       const nextErrorCount = mistakePracticeErrorCount + 1;
       const errorType = classifySpellingError(expectedWord, mistakePracticeAnswer);
       setMistakePracticeErrorCount(nextErrorCount);
-      setMistakePracticeConsecutiveCorrect(0);
       setMistakePracticeStatus("incorrect");
       setMistakePracticeAnswer("");
       const accessToken = getAccessToken();
@@ -2560,22 +2597,67 @@ function StudyContent() {
       return;
     }
 
-    if (mistakePracticeErrorCount >= 3) {
-      const nextConsecutive = mistakePracticeConsecutiveCorrect + 1;
+    // --- Correct spelling ---
+    recordSuccessfulWordSpelling(expectedWord, mistakePracticeAnswer, mistakePracticeErrorCount, false, true);
+    setMistakePracticeAnswer("");
+    setMistakePracticeStatus("idle");
+    setChildHint(null);
+
+    const nextConsecutive = mistakePracticeConsecutiveCorrect + 1;
+    if (nextConsecutive < MISTAKE_PRACTICE_REQUIRED_CONSECUTIVE) {
+      // Still need more repetitions — show progress and keep practicing
       setMistakePracticeConsecutiveCorrect(nextConsecutive);
-
-      if (nextConsecutive < 1) {
-        // One confirmation is enough in mistake practice too
-        return;
-      }
-
-      setFeedback("正确！做得好！", "success");
-
-      setMistakePracticeConsecutiveCorrect(0);
+      setFeedback(
+        `✓ ${expectedWord} 正确！还需再正确拼写 ${MISTAKE_PRACTICE_REQUIRED_CONSECUTIVE - nextConsecutive} 次。`,
+        "success",
+      );
+      window.setTimeout(() => mistakePracticeInputRef.current?.focus(), 0);
+      return;
     }
 
-    recordSuccessfulWordSpelling(expectedWord, mistakePracticeAnswer, mistakePracticeErrorCount, mistakePracticeErrorCount >= 3, true);
+    // All MISTAKE_PRACTICE_REQUIRED_CONSECUTIVE repetitions complete.
+    // Reset the consecutive counter and transition to the meaning quiz.
+    setMistakePracticeConsecutiveCorrect(0);
+    recordSuccessfulWordSpelling(expectedWord, mistakePracticeAnswer, mistakePracticeErrorCount, true, true);
 
+    // Build the meaning-quiz options using the child-friendly distractor pool
+    const correctMeaning = currentMistakePracticeTranslation || expectedWord;
+    const quizOptions = buildMeaningQuizOptions(correctMeaning);
+    setMistakeMeaningQuizOptions(quizOptions);
+    setMistakeMeaningQuizCorrect(correctMeaning);
+    setMistakeMeaningQuizSelected(null);
+    updateAnswerState("mistake-meaning-quiz");
+    setFeedback(
+      `很好！选择 ${expectedWord} 的中文意思：`,
+      "success",
+    );
+    window.setTimeout(() => mistakePracticeInputRef.current?.focus(), 0);
+  }
+
+  /** Handle the meaning-quiz multiple-choice selection. */
+  function handleMistakeMeaningChoice(selectedOption: string) {
+    setMistakeMeaningQuizSelected(selectedOption);
+    const isCorrect = selectedOption === mistakeMeaningQuizCorrect;
+    const expectedWord = mistakePracticeWords[mistakePracticeIndex] || "";
+
+    if (!isCorrect) {
+      // Wrong meaning — go back to spelling. Reset consecutive counter
+      // so the child must re-earn the 3 correct spellings before the
+      // meaning quiz is shown again.
+      setMistakePracticeConsecutiveCorrect(0);
+      setMistakePracticeErrorCount(0);
+      setMistakePracticeAnswer("");
+      setMistakePracticeStatus("idle");
+      updateAnswerState("mistake-word-practice");
+      setFeedback(
+        `中文意思不对哦。${expectedWord} 的正确意思是「${mistakeMeaningQuizCorrect}」。请重新拼写 ${expectedWord}。`,
+        "error",
+      );
+      window.setTimeout(() => mistakePracticeInputRef.current?.focus(), 0);
+      return;
+    }
+
+    // Correct meaning — advance to the next word.
     const nextIndex = mistakePracticeIndex + 1;
     if (currentItem) {
       markCorrectWord(currentItem, expectedWord, `mistake-${normalizeEnglishKey(expectedWord)}`);
@@ -2588,14 +2670,17 @@ function StudyContent() {
       setMistakePracticeErrorCount(0);
       setMistakePracticeConsecutiveCorrect(0);
       clearMistakePracticePreview();
-      setFeedback("正确。继续拼写下一个错词。", "success");
+      updateAnswerState("mistake-word-practice");
+      setFeedback("正确！继续拼写下一个错词。", "success");
       const nextTranslation = mistakePracticeTranslations[nextWord];
       if (nextTranslation) {
-        await playChineseThenEnglish(nextTranslation, nextWord);
+        void playChineseThenEnglish(nextTranslation, nextWord);
       }
       return;
     }
 
+    // All mistake words practiced — back to sentence context for final
+    // respell, then advance to the next sentence.
     setMistakePracticeWords([]);
     setMistakePracticeAnswer("");
     setMistakePracticeStatus("idle");
@@ -2724,9 +2809,12 @@ function StudyContent() {
     setMistakePracticeStatus("idle");
     setMistakePracticeErrorCount(0);
     setMistakePracticeConsecutiveCorrect(0);
+    setMistakeMeaningQuizOptions([]);
+    setMistakeMeaningQuizSelected(null);
+    setMistakeMeaningQuizCorrect("");
     clearMistakePracticePreview();
     updateAnswerState("mistake-word-practice");
-    setFeedback("现在进入错词单独拼写。");
+    setFeedback("现在进入错词单独拼写（每词需连续正确 3 次后完成中文意思选择）。");
     const firstTranslation = practiceTranslations[words[0]];
     if (firstTranslation) {
       await playChineseThenEnglish(firstTranslation, words[0]);
@@ -3097,7 +3185,10 @@ function StudyContent() {
                   {!isStudyFullscreen ? (
                     <div className="space-y-1 ipad:space-y-2">
                       <p className="text-base font-bold text-muted-foreground ipad:text-base ipad-lg:text-lg">错词单独拼写 {mistakePracticeIndex + 1} / {mistakePracticeWords.length}</p>
-                      <p className="text-sm font-bold text-muted-foreground ipad:text-sm ipad-lg:text-base">根据中文拼写正确英文</p>
+                      <p className="text-sm font-bold text-muted-foreground ipad:text-sm ipad-lg:text-base">根据中文拼写正确英文（需连续正确 {MISTAKE_PRACTICE_REQUIRED_CONSECUTIVE} 次）</p>
+                      {mistakePracticeConsecutiveCorrect > 0 ? (
+                        <p className="text-sm font-bold text-emerald-600">✅ 已连续正确 {mistakePracticeConsecutiveCorrect}/{MISTAKE_PRACTICE_REQUIRED_CONSECUTIVE} 次</p>
+                      ) : null}
                       <p className="text-2xl font-bold text-slate-900 ipad:text-2xl ipad-lg:text-3xl">{currentMistakePracticeTranslation || "中文提示准备中"}</p>
                     </div>
                   ) : null}
@@ -3126,6 +3217,44 @@ function StudyContent() {
                   {!isStudyFullscreen ? <p className="text-base font-bold text-muted-foreground ipad:text-base ipad-lg:text-lg">
                     {device.isIPad ? "⌨ 空格/回车判定 · 不显示完整答案" : "按空格或回车判定，多次错误会逐级提示，但不直接显示完整答案。"}
                   </p> : null}
+                </div>
+              ) : answerState === "mistake-meaning-quiz" ? (
+                <div className="mx-auto flex max-w-md flex-col items-center gap-4">
+                  <p className="text-sm font-bold text-muted-foreground">
+                    {currentMistakePracticeWord} 的中文意思是？
+                  </p>
+                  <div className="grid w-full grid-cols-2 gap-3">
+                    {mistakeMeaningQuizOptions.map((option) => {
+                      const isSelected = option === mistakeMeaningQuizSelected;
+                      const showCorrect = mistakeMeaningQuizSelected !== null && option === mistakeMeaningQuizCorrect;
+                      const isWrongSelected = isSelected && option !== mistakeMeaningQuizCorrect;
+                      let cls = "border-slate-200 bg-white hover:border-primary/50";
+                      if (showCorrect && mistakeMeaningQuizSelected !== null) {
+                        cls = "border-emerald-500 bg-emerald-50 text-emerald-700";
+                      }
+                      if (isWrongSelected) {
+                        cls = "border-red-500 bg-red-50 text-red-700";
+                      }
+                      return (
+                        <button
+                          key={option}
+                          type="button"
+                          disabled={mistakeMeaningQuizSelected !== null}
+                          className={`rounded-lg border-2 px-4 py-3 text-lg font-semibold transition-colors ${cls}`}
+                          onClick={() => handleMistakeMeaningChoice(option)}
+                        >
+                          {option}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {mistakeMeaningQuizSelected !== null ? (
+                    <p className={`text-sm font-bold ${mistakeMeaningQuizSelected === mistakeMeaningQuizCorrect ? "text-emerald-600" : "text-red-600"}`}>
+                      {mistakeMeaningQuizSelected === mistakeMeaningQuizCorrect
+                        ? "✅ 正确！"
+                        : `❌ 正确意思是「${mistakeMeaningQuizCorrect}」`}
+                    </p>
+                  ) : null}
                 </div>
               ) : (
                 <div className={isStudyFullscreen ? "flex flex-wrap items-end justify-center gap-x-5 gap-y-7 ipad:gap-x-7 ipad:gap-y-8 ipad-lg:gap-x-8 ipad-lg:gap-y-10" : "flex flex-wrap items-end justify-center gap-x-4 gap-y-5 ipad:gap-x-4 ipad:gap-y-5 ipad-lg:gap-x-5 ipad-lg:gap-y-6"}>
