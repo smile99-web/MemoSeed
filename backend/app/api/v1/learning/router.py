@@ -794,11 +794,18 @@ def list_due_review_items(
     # Sort by priority: highest-risk cross-course items first
     sentence_review_items.sort(key=lambda it: -item_priority.get(it.id, 0.0))
 
-    if focus and sentence_review_items:
-        # Focus mode: top 7-9 words, warm-up order, phonics grouping.
-        FOCUS_WORD_COUNT = 3   # small batch = quick wins for the child
+    if sentence_review_items:
+        # Multi-mode review: for each due word, generate 3 question types
+        # (listen_choose_chinese, english_to_chinese, chinese_to_english)
+        # so the child gets a mix of recognition and spelling practice.
+        # In focus mode (small batch), cap at 3 words; in normal mode cap
+        # at 10 words — enough to give variety without overwhelming the
+        # session. Previously this was gated by `if focus and ...` so the
+        # word review mode had NO choice tasks when focus was off, leaving
+        # only pure-spelling items from the WordReviewTask table.
+        REVIEW_WORD_COUNT = 3 if focus else 10
         import random
-        pool = sentence_review_items[:max(FOCUS_WORD_COUNT * 3, len(sentence_review_items))]
+        pool = sentence_review_items[:max(REVIEW_WORD_COUNT * 3, len(sentence_review_items))]
         random.shuffle(pool)
         sentence_review_items = pool + sentence_review_items[len(pool):]
         # Mixed mode set: 2 recognition tasks first (build confidence),
@@ -822,7 +829,7 @@ def list_due_review_items(
             return float(ms_item.memory_strength or 0.0) if ms_item and hasattr(ms_item, 'memory_strength') else 0.0
         sentence_review_items.sort(key=_item_strength, reverse=True)
 
-        top_items = sentence_review_items[:FOCUS_WORD_COUNT]
+        top_items = sentence_review_items[:REVIEW_WORD_COUNT]
 
         # P1-1: Phonics grouping — bring in pattern-siblings
         seen_patterns: set[str] = set()
@@ -832,7 +839,7 @@ def list_due_review_items(
                 group = _get_phonics_group(w)
                 if group and group not in seen_patterns:
                     seen_patterns.add(group)
-                    for sibling in sentence_review_items[FOCUS_WORD_COUNT:]:
+                    for sibling in sentence_review_items[REVIEW_WORD_COUNT:]:
                         if sibling.id in {i.id for i in top_items}:
                             continue
                         for sw in tokenize_words(sibling.english_text):
@@ -841,7 +848,7 @@ def list_due_review_items(
                                 break
                         if len(extra_items) >= 3:
                             break
-        top_items = (top_items + extra_items)[:FOCUS_WORD_COUNT + 2]
+        top_items = (top_items + extra_items)[:REVIEW_WORD_COUNT + 2]
 
         # P1-3: Pre-cache Chinese translations for all focus words.
         # Children need Chinese context to understand what they're spelling.
@@ -905,23 +912,21 @@ def list_due_review_items(
                     updated_at=item.updated_at,
                 )
                 focus_items.append(focus_item)
-        # Push the served focus items to tomorrow — but ONLY if
-        # they haven't already been pushed further by a park
-        # function. Without this guard, park_mastered_words
-        # (sets +30d) would be immediately overwritten by
-        # the focus push (sets +1d), pulling mastered words
-        # back into the queue tomorrow after just one session.
-        tomorrow = now + timedelta(days=1)
-        for item in top_items:
-            db.execute(
-                update(MemoryState)
-                .where(
-                    MemoryState.learning_item_id == item.id,
-                    MemoryState.next_review_at < tomorrow,  # ← don't overwrite park
+        # Focus-mode only: push served items to tomorrow so they don't
+        # re-appear in the next session. In non-focus mode, items stay
+        # on their natural FSRS schedule (no artificial push).
+        if focus:
+            tomorrow = now + timedelta(days=1)
+            for item in top_items:
+                db.execute(
+                    update(MemoryState)
+                    .where(
+                        MemoryState.learning_item_id == item.id,
+                        MemoryState.next_review_at < tomorrow,  # ← don't overwrite park
+                    )
+                    .values(next_review_at=tomorrow)
                 )
-                .values(next_review_at=tomorrow)
-            )
-        db.commit()
+            db.commit()
         # Sentences first (discover new weak words), then word-only
         # review (practice already-discovered words). Each word that
         # appears in the word review section is excluded from the
