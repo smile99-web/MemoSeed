@@ -1599,10 +1599,40 @@ function StudyContent() {
           ).catch(() => [] as LearningItem[]);
           mergedItems = dueReviewItems;
         } else if (studyMode === "learn") {
-          // Pure new-content learning: only the selected course's items, excluding review tasks.
+          // Pure new-content learning: only the selected course's items,
+          // excluding review tasks from the backend (micro-review items).
+          // Then prepend an english_to_chinese choice question for each
+          // new word so the child sees the Chinese meaning FIRST before
+          // attempting to spell — recognition before recall.
           nextItems = await listLearningItems(accessToken, courseId).catch(() => [] as LearningItem[]);
-          // Review tasks carry a review_task_type; new course content doesn't.
-          mergedItems = nextItems.filter((item) => !item.review_task_type);
+          const plainItems = nextItems.filter((item) => !item.review_task_type);
+          const choiceItems: LearningItem[] = [];
+          const seenWords = new Set<string>();
+          for (const item of plainItems) {
+            if (item.item_type !== "word") continue;
+            const word = (item.english_text || "").trim().toLowerCase();
+            if (!word || seenWords.has(word)) continue;
+            seenWords.add(word);
+            choiceItems.push({
+              ...item,
+              id: `choice-${item.id}`,
+              review_task_type: "english_to_chinese",
+              chinese_text: item.chinese_text || word,
+            } as LearningItem);
+          }
+          // Interleave: one choice question → one spelling question,
+          // so each word gets recognition (pick Chinese) then recall (spell)
+          const interspersed: LearningItem[] = [];
+          const maxLen = Math.max(choiceItems.length, plainItems.filter((it) => it.item_type === "word").length);
+          let ci = 0;
+          for (let i = 0; i < plainItems.length; i++) {
+            if (plainItems[i].item_type === "word" && ci < choiceItems.length) {
+              interspersed.push(choiceItems[ci]);
+              ci++;
+            }
+            interspersed.push(plainItems[i]);
+          }
+          mergedItems = interspersed;
         } else {
           // Default mixed behavior: review + new content interleaved.
           nextItems = await listLearningItems(accessToken, courseId).catch(() => [] as LearningItem[]);
