@@ -578,6 +578,10 @@ def list_learning_items(
             choices, correct_answer = _enrich_choices_for_word(
                 db, current_user.id, normalized, item, cloze_settings
             )
+            # Skip if no Chinese translation could be found
+            if not choices or not correct_answer:
+                enriched.append(LearningItemRead.model_validate(item))
+                continue
             choice_item = LearningItemRead(
                 id=uuid4(),
                 user_id=current_user.id,
@@ -624,7 +628,7 @@ def _enrich_choices_for_word(
     """
     from sqlalchemy import func as sa_func, select as sa_select
 
-    # Step 1: correct answer from WordTranslation or BASIC_WORD_TRANSLATIONS
+    # Step 1: correct answer from WordTranslation → BASIC_WORD_TRANSLATIONS → item.chinese_text
     try:
         cached = get_cached_word_translations(db, user_id, [normalized_word])
     except ProgrammingError:
@@ -632,11 +636,14 @@ def _enrich_choices_for_word(
         cached = {}
     correct_answer = sanitize_word_choice(
         cached.get(normalized_word, "")
-        or learning_item.chinese_text
-        or ""
+        or BASIC_WORD_TRANSLATIONS.get(normalized_word, "")
+        or (learning_item.chinese_text or "")
     )
-    if not correct_answer:
-        correct_answer = normalized_word
+    # If no Chinese translation can be found anywhere, skip this choice
+    # item entirely — showing the English word as the answer is
+    # confusing and defeats the purpose of the choice exercise.
+    if not correct_answer or correct_answer == normalized_word:
+        return [], ""
 
     rebuilt: list[str] = [correct_answer]
 
