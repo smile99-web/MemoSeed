@@ -1608,7 +1608,10 @@ function StudyContent() {
           // a fixed pool. No frontend choice generation needed.
           // Fetch course items with include_choices=true — the backend
           // generates english_to_chinese items with DB-random distractors
-          // prepended before each word-type item. No frontend fallback pool needed.
+          // prepended before each word-type item. Filter out sentence and
+          // phrase items: learn mode focuses on individual words, not
+          // full sentences. The parent chose this course to learn new
+          // words, not to re-read sentences they already know.
           const choiceParams = new URLSearchParams({ course_id: courseId, include_choices: "true" });
           const response = await fetchWithAuth(
             `${getApiBaseUrl()}/learning/items?${choiceParams.toString()}`,
@@ -1618,7 +1621,8 @@ function StudyContent() {
           if (!response.ok) {
             throw new Error(await parseApiError(response));
           }
-          mergedItems = (await response.json()) as LearningItem[];
+          const allItems = (await response.json()) as LearningItem[];
+          mergedItems = allItems.filter((item) => item.item_type === "word");
         } else {
           // Default mixed behavior: review + new content interleaved.
           nextItems = await listLearningItems(accessToken, courseId).catch(() => [] as LearningItem[]);
