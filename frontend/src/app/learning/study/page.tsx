@@ -2752,15 +2752,24 @@ function StudyContent() {
     window.setTimeout(() => inputRefs.current[firstRespellIdx]?.focus(), 0);
   }
 
-  const confirmChoiceSelection = useCallback(async function confirmChoiceSelection() {
-    if (!currentItem || !isChoiceReviewTask || !selectedChoice) {
+  const confirmChoiceSelection = useCallback(async function confirmChoiceSelection(explicitChoice?: string) {
+    const choice = explicitChoice ?? selectedChoice;
+    if (!currentItem || !isChoiceReviewTask || !choice) {
       return;
     }
     const correctAnswer = hasChineseText(currentItem.review_answer) ? currentItem.review_answer : reviewTaskWordTranslation;
-    const isCorrect = isCorrectChoiceAnswer(selectedChoice, correctAnswer);
+    const isCorrect = isCorrectChoiceAnswer(choice, correctAnswer);
     const accessToken = getAccessToken();
     const learningItemId = getSourceLearningItemId(currentItem);
     const word = currentWords[0] ?? "";
+
+    // Ensure selectedChoice state reflects the actual choice for visual
+    // feedback (choice button highlighting). When called from the
+    // number-key handler with an explicitChoice, selectedChoice state
+    // hasn't been set yet — we set it here before the result render.
+    if (explicitChoice) {
+      setSelectedChoice(explicitChoice);
+    }
 
     // Visual feedback: show correct/incorrect on the choice button
     setChoiceResult(isCorrect ? "correct" : "incorrect");
@@ -2774,7 +2783,7 @@ function StudyContent() {
             word,
             score: isCorrect ? 4 : 1,
             review_mode: `word-${currentItem.review_task_type}`,
-            response_text: selectedChoice,
+            response_text: choice,
             error_type: isCorrect ? undefined : "meaning",
             // Real elapsed time, not 0. See the comment in
             // recordWordMemoryReview above.
@@ -2877,6 +2886,8 @@ function StudyContent() {
 		        if (choiceItems && digitIdx < choiceItems.length) {
 		          setSelectedChoice(choiceItems[digitIdx]);
 		          setFeedback(null);
+
+		          void confirmChoiceSelection(choiceItems[digitIdx]);
 		        }
 		        return;
 		      }
@@ -3214,7 +3225,7 @@ function StudyContent() {
                           }`}
                           disabled={hasResult || answerState !== "typing" }
                           key={`${choice}-${index}`}
-                          onClick={() => { if (answerState === "typing" && !hasResult) { setSelectedChoice(choice); setFeedback(null); } }}
+                          onClick={() => { if (answerState === "typing" && !hasResult) { setSelectedChoice(choice); setFeedback(null); void confirmChoiceSelection(choice); } }}
                           type="button"
                           variant={showCorrect || (!hasResult && isSelected) ? "default" : "outline"}
                         >
