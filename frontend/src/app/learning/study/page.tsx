@@ -1622,7 +1622,13 @@ function StudyContent() {
             throw new Error(await parseApiError(response));
           }
           const allItems = (await response.json()) as LearningItem[];
-          mergedItems = allItems.filter((item) => item.item_type === "word");
+          // Keep all items: word choices (english_to_chinese), word spellings,
+          // sentences, and phrases. The backend interleaves them naturally —
+          // choice→word→choice→word→...→sentence→next sentence's words.
+          // The flow: pick Chinese meaning → spell English → pick Chinese for
+          // next word → spell → ... → when all words in a sentence are done,
+          // the full sentence spelling appears as the final consolidation step.
+          mergedItems = allItems;
         } else {
           // Default mixed behavior: review + new content interleaved.
           nextItems = await listLearningItems(accessToken, courseId).catch(() => [] as LearningItem[]);
