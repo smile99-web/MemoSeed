@@ -455,6 +455,8 @@ export default function DashboardPage() {
   const [pointsSummary, setPointsSummary] = useState<PointsSummary | null>(null);
   const [reviewAdvice, setReviewAdvice] = useState<ReviewAdvice | null>(null);
   const [isGeneratingAdvice, setIsGeneratingAdvice] = useState(false);
+  const [adviceError, setAdviceError] = useState<string | null>(null);
+  const [adviceDone, setAdviceDone] = useState(false);
   const [todayProgress, setTodayProgress] = useState<TodayProgress | null>(null);
   const [errorBreakdown, setErrorBreakdown] = useState<ErrorBreakdown | null>(null);
   const [studyStreak, setStudyStreak] = useState<StudyStreak | null>(null);
@@ -1058,7 +1060,7 @@ export default function DashboardPage() {
                       <CardTitle>🤖 AI 复习建议</CardTitle>
                       <CardDescription>{reviewAdvice?.reasoning || "基于最近7天学习数据生成的个性化复习建议。"}</CardDescription>
                     </div>
-                    <Button size="sm" variant="outline" onClick={async () => { setIsGeneratingAdvice(true); try { setReviewAdvice(await generateReviewAdvice(getAccessToken()!)); } catch {} finally { setIsGeneratingAdvice(false); } }} disabled={isGeneratingAdvice}>{isGeneratingAdvice ? "生成中..." : "重新分析"}</Button>
+                    <Button size="sm" variant="outline" onClick={async () => { setIsGeneratingAdvice(true); setAdviceError(null); setAdviceDone(false); try { const result = await generateReviewAdvice(getAccessToken()!); setReviewAdvice(result); setAdviceDone(true); setTimeout(() => setAdviceDone(false), 3000); } catch (err) { setAdviceError(err instanceof Error ? err.message : "分析失败,请确认已配置 LLM 模型。"); } finally { setIsGeneratingAdvice(false); } }} disabled={isGeneratingAdvice}>{isGeneratingAdvice ? "生成中..." : "重新分析"}</Button>
                   </div>
                 </CardHeader>
                 <CardContent>
@@ -1076,6 +1078,12 @@ export default function DashboardPage() {
                   ) : (
                     <p className="text-sm text-muted-foreground">AI 暂未分析。点击上方「重新分析」按钮,AI 会基于最近7天学习数据推荐重点复习的单词。</p>
                   )}
+                  {adviceError ? (
+                    <p className="mt-2 text-sm text-red-600">❌ {adviceError}</p>
+                  ) : null}
+                  {adviceDone ? (
+                    <p className="mt-2 text-sm font-semibold text-emerald-600">✅ 分析完成!</p>
+                  ) : null}
                 </CardContent>
               </Card>
 
