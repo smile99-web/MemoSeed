@@ -17,7 +17,7 @@ import logging
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import Integer, func, select
 from sqlalchemy.orm import Session
 from zoneinfo import ZoneInfo
 
@@ -46,8 +46,8 @@ def _build_7day_profile(db: Session, user_id: UUID, now: datetime) -> dict[str, 
         select(
             ReviewLog.learning_item_id,
             func.count(ReviewLog.id).label("total"),
-            func.sum(func.cast(ReviewLog.is_correct, func.Integer)).label("correct"),
-            func.array_agg(ReviewLog.error_type.distinct()).label("error_types"),
+            func.sum(func.cast(ReviewLog.is_correct, Integer)).label("correct"),
+            func.array_agg(func.distinct(ReviewLog.error_type)).label("error_types"),
         )
         .where(
             ReviewLog.user_id == user_id,
@@ -83,7 +83,7 @@ def _build_7day_profile(db: Session, user_id: UUID, now: datetime) -> dict[str, 
     totals_row = db.execute(
         select(
             func.count(ReviewLog.id).label("total"),
-            func.sum(func.cast(ReviewLog.is_correct, func.Integer)).label("correct"),
+            func.sum(func.cast(ReviewLog.is_correct, Integer)).label("correct"),
         )
         .where(ReviewLog.user_id == user_id, ReviewLog.reviewed_at >= week_ago)
     ).one()
@@ -96,7 +96,7 @@ def _build_7day_profile(db: Session, user_id: UUID, now: datetime) -> dict[str, 
         select(
             ReviewLog.review_mode,
             func.count(ReviewLog.id).label("total"),
-            func.sum(func.cast(ReviewLog.is_correct, func.Integer)).label("correct"),
+            func.sum(func.cast(ReviewLog.is_correct, Integer)).label("correct"),
         )
         .where(ReviewLog.user_id == user_id, ReviewLog.reviewed_at >= week_ago)
         .group_by(ReviewLog.review_mode)
