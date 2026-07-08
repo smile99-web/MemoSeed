@@ -490,6 +490,7 @@ function StudyContent() {
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
   const [feedbackType, setFeedbackType] = useState<"success" | "error" | "info">("info");
   const [selectedChoice, setSelectedChoice] = useState<string | null>(null);
+  const selectedChoiceRef = useRef<string | null>(null);
   const [choiceResult, setChoiceResult] = useState<"correct" | "incorrect" | null>(null);
   const [childHint, setChildHint] = useState<ChildFriendlyHintData | null>(null);
   function setFeedback(message: string | null, type: "success" | "error" | "info" = "info") {
@@ -640,6 +641,11 @@ function StudyContent() {
   // The useEffect approach ran AFTER render — the first keypress
   // after an item change saw an empty array and was silently ignored.
   choiceOptionsRef.current = choiceReviewOptions;
+  // Mirror selectedChoice into a ref so the keydown handler can read
+  // the latest value without waiting for React to flush the state
+  // update. setSelectedChoice() is async — without this ref, the
+  // space handler sees the OLD value (null) and returns early.
+  selectedChoiceRef.current = selectedChoice;
 
   const reviewTaskInstruction = buildReviewTaskInstruction(currentItem?.review_task_type, currentFocusedReviewWord);
   const reviewTaskModeLabel = getReviewTaskModeLabel(currentItem?.review_task_type);
@@ -2758,7 +2764,10 @@ function StudyContent() {
   }
 
   const confirmChoiceSelection = useCallback(async function confirmChoiceSelection() {
-    const choice = selectedChoice;
+    // Read from ref (latest) NOT state (may be stale). Without the
+    // ref, the space-key handler reads the old null value because
+    // setSelectedChoice() is async and React hasn't flushed yet.
+    const choice = selectedChoiceRef.current;
     if (!currentItem || !isChoiceReviewTask || !choice) {
       return;
     }
@@ -2786,7 +2795,7 @@ function StudyContent() {
             word,
             score: isCorrect ? 4 : 1,
             review_mode: `word-${currentItem.review_task_type}`,
-            response_text: selectedChoice,
+            response_text: choice,
             error_type: isCorrect ? undefined : "meaning",
             // Real elapsed time, not 0. See the comment in
             // recordWordMemoryReview above.
@@ -2811,7 +2820,7 @@ function StudyContent() {
       }, 800);
       return;
     }
-    const correctMeaning = (hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "") || (hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "") || selectedChoice;
+    const correctMeaning = (hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "") || (hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "") || choice;
     // Play Chinese meaning audio FIRST, then advance
     if (word && correctMeaning) {
       await playEnglishThenChinese(word, correctMeaning);
