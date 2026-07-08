@@ -17,6 +17,7 @@ from app.models.user import User
 from app.models.user_points import PointsLog
 from app.schemas.memory import CourseCompletionRequest, CourseProgressStats, FsrsFitResponse, MemoryDashboardResponse, MemoryScheduleResponse, MemoryStateRead, PointsAwardRequest, PointsSummaryResponse, ReviewForecastResponse, ReviewScoreRequest, StudyTimeLogRequest, TodayProgressResponse
 from app.services.memory_dashboard import build_memory_dashboard, build_review_forecast, build_today_progress, check_and_generate_daily_report
+from app.services.ai_review_advisor import generate_review_advice, get_todays_recommendations
 from app.schemas.review import MistakeLogRead, ReviewLogRead
 from app.services.fsrs_fitting import fit_user_fsrs_parameters
 from app.services.learning_replay import record_learning_event
@@ -286,3 +287,49 @@ def award_points_endpoint(
 ) -> dict:
     from app.services.points_service import award_points
     return award_points(db, current_user.id, payload.points_change, payload.reason, payload.detail, payload.learning_item_id)
+
+
+@router.get("/review-advice")
+def get_review_advice(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """Return today's AI review recommendations, or None if not yet generated."""
+    recommendations = get_todays_recommendations(db, current_user.id)
+    if recommendations is None:
+        return {"has_recommendations": False, "recommended_words": [], "reasoning": "", "suggested_mode": ""}
+    return {"has_recommendations": True, **recommendations}
+
+
+@router.post("/review-advice")
+def generate_review_advice_endpoint(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """Generate new AI review recommendations now (force refresh).
+
+    Calls the LLM with 7-day review data. May take 5-15 seconds.
+    Returns the generated recommendations.
+    """
+    from app.core.config import settings as app_settings
+    from app.services.llm_translation import DEFAULT_LLM_TRANSLATION_SETTINGS, LlmTranslationSettings
+    from app.services.secure_model_settings import get_private_model_settings
+    from app.utils import string_setting
+
+    stored = get_private_model_settings(db, current_user.id)
+    llm_settings = LlmTranslationSettings(
+        provider=str(string_setting(stored, "llmProvider") or app_settings.ai_provider or DEFAULT_LLM_TRANSLATION_SETTINGS.provider),
+        base_url=str(string_setting(stored, "llmBaseUrl") or app_settings.ai_base_url or DEFAULT_LLM_TRANSLATION_SETTINGS.base_url),
+        model=str(string_setting(stored, "llmModel") or app_settings.ai_model or DEFAULT_LLM_TRANSLATION_SETTINGS.model),
+        api_key=string_setting(stored, "llmApiKey") or app_settings.ai_api_key,
+    )
+
+    try:
+        recommendations = generate_review_advice(db, current_user.id, llm_settings, force=True)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI 分析失败: {exc}",
+        ) from exc
+
+    return {"has_recommendations": True, **recommendations}

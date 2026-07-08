@@ -503,3 +503,25 @@ export async function awardPoints(accessToken: string, pointsChange: number, rea
     body: JSON.stringify({ points_change: pointsChange, reason, detail, learning_item_id: learningItemId }),
   }, accessToken);
 }
+
+export interface ReviewAdvice {
+  has_recommendations: boolean;
+  recommended_words: string[];
+  reasoning: string;
+  suggested_mode: string;
+}
+
+export async function getReviewAdvice(accessToken: string): Promise<ReviewAdvice> {
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/memory/review-advice`, { cache: "no-store" }, accessToken);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return (await response.json()) as ReviewAdvice;
+}
+
+export async function generateReviewAdvice(accessToken: string): Promise<ReviewAdvice> {
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/memory/review-advice`, {
+    method: "POST",
+    cache: "no-store",
+  }, accessToken);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return (await response.json()) as ReviewAdvice;
+}

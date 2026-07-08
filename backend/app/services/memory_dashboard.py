@@ -1277,6 +1277,26 @@ def check_and_generate_daily_report(db: Session, user_id: UUID) -> bool:
         return False
 
     generate_ai_daily_report(db, user_id, today)
+    # Best-effort: also run the AI review advisor to generate
+    # personalized word recommendations for today. If the LLM call
+    # fails, the daily report still works — just without recommendations.
+    try:
+        from app.services.ai_review_advisor import generate_review_advice_if_needed
+        from app.services.llm_translation import DEFAULT_LLM_TRANSLATION_SETTINGS, LlmTranslationSettings
+        from app.services.secure_model_settings import get_private_model_settings
+        from app.core.config import settings as app_config
+        from app.utils import string_setting
+
+        stored = get_private_model_settings(db, user_id)
+        llm_settings = LlmTranslationSettings(
+            provider=str(string_setting(stored, "llmProvider") or app_config.ai_provider or DEFAULT_LLM_TRANSLATION_SETTINGS.provider),
+            base_url=str(string_setting(stored, "llmBaseUrl") or app_config.ai_base_url or DEFAULT_LLM_TRANSLATION_SETTINGS.base_url),
+            model=str(string_setting(stored, "llmModel") or app_config.ai_model or DEFAULT_LLM_TRANSLATION_SETTINGS.model),
+            api_key=string_setting(stored, "llmApiKey") or app_config.ai_api_key,
+        )
+        generate_review_advice_if_needed(db, user_id, llm_settings)
+    except Exception:
+        pass  # LLM failure should not block the daily report
     return True
 
 

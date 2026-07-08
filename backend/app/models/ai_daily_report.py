@@ -35,6 +35,7 @@ class AiDailyReport(Base):
     high_forget_risk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
     next_day_strategy: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    review_recommendations: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     user: Mapped["User"] = relationship(back_populates="ai_daily_reports")

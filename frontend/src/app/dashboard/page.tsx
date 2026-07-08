@@ -28,6 +28,9 @@ import {
   ReviewForecast,
   TodayProgress,
   getStudyStreak,
+  getReviewAdvice,
+  generateReviewAdvice,
+  ReviewAdvice,
   getTodayPlan,
   getWordHistory,
   MemoryDashboard,
@@ -450,6 +453,8 @@ export default function DashboardPage() {
   const [retentionCurve, setRetentionCurve] = useState<RetentionCurve | null>(null);
   const [reviewForecast, setReviewForecast] = useState<ReviewForecast | null>(null);
   const [pointsSummary, setPointsSummary] = useState<PointsSummary | null>(null);
+  const [reviewAdvice, setReviewAdvice] = useState<ReviewAdvice | null>(null);
+  const [isGeneratingAdvice, setIsGeneratingAdvice] = useState(false);
   const [todayProgress, setTodayProgress] = useState<TodayProgress | null>(null);
   const [errorBreakdown, setErrorBreakdown] = useState<ErrorBreakdown | null>(null);
   const [studyStreak, setStudyStreak] = useState<StudyStreak | null>(null);
@@ -491,14 +496,16 @@ export default function DashboardPage() {
 
         // Phase 2: secondary data (load after page renders, non-blocking)
         void (async () => {
-          const [forecastData, pointsData, progressData, heatmapData] = await Promise.all([
+          const [forecastData, pointsData, progressData, heatmapData, adviceData] = await Promise.all([
             getReviewForecast(accessToken).catch(() => null),
             getPointsSummary(accessToken).catch(() => null),
             getTodayProgress(accessToken).catch(() => null),
             getHeatmap(accessToken).catch(() => null),
+            getReviewAdvice(accessToken).catch(() => null),
           ]);
           setReviewForecast(forecastData);
           setPointsSummary(pointsData);
+          setReviewAdvice(adviceData);
           setTodayProgress(progressData);
           setLearningHeatmap(heatmapData);
         })();
