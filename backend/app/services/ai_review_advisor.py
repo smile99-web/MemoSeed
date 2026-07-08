@@ -174,7 +174,7 @@ def _build_prompt(profile: dict[str, object]) -> str:
         "   - 正确率低（accuracy < 0.6）的词\n"
         "   - 某种错误类型反复出现的词（如 meaning 错误多说明孩子不理解中文意思）\n"
         "2. 给出简短的中文理由（1-2句话，家长可读）\n"
-        "3. 建议优先练习的题型（如"先做英选中选择题加深理解，再拼写"）\n\n"
+        '3. 建议优先练习的题型（如\'先做英选中选择题加深理解，再拼写\'）\n\n'
         "**输出格式**（严格的 JSON，不要任何额外文字）：\n"
         '{"recommended_words":["word1","word2",...],"reasoning":"中文理由","suggested_mode":"建议练法"}'
     )
