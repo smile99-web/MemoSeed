@@ -1051,39 +1051,33 @@ export default function DashboardPage() {
                 </CardContent>
               </Card>
             ) : null}
-            {reviewAdvice && reviewAdvice.has_recommendations && reviewAdvice.recommended_words.length > 0 ? (
-              <Card>
+<Card>
                 <CardHeader>
                   <div className="flex items-center justify-between">
                     <div>
                       <CardTitle>🤖 AI 复习建议</CardTitle>
-                      <CardDescription>{reviewAdvice.reasoning || "基于最近7天学习数据生成的个性化复习建议。"}</CardDescription>
+                      <CardDescription>{reviewAdvice?.reasoning || "基于最近7天学习数据生成的个性化复习建议。"}</CardDescription>
                     </div>
                     <Button size="sm" variant="outline" onClick={async () => { setIsGeneratingAdvice(true); try { setReviewAdvice(await generateReviewAdvice(getAccessToken()!)); } catch {} finally { setIsGeneratingAdvice(false); } }} disabled={isGeneratingAdvice}>{isGeneratingAdvice ? "生成中..." : "重新分析"}</Button>
                   </div>
                 </CardHeader>
                 <CardContent>
-                  <div className="flex flex-wrap gap-2">
-                    {reviewAdvice.recommended_words.map((word) => (
-                      <span key={word} className="rounded-full bg-amber-100 px-3 py-1 text-sm font-semibold text-amber-800">{word}</span>
-                    ))}
-                  </div>
-                  {reviewAdvice.suggested_mode ? (
-                    <p className="mt-3 text-xs text-muted-foreground">💡 {reviewAdvice.suggested_mode}</p>
-                  ) : null}
+                  {(reviewAdvice?.recommended_words?.length ?? 0) > 0 ? (
+                    <>
+                      <div className="flex flex-wrap gap-2">
+                        {(reviewAdvice?.recommended_words ?? []).map((word: string) => (
+                          <span key={word} className="rounded-full bg-amber-100 px-3 py-1 text-sm font-semibold text-amber-800">{word}</span>
+                        ))}
+                      </div>
+                      {(reviewAdvice?.suggested_mode) ? (
+                        <p className="mt-3 text-xs text-muted-foreground">💡 {reviewAdvice.suggested_mode}</p>
+                      ) : null}
+                    </>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">AI 暂未分析。点击上方「重新分析」按钮,AI 会基于最近7天学习数据推荐重点复习的单词。</p>
+                  )}
                 </CardContent>
               </Card>
-            ) : reviewAdvice && !reviewAdvice.has_recommendations ? (
-              <Card>
-                <CardHeader>
-                  <CardTitle>🤖 AI 复习建议</CardTitle>
-                  <CardDescription>AI 暂未分析。点击下方按钮生成基于最近7天数据的个性化复习建议。</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <Button size="sm" onClick={async () => { setIsGeneratingAdvice(true); try { setReviewAdvice(await generateReviewAdvice(getAccessToken()!)); } catch {} finally { setIsGeneratingAdvice(false); } }} disabled={isGeneratingAdvice}>{isGeneratingAdvice ? "正在分析（约10秒）..." : "开始 AI 分析"}</Button>
-                </CardContent>
-              </Card>
-            ) : null}
 
 
             <Card>
