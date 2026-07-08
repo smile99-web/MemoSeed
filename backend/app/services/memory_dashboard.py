@@ -1255,7 +1255,10 @@ def generate_ai_daily_report(db: Session, user_id: UUID, report_date: date | Non
 
 def check_and_generate_daily_report(db: Session, user_id: UUID) -> bool:
     now_local = datetime.now(LOCAL_TIMEZONE)
-    if now_local.hour < 20:
+    # Run daily report + AI review advice at 23:30 local time.
+    # The child typically finishes learning by 22:00-23:00, so 23:30
+    # catches the full day's data while still being "today".
+    if now_local.hour < 23 or (now_local.hour == 23 and now_local.minute < 30):
         return False
 
     today = now_local.date()

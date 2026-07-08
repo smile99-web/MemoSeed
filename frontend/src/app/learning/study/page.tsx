@@ -13,7 +13,7 @@ import { Course, listCoursePackages, listCourses } from "@/lib/courses";
 import { generateDynamicSentence, generateLearningEncouragement, getWordTranslations, LearningItem, listDueReviewItems, listLearningItems, logWordMistake, logWordReview, translateLearningText } from "@/lib/learning";
 import { fetchWithAuth, parseApiError } from "@/lib/api";
 import { getApiBaseUrl } from "@/lib/api-base-url";
-import { recordCourseCompletion, recordStudyTime, rotateFocusWord, scheduleMemoryReview } from "@/lib/memory";
+import { recordCourseCompletion, recordStudyTime, rotateFocusWord, scheduleMemoryReview, getReviewAdvice } from "@/lib/memory";
 import { ModelSettings, defaultModelSettings, getModelSettings, loadPersistedModelSettings } from "@/lib/model-settings";
 import { playAudioBlob, prefetchCourseAudio, stopAudioPlayback, synthesizeCosyVoiceSpeech, synthesizeKokoroSpeech, synthesizeVolcengineSpeech, TtsSynthesisOptions } from "@/lib/tts";
 
@@ -524,6 +524,21 @@ function StudyContent() {
   useEffect(() => {
     setIsFocusMode(false);
   }, [studyMode]);
+  // AI review recommendations from the "推荐复习" button on the home page
+  const isAiReview = searchParams.get("ai") === "1";
+  const [aiRecommendedWords, setAiRecommendedWords] = useState<string[]>([]);
+  const [aiReasoning, setAiReasoning] = useState("");
+  useEffect(() => {
+    if (!isAiReview) return;
+    const token = getAccessToken();
+    if (!token) return;
+    getReviewAdvice(token).then((advice) => {
+      if (advice?.recommended_words?.length > 0) {
+        setAiRecommendedWords(advice.recommended_words);
+        setAiReasoning(advice.reasoning || "");
+      }
+    }).catch(() => {});
+  }, [isAiReview]);
   const [celebrationSummary, setCelebrationSummary] = useState<CelebrationSummary | null>(null);
   // Immersive (沉浸) mode defaults OFF — user must click the "沉浸模式"
   // button to enable it. Previously this defaulted ON, but the forced
