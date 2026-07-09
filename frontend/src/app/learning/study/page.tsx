@@ -494,6 +494,8 @@ function StudyContent() {
   const [choiceResult, setChoiceResult] = useState<"correct" | "incorrect" | null>(null);
   const choiceResultRef = useRef<"correct" | "incorrect" | null>(null);
   choiceResultRef.current = choiceResult;
+  // Track what the number key actually selected for debug visibility
+  const [lastDigitSelection, setLastDigitSelection] = useState<{key: string; selected: string; correct: string} | null>(null);
   const [childHint, setChildHint] = useState<ChildFriendlyHintData | null>(null);
   function setFeedback(message: string | null, type: "success" | "error" | "info" = "info") {
     setFeedbackMessage(message);
@@ -2794,6 +2796,8 @@ function StudyContent() {
     }
     const correctAnswer = hasChineseText(currentItem.review_answer) ? currentItem.review_answer : reviewTaskWordTranslation;
     const isCorrect = isCorrectChoiceAnswer(choice, correctAnswer);
+    // Debug: track which key selected which option vs the correct answer
+    setLastDigitSelection({ key: explicitChoice ? "explicit" : "space", selected: choice, correct: correctAnswer ?? "" });
     const accessToken = getAccessToken();
     const learningItemId = getSourceLearningItemId(currentItem);
     const word = currentWords[0] ?? "";
@@ -3243,6 +3247,9 @@ function StudyContent() {
                   <p className="text-4xl font-bold text-slate-900 ipad:text-5xl ipad-lg:text-6xl">{isListeningChoiceReviewTask ? "听读音，选中文" : currentWords[0]}</p>
                   <p className="text-sm font-medium text-slate-500 ipad:text-base">按数字键 1-6 选择，空格键确认</p>
                   <div className="grid w-full max-w-xl grid-cols-2 gap-3">
+                    {lastDigitSelection ? (
+                      <p className="col-span-2 text-xs text-blue-600">调试: 按了"{lastDigitSelection.key}", 选中="{lastDigitSelection.selected}", 正确答案="{lastDigitSelection.correct}"</p>
+                    ) : null}
                     {(choiceReviewOptions.length > 0 ? choiceReviewOptions : []).map((choice, index) => {
                       const isSelected = selectedChoice === choice;
                       const hasResult = choiceResult !== null;
