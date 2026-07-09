@@ -3010,14 +3010,12 @@ function StudyContent() {
   const displayChinesePrompt = isStudyFullscreen && answerState === "mistake-word-practice"
     ? currentMistakePracticeTranslation || currentItem?.chinese_text || ""
     : isFocusedWordReview && currentItem?.source?.startsWith("聚焦 ") && hasChineseText(currentItem?.chinese_text)
-      ? currentItem.chinese_text  // focus mode: pre-cached meaning from backend
+      ? currentItem.chinese_text
     : isChoiceReviewTask
       ? "请选择这个英文单词的中文意思"
     : currentItem?.review_task_type === "listen_spell" && !hasChineseText(currentItem?.chinese_text)
       ? "听英文发音后拼写"
-    : isFocusedWordReview
-      ? (hasChineseText(currentItem?.chinese_text) ? currentItem.chinese_text : reviewTaskWordTranslation) || ""
-      : (hasChineseText(currentItem?.chinese_text) ? currentItem.chinese_text : reviewTaskWordTranslation) || currentItem?.english_text || "";
+    : (hasChineseText(currentItem?.chinese_text) ? currentItem.chinese_text : reviewTaskWordTranslation) || "请拼写这个单词";
 
   return (
     <>
@@ -3246,10 +3244,20 @@ function StudyContent() {
                 <div className={isStudyFullscreen ? "mx-auto flex max-w-4xl flex-col items-center gap-6 ipad:gap-8" : "mx-auto flex max-w-xl flex-col items-center gap-4 rounded-lg border bg-slate-50 px-5 py-5 ipad:max-w-xl ipad:gap-4 ipad:px-6 ipad:py-5 ipad-lg:max-w-2xl ipad-lg:gap-5 ipad-lg:px-7 ipad-lg:py-6"}>
                   <p className="text-4xl font-bold text-slate-900 ipad:text-5xl ipad-lg:text-6xl">{isListeningChoiceReviewTask ? "听读音，选中文" : currentWords[0]}</p>
                   <p className="text-sm font-medium text-slate-500 ipad:text-base">按数字键 1-6 选择，空格键确认</p>
-                  <div className="grid w-full max-w-xl grid-cols-2 gap-3">
-                    {lastDigitSelection ? (
-                      <p className="col-span-2 text-xs text-blue-600">{`调试: 按了${lastDigitSelection.key}, 选中=${lastDigitSelection.selected}, 正确答案=${lastDigitSelection.correct}`}</p>
-                    ) : null}
+                  <div className="grid w-full max-w-xl grid-cols-2 gap-3"
+                    onKeyDown={(e) => {
+                      const dm = /^(Digit|Numpad)([1-6])$/.exec(e.nativeEvent.code);
+                      if (!dm) return;
+                      const idx = parseInt(dm[2], 10) - 1;
+                      if (idx >= 0 && idx < (choiceReviewOptions.length || 0)) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        e.nativeEvent.stopImmediatePropagation();
+                        void confirmChoiceSelection(choiceReviewOptions[idx]);
+                      }
+                    }}
+                    tabIndex={0}
+                  >
                     {(choiceReviewOptions.length > 0 ? choiceReviewOptions : []).map((choice, index) => {
                       const isSelected = selectedChoice === choice;
                       const hasResult = choiceResult !== null;

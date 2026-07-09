@@ -490,16 +490,25 @@ def get_or_create_word_memory_item(
         )
     )
     if existing_item is not None:
-        if source_item is not None and existing_item.chinese_text == source_item.chinese_text:
-            existing_item.chinese_text = normalized_word
+        # Do NOT overwrite chinese_text with the English word. The
+        # previous code set chinese_text = normalized_word here, which
+        # caused the child to see the English word ("the", "apple") as
+        # the Chinese prompt in spelling tasks. If the existing item
+        # doesn't have Chinese text, try to fill it from the source.
+        if not existing_item.chinese_text or not any("一" <= c <= "鿿" for c in existing_item.chinese_text):
+            if source_item is not None and source_item.chinese_text:
+                existing_item.chinese_text = source_item.chinese_text
         return existing_item
 
+    # Use source_item's Chinese text if available, otherwise leave empty
+    # (the translation service fills it later)
+    initial_chinese = source_item.chinese_text if (source_item is not None and source_item.chinese_text) else ""
     learning_item = LearningItem(
         user_id=user_id,
         course_id=None,
         item_type="word",
         english_text=normalized_word,
-        chinese_text=normalized_word,
+        chinese_text=initial_chinese,
         difficulty_level=source_item.difficulty_level if source_item is not None else 1,
         source=WORD_MEMORY_SOURCE,
     )
