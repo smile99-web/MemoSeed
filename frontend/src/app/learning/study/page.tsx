@@ -1638,37 +1638,36 @@ function StudyContent() {
             isFocusMode,
           ).catch(() => [] as LearningItem[]);
 
-          // AI-recommended review: filter to only the words the AI
-          // advisor picked. Without this filter, the "推荐复习" button
-          // was functionally identical to "单词复习" — it showed the
-          // same FSRS queue with just an AI banner on top.
-          if (isAiReview) {
-            let aiWords: string[] = [];
+          // AI-recommended review: keep ALL 123 words but REORDER
+          // so AI-prioritized words come first, then FSRS order for
+          // the rest. The child still practices everything — just
+          // the struggling words get more exposure at the front.
+          if (isAiReview && dueReviewItems.length > 0) {
             try {
               const advice = await getReviewAdvice(accessToken);
-              aiWords = (advice?.recommended_words ?? []).map((w: string) => w.trim().toLowerCase());
-            } catch {
-              // If AI advice fails, fall through to the full queue
-            }
-            if (aiWords.length > 0) {
-              const filtered = dueReviewItems.filter((item) => {
-                const word = (item.english_text || "").trim().toLowerCase();
-                // Match against the item's main English word OR any
-                // word in a sentence that contains a recommended word.
-                return aiWords.some((aw) => word === aw || word.includes(aw));
-              });
-              if (filtered.length > 0) {
-                mergedItems = filtered;
-                setAiRecommendedWords(aiWords);
+              const aiWords = new Set(
+                (advice?.recommended_words ?? []).map((w: string) => w.trim().toLowerCase())
+              );
+              if (aiWords.size > 0) {
+                setAiRecommendedWords([...aiWords]);
+                setAiReasoning(advice?.reasoning || "");
+                // Split: AI words first (keep FSRS relative order),
+                // then non-AI words (keep FSRS relative order)
+                const aiItems: LearningItem[] = [];
+                const restItems: LearningItem[] = [];
+                for (const item of dueReviewItems) {
+                  const word = (item.english_text || "").trim().toLowerCase();
+                  if (aiWords.has(word)) {
+                    aiItems.push(item);
+                  } else {
+                    restItems.push(item);
+                  }
+                }
+                mergedItems = [...aiItems, ...restItems];
               } else {
-                // No due items match the recommended words — those
-                // words might have been reviewed already today. Fall
-                // back to the full queue so the child still has
-                // something to practice.
                 mergedItems = dueReviewItems;
-                setAiRecommendedWords([]);
               }
-            } else {
+            } catch {
               mergedItems = dueReviewItems;
             }
           } else {
