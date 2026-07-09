@@ -3139,6 +3139,18 @@ function StudyContent() {
         const current = modeConfig[studyMode];
         const otherModes = (["review", "learn", "mix"] as StudyMode[]).filter((m) => m !== studyMode);
         return (
+          <>
+          {aiRecommendedWords.length > 0 ? (
+            <div className="mx-4 mt-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3">
+              <p className="text-sm font-bold text-amber-700">🤖 AI 推荐复习 · {aiRecommendedWords.length} 个重点词优先</p>
+              <p className="mt-1 text-xs text-amber-600">{aiReasoning || "基于最近7天学习数据,以下单词需要更多练习:"}</p>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {aiRecommendedWords.map((w) => (
+                  <span key={w} className="rounded-full bg-amber-200 px-2.5 py-0.5 text-xs font-semibold text-amber-900">{w}</span>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <div className={`mx-4 mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border ${current.border} ${current.bg} px-4 py-2.5 ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3`}>
             <div className="flex items-center gap-3">
               <span className={`text-sm font-bold ipad:text-base ${current.color}`}>{current.label}</span>
@@ -3163,6 +3175,7 @@ function StudyContent() {
               })}
             </div>
           </div>
+          </>
         );
       })()}
       <main className={isStudyFullscreen ? "flex min-h-[100dvh] flex-col overflow-y-auto bg-white text-slate-950" : "flex min-h-[100dvh] flex-col overflow-y-auto bg-slate-50 text-slate-950"}>
