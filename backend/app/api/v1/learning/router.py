@@ -1070,7 +1070,25 @@ def list_due_review_items(
         # different sentences during word practice.
         sentences_for_session = [s for s in sentence_review_items[:3]
                                 if tokenize_words(s.english_text) and tokenize_words(s.english_text)[0].strip().lower() not in seen_main_words]
-        return sentences_for_session + focus_items
+
+        # Build the final queue: multi-mode focus items first, then
+        # any remaining items from the due queue. Previously this
+        # returned early at `return sentences_for_session + focus_items`
+        # which capped the queue at ~33 items regardless of the
+        # actual due count (123). Now focus items are just the prefix;
+        # the remaining items follow in FSRS order.
+        prefix_items = sentences_for_session + focus_items
+        # Remove words already covered in the prefix from the
+        # sentence_review_items so they don't appear twice.
+        prefix_word_set = seen_main_words.copy()
+        for item in prefix_items:
+            for w in tokenize_words(item.english_text if hasattr(item, 'english_text') else item.english_text):
+                prefix_word_set.add(w.strip().lower())
+        tail_items = [s for s in sentence_review_items[3:]
+                      if tokenize_words(s.english_text) and tokenize_words(s.english_text)[0].strip().lower() not in prefix_word_set]
+        review_items = task_review_items + prefix_items + tail_items
+        # Clamp to capped_limit
+        return review_items[:capped_limit] if len(review_items) > capped_limit else review_items
 
     if interleave and task_review_items and sentence_review_items:
         # Interleave: pattern of 1 review → 2 sentence items → 1 review → ...
