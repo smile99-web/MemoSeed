@@ -3017,7 +3017,7 @@ function StudyContent() {
       ? "听英文发音后拼写"
     : isFocusedWordReview
       ? (hasChineseText(currentItem?.chinese_text) ? currentItem.chinese_text : reviewTaskWordTranslation) || ""
-      : currentItem?.chinese_text || "";
+      : (hasChineseText(currentItem?.chinese_text) ? currentItem.chinese_text : reviewTaskWordTranslation) || currentItem?.english_text || "";
 
   return (
     <>
@@ -3265,9 +3265,9 @@ function StudyContent() {
                           } ${
                             !hasResult && isSelected ? "border-2 border-emerald-500 bg-emerald-50 text-emerald-700 shadow-sm" : ""
                           }`}
-                          disabled={hasResult || answerState !== "typing" }
+                          disabled={false}
                           key={`${choice}-${index}`}
-                          onClick={() => { if (answerState === "typing" && !hasResult) { void confirmChoiceSelection(choice); } }}
+                          onClick={() => { void confirmChoiceSelection(choice); }}
                           type="button"
                           variant={showCorrect || (!hasResult && isSelected) ? "default" : "outline"}
                         >
