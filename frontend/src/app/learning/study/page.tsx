@@ -13,7 +13,7 @@ import { Course, listCoursePackages, listCourses } from "@/lib/courses";
 import { generateDynamicSentence, generateLearningEncouragement, getWordTranslations, LearningItem, listDueReviewItems, listLearningItems, logWordMistake, logWordReview, translateLearningText } from "@/lib/learning";
 import { fetchWithAuth, parseApiError } from "@/lib/api";
 import { getApiBaseUrl } from "@/lib/api-base-url";
-import { recordCourseCompletion, recordStudyTime, rotateFocusWord, scheduleMemoryReview, getReviewAdvice } from "@/lib/memory";
+import { recordCourseCompletion, recordStudyTime, rotateFocusWord, scheduleMemoryReview, getReviewAdvice, generateReviewAdvice } from "@/lib/memory";
 import { ModelSettings, defaultModelSettings, getModelSettings, loadPersistedModelSettings } from "@/lib/model-settings";
 import { playAudioBlob, prefetchCourseAudio, stopAudioPlayback, synthesizeCosyVoiceSpeech, synthesizeKokoroSpeech, synthesizeVolcengineSpeech, TtsSynthesisOptions } from "@/lib/tts";
 
@@ -1644,28 +1644,49 @@ function StudyContent() {
           // the struggling words get more exposure at the front.
           if (isAiReview && dueReviewItems.length > 0) {
             try {
-              const advice = await getReviewAdvice(accessToken);
-              const aiWords = new Set(
-                (advice?.recommended_words ?? []).map((w: string) => w.trim().toLowerCase())
-              );
-              if (aiWords.size > 0) {
-                setAiRecommendedWords([...aiWords]);
-                setAiReasoning(advice?.reasoning || "");
-                // Split: AI words first (keep FSRS relative order),
-                // then non-AI words (keep FSRS relative order)
-                const aiItems: LearningItem[] = [];
-                const restItems: LearningItem[] = [];
-                for (const item of dueReviewItems) {
+              // Auto-trigger: if no analysis for today, generate one first
+              let advice = await getReviewAdvice(accessToken);
+              if (!advice.has_recommendations) {
+                advice = await generateReviewAdvice(accessToken);
+              }
+
+              // Use priority bands for full-queue reordering
+              const bands = advice.priority_bands;
+              if (bands && (bands.urgent || bands.high || bands.medium || bands.low)) {
+                const allWords = [...(bands.urgent || []), ...(bands.high || []), ...(bands.medium || [])];
+                setAiRecommendedWords(allWords);
+                setAiReasoning(advice.reasoning || "");
+
+                // Assign each due item to its band (default: medium)
+                const bandOrder = { urgent: 0, high: 1, medium: 2, low: 3 } as const;
+                const banded = dueReviewItems.map((item) => {
                   const word = (item.english_text || "").trim().toLowerCase();
-                  if (aiWords.has(word)) {
-                    aiItems.push(item);
-                  } else {
-                    restItems.push(item);
-                  }
-                }
-                mergedItems = [...aiItems, ...restItems];
+                  let band = 2;
+                  if (bands.urgent?.some((w) => w.trim().toLowerCase() === word)) band = 0;
+                  else if (bands.high?.some((w) => w.trim().toLowerCase() === word)) band = 1;
+                  else if (bands.low?.some((w) => w.trim().toLowerCase() === word)) band = 3;
+                  return { item, band };
+                });
+                banded.sort((a, b) => a.band - b.band);
+                mergedItems = banded.map((b) => b.item);
               } else {
-                mergedItems = dueReviewItems;
+                // Old format fallback
+                const aiWords = new Set(
+                  (advice.recommended_words || []).map((w: string) => w.trim().toLowerCase())
+                );
+                if (aiWords.size > 0) {
+                  setAiRecommendedWords([...aiWords]);
+                  setAiReasoning(advice.reasoning || "");
+                  const aiItems = dueReviewItems.filter((item) =>
+                    aiWords.has((item.english_text || "").trim().toLowerCase())
+                  );
+                  const restItems = dueReviewItems.filter((item) =>
+                    !aiWords.has((item.english_text || "").trim().toLowerCase())
+                  );
+                  mergedItems = [...aiItems, ...restItems];
+                } else {
+                  mergedItems = dueReviewItems;
+                }
               }
             } catch {
               mergedItems = dueReviewItems;

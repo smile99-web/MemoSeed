@@ -508,7 +508,13 @@ export interface ReviewAdvice {
   has_recommendations: boolean;
   recommended_words: string[];
   reasoning: string;
-  suggested_mode: string;
+  suggested_mode?: string;
+  priority_bands?: {
+    urgent?: string[];
+    high?: string[];
+    medium?: string[];
+    low?: string[];
+  };
 }
 
 export async function getReviewAdvice(accessToken: string): Promise<ReviewAdvice> {

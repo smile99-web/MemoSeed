@@ -169,14 +169,17 @@ def _build_prompt(profile: dict[str, object]) -> str:
             for w in profile.get('high_risk_words', [])[:10]
         ) + "\n\n"
         "**你的任务**\n"
-        "1. 从以上数据中选出 3-8 个今天最需要复习的单词。优先选择：\n"
-        "   - 遗忘风险高（risk >= 0.6）的词\n"
-        "   - 正确率低（accuracy < 0.6）的词\n"
-        "   - 某种错误类型反复出现的词（如 meaning 错误多说明孩子不理解中文意思）\n"
-        "2. 给出简短的中文理由（1-2句话，家长可读）\n"
-        '3. 建议优先练习的题型（如\'先做英选中选择题加深理解，再拼写\'）\n\n'
+        "将上面所有的词（高频词+高遗忘风险词）分成4个优先级：\n"
+        "  - urgent（急需复习）：今天必须复习，遗忘风险>=0.7或正确率<0.3或连续错误>=3\n"
+        "  - high（优先复习）：今天应该复习，正确率<0.6或有特殊错误模式\n"
+        "  - medium（正常复习）：保持现有FSRS安排\n"
+        "  - low（可推迟）：正确率>=0.9且遗忘风险<0.3的简单词(如a、the、i等)，可以放到队列末尾\n\n"
+        "规则：\n"
+        "1. 每个词必须分配到其中一个级别\n"
+        "2. low级别的词必须是真正已经熟练掌握的简单词\n"
+        "3. 给出简短的中文理由（1-2句话，家长可读）\n\n"
         "**输出格式**（严格的 JSON，不要任何额外文字）：\n"
-        '{"recommended_words":["word1","word2",...],"reasoning":"中文理由","suggested_mode":"建议练法"}'
+        '{"priority_bands":{"urgent":["word1","word2"],"high":["word3","word4"],"medium":["word5"],"low":["i","a","the"]},"reasoning":"中文理由"}'
     )
 
 
@@ -226,17 +229,34 @@ def generate_review_advice(
         logger.warning("AI review advisor returned invalid JSON: %s", text[:200])
         return {"error": "LLM returned invalid JSON", "raw": text[:500]}
 
-    # Normalize
-    recommendations: dict[str, object] = {
-        "recommended_words": result.get("recommended_words", []) or [],
-        "reasoning": str(result.get("reasoning", "") or ""),
-        "suggested_mode": str(result.get("suggested_mode", "") or ""),
-        "generated_at": now.isoformat(),
-        "profile_snapshot": {
-            "total_reviews": profile.get("total_reviews", 0),
-            "overall_accuracy": profile.get("overall_accuracy", 0),
-        },
-    }
+    # Normalize — support both old format (recommended_words) and new (priority_bands)
+    priority_bands = result.get("priority_bands")
+    if priority_bands and isinstance(priority_bands, dict):
+        all_words = []
+        for band in ("urgent", "high", "medium", "low"):
+            words = priority_bands.get(band, []) or []
+            all_words.extend(words)
+        recommendations: dict[str, object] = {
+            "recommended_words": result.get("recommended_words", all_words),
+            "priority_bands": priority_bands,
+            "reasoning": str(result.get("reasoning", "") or ""),
+            "generated_at": now.isoformat(),
+            "profile_snapshot": {
+                "total_reviews": profile.get("total_reviews", 0),
+                "overall_accuracy": profile.get("overall_accuracy", 0),
+            },
+        }
+    else:
+        recommendations: dict[str, object] = {
+            "recommended_words": result.get("recommended_words", []) or [],
+            "priority_bands": {},
+            "reasoning": str(result.get("reasoning", "") or ""),
+            "generated_at": now.isoformat(),
+            "profile_snapshot": {
+                "total_reviews": profile.get("total_reviews", 0),
+                "overall_accuracy": profile.get("overall_accuracy", 0),
+            },
+        }
 
     # Store alongside the daily report
     report = db.scalar(
