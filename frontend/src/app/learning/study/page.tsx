@@ -1756,7 +1756,7 @@ function StudyContent() {
     return () => {
       cancelled = true;
     };
-  }, [courseId, isFocusMode, studyMode]);
+  }, [courseId, isFocusMode, studyMode, isAiReview]);
 
   // Prefetch course audio in background after study items are loaded
   useEffect(() => {
