@@ -492,6 +492,9 @@ function StudyContent() {
   const [selectedChoice, setSelectedChoice] = useState<string | null>(null);
   const selectedChoiceRef = useRef<string | null>(null);
   const [choiceResult, setChoiceResult] = useState<"correct" | "incorrect" | null>(null);
+  const choiceResultRef = useRef<"correct" | "incorrect" | null>(null);
+  choiceResultRef.current = choiceResult;
+  const [debugLog, setDebugLog] = useState<string[]>([]);
   const [childHint, setChildHint] = useState<ChildFriendlyHintData | null>(null);
   function setFeedback(message: string | null, type: "success" | "error" | "info" = "info") {
     setFeedbackMessage(message);
@@ -2907,6 +2910,10 @@ function StudyContent() {
 	      const currentState = answerStateRef.current;
 	      const item = currentItemRef.current;
 	      const isChoiceTask = item?.review_task_type === "listen_choose_chinese" || item?.review_task_type === "english_to_chinese" || item?.review_task_type === "match_translation";
+	      const choiceItems = choiceOptionsRef.current;
+
+	      // Debug log - record what key was pressed and what state we're in
+	      setDebugLog((prev) => [...prev.slice(-5), `key="${event.key}" code="${event.code}" isDigit=${isDigit} isSpace=${isSpace} state=${currentState} isChoiceTask=${isChoiceTask} options=${choiceItems?.length ?? 0} sel=${selectedChoiceRef.current ?? "-"} res=${choiceResultRef.current ?? "-"}`]);
 
 		      // Number keys 1-6: select choice (choice review tasks in typing state)
 		      if (isDigit && isChoiceTask && currentState === "typing" && choiceResult === null) {
@@ -3439,6 +3446,13 @@ function StudyContent() {
           </div>
         ) : null}
       </section>
+      {/* Debug overlay - shows key press diagnostics */}
+      <div className="fixed bottom-0 left-0 right-0 z-50 max-h-32 overflow-y-auto bg-black/90 p-2 text-xs font-mono text-green-400">
+        {debugLog.length === 0 ? <p>等待按键... (按 1-6 或空格测试)</p> : null}
+        {debugLog.map((entry, i) => (
+          <p key={i}>{entry}</p>
+        ))}
+      </div>
     </main>
     <style>{`
       @keyframes celebration-star-burst {
