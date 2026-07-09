@@ -3248,7 +3248,7 @@ function StudyContent() {
                   <p className="text-sm font-medium text-slate-500 ipad:text-base">按数字键 1-6 选择，空格键确认</p>
                   <div className="grid w-full max-w-xl grid-cols-2 gap-3">
                     {lastDigitSelection ? (
-                      <p className="col-span-2 text-xs text-blue-600">调试: 按了"{lastDigitSelection.key}", 选中="{lastDigitSelection.selected}", 正确答案="{lastDigitSelection.correct}"</p>
+                      <p className="col-span-2 text-xs text-blue-600">{`调试: 按了${lastDigitSelection.key}, 选中=${lastDigitSelection.selected}, 正确答案=${lastDigitSelection.correct}`}</p>
                     ) : null}
                     {(choiceReviewOptions.length > 0 ? choiceReviewOptions : []).map((choice, index) => {
                       const isSelected = selectedChoice === choice;
