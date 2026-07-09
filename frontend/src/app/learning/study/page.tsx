@@ -1644,9 +1644,9 @@ function StudyContent() {
           // the struggling words get more exposure at the front.
           if (isAiReview && dueReviewItems.length > 0) {
             try {
-              // Auto-trigger: if no analysis for today, generate one first
+              // Auto-trigger: if no bands-based analysis for today, generate one
               let advice = await getReviewAdvice(accessToken);
-              if (!advice.has_recommendations) {
+              if (!advice.has_recommendations || !advice.priority_bands) {
                 advice = await generateReviewAdvice(accessToken);
               }
 
