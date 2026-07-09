@@ -494,6 +494,7 @@ function StudyContent() {
   const [choiceResult, setChoiceResult] = useState<"correct" | "incorrect" | null>(null);
   const choiceResultRef = useRef<"correct" | "incorrect" | null>(null);
   choiceResultRef.current = choiceResult;
+  const confirmItemIdRef = useRef<string>("");
   // Track what the number key actually selected for debug visibility
   const [lastDigitSelection, setLastDigitSelection] = useState<{key: string; selected: string; correct: string} | null>(null);
   const [childHint, setChildHint] = useState<ChildFriendlyHintData | null>(null);
@@ -2791,6 +2792,9 @@ function StudyContent() {
     // Read from ref (latest) NOT state (may be stale). Without the
     // ref, the space-key handler reads the old null value because
     // setSelectedChoice() is async and React hasn't flushed yet.
+    // Lock this confirmation to the current item so stale async
+    // callbacks don't mark the next item as "already answered".
+    confirmItemIdRef.current = currentItem?.id ?? "";
     if (!currentItem || !isChoiceReviewTask || !choice) {
       return;
     }
@@ -2853,6 +2857,14 @@ function StudyContent() {
     setFeedback("选择正确！", "success");
     // Brief pause so user can see the green highlight, then advance
     await new Promise((resolve) => window.setTimeout(resolve, 600));
+    // Guard: if the user advanced to the next item during the 600ms
+    // pause, do NOT set sentence-complete on the NEW item. Without
+    // this check, a stale confirmChoiceSelection from item A would
+    // silently mark item B as "already answered" without any user
+    // interaction — the child sees "请点击下一句" on a fresh question.
+    if (currentItem?.id !== confirmItemIdRef.current) {
+      return;
+    }
     setSelectedChoice(null);
     setChoiceResult(null);
     updateAnswerState("sentence-complete");
