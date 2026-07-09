@@ -494,7 +494,13 @@ function StudyContent() {
   const [choiceResult, setChoiceResult] = useState<"correct" | "incorrect" | null>(null);
   const choiceResultRef = useRef<"correct" | "incorrect" | null>(null);
   choiceResultRef.current = choiceResult;
-  const confirmItemIdRef = useRef<string>("");
+  // Tracks which item confirmChoiceSelection is currently processing.
+  // Set at the START of confirm (captures the item being confirmed),
+  // checked after the 600ms async delay against the LIVE currentItem
+  // (via currentItemIdRef) to prevent stale callbacks from marking
+  // the wrong item as sentence-complete.
+  const confirmingItemIdRef = useRef<string>("");
+  const currentItemIdRef = useRef<string>("");
   // Track what the number key actually selected for debug visibility
   const [lastDigitSelection, setLastDigitSelection] = useState<{key: string; selected: string; correct: string} | null>(null);
   const [childHint, setChildHint] = useState<ChildFriendlyHintData | null>(null);
@@ -620,6 +626,7 @@ function StudyContent() {
   const totalMasteredRef = useRef(0);
 
   const currentItem = items[currentIndex] ?? null;
+  currentItemIdRef.current = currentItem?.id ?? "";
   const currentWords = useMemo(() => tokenizeEnglish(currentItem?.english_text ?? ""), [currentItem]);
   const dynamicReviewWords = useMemo(() => getDynamicReviewWords(currentItem), [currentItem]);
   const dynamicReviewWordIndexes = useMemo(() => {
@@ -2792,9 +2799,7 @@ function StudyContent() {
     // Read from ref (latest) NOT state (may be stale). Without the
     // ref, the space-key handler reads the old null value because
     // setSelectedChoice() is async and React hasn't flushed yet.
-    // Lock this confirmation to the current item so stale async
-    // callbacks don't mark the next item as "already answered".
-    confirmItemIdRef.current = currentItem?.id ?? "";
+    confirmingItemIdRef.current = currentItem?.id ?? "";
     if (!currentItem || !isChoiceReviewTask || !choice) {
       return;
     }
@@ -2843,7 +2848,9 @@ function StudyContent() {
         void playEnglishThenChinese(word, correctMeaning);
       }
       // Clear incorrect highlight after a delay so user can see it, then allow re-selection
+      const errItemId = confirmingItemIdRef.current;
       window.setTimeout(() => {
+        if (currentItemIdRef.current !== errItemId) return;
         setSelectedChoice(null);
         setChoiceResult(null);
       }, 800);
@@ -2857,12 +2864,14 @@ function StudyContent() {
     setFeedback("选择正确！", "success");
     // Brief pause so user can see the green highlight, then advance
     await new Promise((resolve) => window.setTimeout(resolve, 600));
-    // Guard: if the user advanced to the next item during the 600ms
-    // pause, do NOT set sentence-complete on the NEW item. Without
-    // this check, a stale confirmChoiceSelection from item A would
-    // silently mark item B as "already answered" without any user
-    // interaction — the child sees "请点击下一句" on a fresh question.
-    if (currentItem?.id !== confirmItemIdRef.current) {
+    // Guard: compare the item being confirmed against the LIVE
+    // currentItem (via ref, NOT closure). The confirmChoiceSelection
+    // closure captures currentItem from when it was created — if the
+    // user advanced to the next item, the closure value is stale.
+    // currentItemIdRef is synced at render time so it always reflects
+    // the real current item. Without this check, a stale callback
+    // from item 1 would mark item 2 (or 3) as sentence-complete.
+    if (currentItemIdRef.current !== confirmingItemIdRef.current) {
       return;
     }
     setSelectedChoice(null);
