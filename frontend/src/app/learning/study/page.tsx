@@ -1628,7 +1628,7 @@ function StudyContent() {
         let nextItems: LearningItem[] = [];
 
         if (studyMode === "review") {
-          // Pure review: all due review items across all courses, no course-specific filtering.
+          // Pure review: all due review items across all courses.
           dueReviewItems = await listDueReviewItems(
             accessToken,
             undefined,
@@ -1637,7 +1637,43 @@ function StudyContent() {
             INITIAL_REVIEW_QUEUE_LIMIT,
             isFocusMode,
           ).catch(() => [] as LearningItem[]);
-          mergedItems = dueReviewItems;
+
+          // AI-recommended review: filter to only the words the AI
+          // advisor picked. Without this filter, the "推荐复习" button
+          // was functionally identical to "单词复习" — it showed the
+          // same FSRS queue with just an AI banner on top.
+          if (isAiReview) {
+            let aiWords: string[] = [];
+            try {
+              const advice = await getReviewAdvice(accessToken);
+              aiWords = (advice?.recommended_words ?? []).map((w: string) => w.trim().toLowerCase());
+            } catch {
+              // If AI advice fails, fall through to the full queue
+            }
+            if (aiWords.length > 0) {
+              const filtered = dueReviewItems.filter((item) => {
+                const word = (item.english_text || "").trim().toLowerCase();
+                // Match against the item's main English word OR any
+                // word in a sentence that contains a recommended word.
+                return aiWords.some((aw) => word === aw || word.includes(aw));
+              });
+              if (filtered.length > 0) {
+                mergedItems = filtered;
+                setAiRecommendedWords(aiWords);
+              } else {
+                // No due items match the recommended words — those
+                // words might have been reviewed already today. Fall
+                // back to the full queue so the child still has
+                // something to practice.
+                mergedItems = dueReviewItems;
+                setAiRecommendedWords([]);
+              }
+            } else {
+              mergedItems = dueReviewItems;
+            }
+          } else {
+            mergedItems = dueReviewItems;
+          }
         } else if (studyMode === "learn") {
           // Learn mode: the backend now supports include_choices=true,
           // which prepends an english_to_chinese choice item before each
