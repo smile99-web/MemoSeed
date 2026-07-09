@@ -2909,14 +2909,13 @@ function StudyContent() {
 	      const isChoiceTask = item?.review_task_type === "listen_choose_chinese" || item?.review_task_type === "english_to_chinese" || item?.review_task_type === "match_translation";
 
 		      // Number keys 1-6: select choice (choice review tasks in typing state)
-		      if (isDigit && isChoiceTask && currentState === "typing") {
+		      if (isDigit && isChoiceTask && currentState === "typing" && choiceResult === null) {
 		        event.preventDefault();
 		        // digitIdx computed from event.code above
 		        const choiceItems = choiceOptionsRef.current;
-		        if (choiceItems && digitIdx < choiceItems.length) {
+		        if (choiceItems && digitIdx >= 0 && digitIdx < choiceItems.length) {
 		          setSelectedChoice(choiceItems[digitIdx]);
-		          setFeedback(null);
-
+		          setFeedback(`已选择第 ${digitIdx + 1} 项，按空格键确认`, "info");
 		        }
 		        return;
 		      }
