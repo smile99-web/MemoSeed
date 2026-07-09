@@ -494,7 +494,6 @@ function StudyContent() {
   const [choiceResult, setChoiceResult] = useState<"correct" | "incorrect" | null>(null);
   const choiceResultRef = useRef<"correct" | "incorrect" | null>(null);
   choiceResultRef.current = choiceResult;
-  const [debugLog, setDebugLog] = useState<string[]>([]);
   const [childHint, setChildHint] = useState<ChildFriendlyHintData | null>(null);
   function setFeedback(message: string | null, type: "success" | "error" | "info" = "info") {
     setFeedbackMessage(message);
@@ -2781,11 +2780,15 @@ function StudyContent() {
     window.setTimeout(() => inputRefs.current[firstRespellIdx]?.focus(), 0);
   }
 
-  const confirmChoiceSelection = useCallback(async function confirmChoiceSelection() {
+  const confirmChoiceSelection = useCallback(async function confirmChoiceSelection(explicitChoice?: string) {
+    const choice = explicitChoice ?? selectedChoiceRef.current;
+    if (explicitChoice) { setSelectedChoice(explicitChoice); }
+    // Note: selectedChoice removed from deps - we read from ref
+    // to keep this function stable across selections.
+
     // Read from ref (latest) NOT state (may be stale). Without the
     // ref, the space-key handler reads the old null value because
     // setSelectedChoice() is async and React hasn't flushed yet.
-    const choice = selectedChoiceRef.current;
     if (!currentItem || !isChoiceReviewTask || !choice) {
       return;
     }
@@ -2850,7 +2853,7 @@ function StudyContent() {
     setChoiceResult(null);
     updateAnswerState("sentence-complete");
     setFeedback("选择正确！请点击「下一句」按钮继续。", "success");
-  }, [currentItem, currentWords, getSourceLearningItemId, isChoiceReviewTask, playEnglishThenChinese, reviewTaskWordTranslation, selectedChoice, updateAnswerState]);
+  }, [currentItem, currentWords, getSourceLearningItemId, isChoiceReviewTask, playEnglishThenChinese, reviewTaskWordTranslation, updateAnswerState]);
 
   function handleMistakePracticeKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     if (event.key === " " || event.key === "Enter") {
@@ -2912,17 +2915,14 @@ function StudyContent() {
 	      const isChoiceTask = item?.review_task_type === "listen_choose_chinese" || item?.review_task_type === "english_to_chinese" || item?.review_task_type === "match_translation";
 	      const choiceItems = choiceOptionsRef.current;
 
-	      // Debug log - record what key was pressed and what state we're in
-	      setDebugLog((prev) => [...prev.slice(-5), `key="${event.key}" code="${event.code}" isDigit=${isDigit} isSpace=${isSpace} state=${currentState} isChoiceTask=${isChoiceTask} options=${choiceItems?.length ?? 0} sel=${selectedChoiceRef.current ?? "-"} res=${choiceResultRef.current ?? "-"}`]);
-
 		      // Number keys 1-6: select choice (choice review tasks in typing state)
-		      if (isDigit && isChoiceTask && currentState === "typing" && choiceResult === null) {
+			      if (isDigit && isChoiceTask && currentState === "typing" && choiceResultRef.current === null) {
 		        event.preventDefault();
 		        // digitIdx computed from event.code above
 		        const choiceItems = choiceOptionsRef.current;
 		        if (choiceItems && digitIdx >= 0 && digitIdx < choiceItems.length) {
-		          setSelectedChoice(choiceItems[digitIdx]);
-		          setFeedback(`已选择第 ${digitIdx + 1} 项，按空格键确认`, "info");
+			          void confirmChoiceSelection(choiceItems[digitIdx]);
+
 		        }
 		        return;
 		      }
@@ -3260,7 +3260,7 @@ function StudyContent() {
                           }`}
                           disabled={hasResult || answerState !== "typing" }
                           key={`${choice}-${index}`}
-                          onClick={() => { if (answerState === "typing" && !hasResult) { setSelectedChoice(choice); setFeedback(null); } }}
+                          onClick={() => { if (answerState === "typing" && !hasResult) { void confirmChoiceSelection(choice); } }}
                           type="button"
                           variant={showCorrect || (!hasResult && isSelected) ? "default" : "outline"}
                         >
@@ -3446,13 +3446,6 @@ function StudyContent() {
           </div>
         ) : null}
       </section>
-      {/* Debug overlay - shows key press diagnostics */}
-      <div className="fixed bottom-0 left-0 right-0 z-50 max-h-32 overflow-y-auto bg-black/90 p-2 text-xs font-mono text-green-400">
-        {debugLog.length === 0 ? <p>等待按键... (按 1-6 或空格测试)</p> : null}
-        {debugLog.map((entry, i) => (
-          <p key={i}>{entry}</p>
-        ))}
-      </div>
     </main>
     <style>{`
       @keyframes celebration-star-burst {
