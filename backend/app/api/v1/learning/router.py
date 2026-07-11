@@ -954,11 +954,85 @@ def list_due_review_items(
         # english_to_chinese = 57% acc, listen_choose_chinese = 55% acc
         # — these give the child a chance to succeed before attempting
         # the harder spelling modes.
-        FOCUS_MODES = [
-            "listen_choose_chinese",    # 听音选中文 (55% acc) — easiest, build confidence
-            "english_to_chinese",       # 看英文选中文 (57% acc)
+        BASE_MODES = [
+            "listen_choose_chinese",    # 听音选中文
+            "english_to_chinese",       # 看英文选中文
             "chinese_to_english",       # 看中文拼英文
         ]
+
+        # Build per-word intelligence from WordMemoryState to drive
+        # dynamic question selection (Phase 1 optimization).
+        word_intel: dict[str, dict[str, int]] = {}
+        if top_items:
+            top_words = {tokenize_words(it.english_text)[0].strip().lower() for it in top_items if tokenize_words(it.english_text)}
+            # Also check MemoryState for strength info
+            for item, mem_state in due_rows:
+                for w in tokenize_words(item.english_text):
+                    w = w.strip().lower()
+                    if w in top_words and w not in word_intel:
+                        word_intel[w] = {
+                            "strength": round(mem_state.memory_strength or 0, 2),
+                            "lapse_count": mem_state.lapse_count or 0,
+                            "consecutive_errors": mem_state.consecutive_error_count or 0,
+                        }
+            # Enrich with WordMemoryState error type counts
+            word_state_rows = db.scalars(
+                select(WordMemoryState).where(
+                    WordMemoryState.user_id == current_user.id,
+                    WordMemoryState.word.in_(list(top_words)),
+                )
+            ).all()
+            for ws in word_state_rows:
+                if ws.word not in word_intel:
+                    word_intel[ws.word] = {"strength": 0, "lapse_count": 0, "consecutive_errors": 0}
+                intel = word_intel[ws.word]
+                error_counts = ws.error_type_counts or {}
+                intel["meaning_errors"] = sum(
+                    error_count_value(v) for k, v in error_counts.items() if k == "meaning"
+                )
+                intel["unknown_errors"] = sum(
+                    error_count_value(v) for k, v in error_counts.items() if k == "unknown"
+                )
+                intel["first_letter_errors"] = sum(
+                    error_count_value(v) for k, v in error_counts.items() if k == "first-letter"
+                )
+                intel["strength"] = max(intel.get("strength", 0), ws.memory_strength or 0)
+
+        def modes_for_word(word: str) -> list[str]:
+            """Return the optimal question mode sequence for a given word.
+
+            Phase 1 optimizations:
+              - Skip meaning choice if meaning_errors <= 1 (93% of errors are spelling)
+              - Add hidden_recall before spelling if unknown_errors >= 2 (28% of errors)
+              - Low-strength word: use only 1 verification question
+            """
+            intel = word_intel.get(word, {})
+            strength = intel.get("strength", 0)
+            meaning_errors = intel.get("meaning_errors", 0)
+            unknown_errors = intel.get("unknown_errors", 0)
+
+            modes: list[str] = []
+
+            # Low-strength word (正确率>=90%) → only 1 quick verification
+            if strength >= 0.90 and intel.get("consecutive_errors", 0) <= 0:
+                return ["chinese_to_english"]
+
+            # Build custom mode list
+            # Step 1: Listen-based recognition (always start with confidence)
+            modes.append("listen_choose_chinese")
+
+            # Step 2: English→Chinese choice — skip if meaning is already solid
+            if meaning_errors > 1 or strength < 0.5:
+                modes.append("english_to_chinese")
+
+            # Step 3: Preview for difficult words before spelling
+            if unknown_errors >= 2 or intel.get("consecutive_errors", 0) >= 3:
+                modes.append("hidden_recall")
+
+            # Step 4: Spelling
+            modes.append("chinese_to_english")
+
+            return modes
 
         # P0-1: Warm-up — sort by strength (highest first = easiest words first)
         def _item_strength(item: LearningItemRead) -> float:
@@ -1034,7 +1108,8 @@ def list_due_review_items(
             # translation and properties, giving a clean word-only review.
             word_item = word_items_by_word.get(main_word, item)
             chinese_meaning = word_translations.get(main_word, "") or getattr(word_item, 'chinese_text', "") or main_word
-            for mode in FOCUS_MODES:
+            word_modes = modes_for_word(main_word)
+            for mode in word_modes:
                 focus_item = LearningItemRead(
                     id=uuid4(),
                     user_id=current_user.id,
