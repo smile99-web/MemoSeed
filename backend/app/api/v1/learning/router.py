@@ -963,40 +963,6 @@ def list_due_review_items(
         # Build per-word intelligence from WordMemoryState to drive
         # dynamic question selection (Phase 1 optimization).
         word_intel: dict[str, dict[str, int]] = {}
-        if top_items:
-            top_words = {tokenize_words(it.english_text)[0].strip().lower() for it in top_items if tokenize_words(it.english_text)}
-            # Also check MemoryState for strength info
-            for item, mem_state in due_rows:
-                for w in tokenize_words(item.english_text):
-                    w = w.strip().lower()
-                    if w in top_words and w not in word_intel:
-                        word_intel[w] = {
-                            "strength": round(mem_state.memory_strength or 0, 2),
-                            "lapse_count": mem_state.lapse_count or 0,
-                            "consecutive_errors": mem_state.consecutive_error_count or 0,
-                        }
-            # Enrich with WordMemoryState error type counts
-            word_state_rows = db.scalars(
-                select(WordMemoryState).where(
-                    WordMemoryState.user_id == current_user.id,
-                    WordMemoryState.word.in_(list(top_words)),
-                )
-            ).all()
-            for ws in word_state_rows:
-                if ws.word not in word_intel:
-                    word_intel[ws.word] = {"strength": 0, "lapse_count": 0, "consecutive_errors": 0}
-                intel = word_intel[ws.word]
-                error_counts = ws.error_type_counts or {}
-                intel["meaning_errors"] = sum(
-                    error_count_value(v) for k, v in error_counts.items() if k == "meaning"
-                )
-                intel["unknown_errors"] = sum(
-                    error_count_value(v) for k, v in error_counts.items() if k == "unknown"
-                )
-                intel["first_letter_errors"] = sum(
-                    error_count_value(v) for k, v in error_counts.items() if k == "first-letter"
-                )
-                intel["strength"] = max(intel.get("strength", 0), ws.memory_strength or 0)
 
         def modes_for_word(word: str) -> list[str]:
             """Return the optimal question mode sequence for a given word.
@@ -1041,6 +1007,35 @@ def list_due_review_items(
         sentence_review_items.sort(key=_item_strength, reverse=True)
 
         top_items = sentence_review_items[:REVIEW_WORD_COUNT]
+
+        # Populate word_intel with per-word error data (moved here from
+        # above because top_items must be defined first)
+        if top_items:
+            top_words = {tokenize_words(it.english_text)[0].strip().lower() for it in top_items if tokenize_words(it.english_text)}
+            for item, mem_state in due_rows:
+                for w in tokenize_words(item.english_text):
+                    w = w.strip().lower()
+                    if w in top_words and w not in word_intel:
+                        word_intel[w] = {
+                            "strength": round(mem_state.memory_strength or 0, 2),
+                            "lapse_count": mem_state.lapse_count or 0,
+                            "consecutive_errors": mem_state.consecutive_error_count or 0,
+                        }
+            word_state_rows = db.scalars(
+                select(WordMemoryState).where(
+                    WordMemoryState.user_id == current_user.id,
+                    WordMemoryState.word.in_(list(top_words)),
+                )
+            ).all()
+            for ws in word_state_rows:
+                if ws.word not in word_intel:
+                    word_intel[ws.word] = {"strength": 0, "lapse_count": 0, "consecutive_errors": 0}
+                intel = word_intel[ws.word]
+                error_counts = ws.error_type_counts or {}
+                intel["meaning_errors"] = sum(error_count_value(v) for k, v in error_counts.items() if k == "meaning")
+                intel["unknown_errors"] = sum(error_count_value(v) for k, v in error_counts.items() if k == "unknown")
+                intel["first_letter_errors"] = sum(error_count_value(v) for k, v in error_counts.items() if k == "first-letter")
+                intel["strength"] = max(intel.get("strength", 0), ws.memory_strength or 0)
 
         # P1-1: Phonics grouping — bring in pattern-siblings
         seen_patterns: set[str] = set()
