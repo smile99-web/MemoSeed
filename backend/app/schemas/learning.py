@@ -84,6 +84,26 @@ class CourseCacheRebuildRequest(BaseModel):
     llm_api_key: str | None = None
 
 
+class CourseCacheItemRetryRequest(BaseModel):
+    """Request to retry only the FAILED cache fields for a single item.
+
+    Each bool field controls whether that specific cache layer is
+    re-generated. All default to True so a button labeled "重试"
+    re-runs all failed layers at once; the frontend can pass
+    explicit false values for a finer-grained retry UI later.
+    """
+    sentence_chinese_translation: bool = True
+    sentence_english_audio: bool = True
+    sentence_chinese_audio: bool = True
+    word_translations: bool = True
+    word_english_audio: bool = True
+    word_chinese_audio: bool = True
+    llm_provider: str | None = None
+    llm_base_url: str | None = None
+    llm_model: str | None = None
+    llm_api_key: str | None = None
+
+
 class CourseCacheStatusSummary(BaseModel):
     total_items: int
     sentence_translations_ready: int

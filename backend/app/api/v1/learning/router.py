@@ -25,6 +25,7 @@ from app.models.word_memory_state import WordMemoryState
 from app.models.word_review_task import WordReviewTask
 from app.models.word_translation import WordTranslation
 from app.schemas.learning import (
+    CourseCacheItemRetryRequest,
     CourseCacheRebuildRequest,
     CourseCacheItemStatus,
     CourseCacheStatusResponse,
@@ -62,7 +63,7 @@ from app.services.memory_scheduler import (
     stuck_word_filter_clause,
 )
 from app.services.secure_model_settings import get_private_model_settings
-from app.services.speech_asset_cache import build_learning_speech_targets, ensure_volcengine_speech_asset
+from app.services.speech_asset_cache import build_learning_speech_targets, ensure_volcengine_speech_asset, precache_learning_speech_assets
 from app.services.tts_cache import build_cache_key, get_cached_audio
 from app.services.word_memory import (
     build_task_choices,
@@ -1430,6 +1431,81 @@ def rebuild_course_cache(
         yield emit(100, "课程缓存重新生成完成", "done")
 
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+
+
+@router.post("/courses/{course_id}/cache-retry/{item_id}", response_model=CourseCacheStatusResponse)
+def retry_item_cache(
+    course_id: UUID,
+    item_id: UUID,
+    payload: CourseCacheItemRetryRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> CourseCacheStatusResponse:
+    """Re-generate only the FAILED cache fields for a single item.
+
+    Unlike /cache-rebuild (which re-processes the whole course), this
+    endpoint takes a single item ID and only re-runs the layers
+    specified in the request. Used by the "重试" button in the
+    import page next to each yellow status cell.
+    """
+    course = db.scalar(select(Course).where(Course.id == course_id, Course.user_id == current_user.id))
+    if course is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Course not found")
+
+    item = db.scalar(
+        select(LearningItem).where(
+            LearningItem.id == item_id,
+            LearningItem.user_id == current_user.id,
+            LearningItem.course_id == course_id,
+        )
+    )
+    if item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning item not found")
+
+    stored_settings = get_private_model_settings(db, current_user.id)
+    translation_settings = build_llm_translation_settings(
+        payload.llm_provider,
+        payload.llm_base_url,
+        payload.llm_model,
+        payload.llm_api_key,
+        stored_settings,
+    )
+
+    # Re-generate the sentence Chinese translation if missing.
+    if payload.sentence_chinese_translation and needs_translation(item.chinese_text):
+        try:
+            item.chinese_text = translate_english_to_chinese(item.english_text, translation_settings)
+            db.add(item)
+            db.commit()
+        except ValueError:
+            db.rollback()
+
+    # Re-generate speech assets. precache_learning_speech_assets skips
+    # already-cached targets, so we can call it for the single item
+    # with both languages — the cached check is per-target.
+    if payload.sentence_english_audio or payload.sentence_chinese_audio or payload.word_english_audio or payload.word_chinese_audio:
+        try:
+            precache_learning_speech_assets(
+                db,
+                user_id=current_user.id,
+                course_id=course_id,
+                learning_items=[item],
+                stored_settings=stored_settings,
+            )
+        except Exception:
+            pass
+
+    # Re-generate word/term translations if requested.
+    if payload.word_translations:
+        item_terms = collect_course_terms([item])
+        try:
+            ensure_word_translations(db, current_user.id, item_terms, translation_settings, course_id)
+            db.commit()
+        except Exception:
+            db.rollback()
+
+    # Return the full updated cache status so the UI can refresh in-place.
+    return get_course_cache_status(course_id, current_user, db)
 
 
 def collect_course_terms(learning_items: list[LearningItem]) -> list[str]:

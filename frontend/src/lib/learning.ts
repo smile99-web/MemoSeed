@@ -387,6 +387,33 @@ export async function rebuildCourseCache(
   return lastProgress;
 }
 
+export async function retryItemCache(
+  courseId: string,
+  itemId: string,
+  accessToken: string,
+  modelSettings: ModelSettings,
+): Promise<CourseCacheStatus> {
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/learning/courses/${courseId}/cache-retry/${itemId}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        llm_provider: modelSettings.llmProvider,
+        llm_base_url: modelSettings.llmBaseUrl,
+        llm_model: modelSettings.llmModel,
+        llm_api_key: modelSettings.llmApiKey,
+      }),
+      cache: "no-store",
+    },
+    accessToken,
+  );
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as CourseCacheStatus;
+}
+
 export async function getCourseCacheStatus(courseId: string, accessToken: string): Promise<CourseCacheStatus> {
   const response = await fetchWithAuth(
     `${getApiBaseUrl()}/learning/courses/${courseId}/cache-status`,

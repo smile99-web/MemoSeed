@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { getAccessToken } from "@/lib/auth";
 import { Course, CoursePackage, createCourse, createCoursePackage, deleteCourse, deleteCoursePackage, exportCoursePackage, importCoursePackage, listCoursePackages, listCourses, PackageExportData, PackageImportResult } from "@/lib/courses";
-import { CourseCacheRebuildProgress, CourseCacheStatus, CourseCacheItemStatus, getCourseCacheStatus, LearningImportProgress, LearningImportResponse, LearningItem, listLearningItems, rebuildCourseCache, uploadLearningItems, validateImportFile } from "@/lib/learning";
+import { CourseCacheRebuildProgress, CourseCacheStatus, CourseCacheItemStatus, getCourseCacheStatus, LearningImportProgress, LearningImportResponse, LearningItem, listLearningItems, rebuildCourseCache, retryItemCache, uploadLearningItems, validateImportFile } from "@/lib/learning";
 import { ModelSettings, getModelSettings, loadPersistedModelSettings } from "@/lib/model-settings";
 
 const itemTypeLabels: Record<LearningItem["item_type"], string> = {
@@ -55,6 +55,25 @@ export default function LearningImportPage() {
   const [isUploading, setIsUploading] = useState(false);
   const [importProgress, setImportProgress] = useState<LearningImportProgress | null>(null);
   const [isRebuildingCache, setIsRebuildingCache] = useState(false);
+  const [retryingItems, setRetryingItems] = useState<Set<string>>(new Set());
+
+  async function handleRetryItemCache(itemId: string) {
+    const accessToken = getAccessToken();
+    if (!accessToken || !selectedCourseId) return;
+    setRetryingItems((prev) => new Set(prev).add(itemId));
+    try {
+      await retryItemCache(selectedCourseId, itemId, accessToken, modelSettings);
+      await refreshCacheStatus(selectedCourseId);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "重试失败");
+    } finally {
+      setRetryingItems((prev) => {
+        const next = new Set(prev);
+        next.delete(itemId);
+        return next;
+      });
+    }
+  }
   const [cacheRebuildProgress, setCacheRebuildProgress] = useState<CourseCacheRebuildProgress | null>(null);
   const [cacheStatus, setCacheStatus] = useState<CourseCacheStatus | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -786,19 +805,39 @@ export default function LearningImportPage() {
                   <tbody>
                     {items.map((item) => {
                       const itemCacheStatus = getItemCacheStatus(item.id);
+                      const hasFailed = itemCacheStatus && (
+                        !itemCacheStatus.sentence_chinese_translation_ready ||
+                        !itemCacheStatus.sentence_english_audio_ready ||
+                        !itemCacheStatus.sentence_chinese_audio_ready ||
+                        !itemCacheStatus.word_translations_ready ||
+                        !itemCacheStatus.word_english_audio_ready ||
+                        !itemCacheStatus.word_chinese_audio_ready
+                      );
+                      const isRetrying = retryingItems.has(item.id);
                       return (
                         <tr className="border-t" key={item.id}>
                           <td className="px-3 py-2">{itemTypeLabels[item.item_type]}</td>
                           <td className="px-3 py-2">{item.english_text}</td>
                           <td className="px-3 py-2">{item.chinese_text}</td>
                           <td className="px-3 py-2">
-                            <div className="flex flex-wrap gap-1">
+                            <div className="flex flex-wrap items-center gap-1">
                               {renderCacheBadge("句子中文", itemCacheStatus?.sentence_chinese_translation_ready)}
                               {renderCacheBadge("句子英文发音", itemCacheStatus?.sentence_english_audio_ready)}
                               {renderCacheBadge("句子中文发音", itemCacheStatus?.sentence_chinese_audio_ready)}
                               {renderCacheBadge("单词释义", itemCacheStatus?.word_translations_ready)}
                               {renderCacheBadge("单词英文发音", itemCacheStatus?.word_english_audio_ready)}
                               {renderCacheBadge("单词中文发音", itemCacheStatus?.word_chinese_audio_ready)}
+                              {hasFailed ? (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="ml-2 h-6 px-2 text-xs"
+                                  disabled={isRetrying}
+                                  onClick={() => { void handleRetryItemCache(item.id); }}
+                                >
+                                  {isRetrying ? "重试中..." : "🔄 重试"}
+                                </Button>
+                              ) : null}
                             </div>
                           </td>
                         </tr>
