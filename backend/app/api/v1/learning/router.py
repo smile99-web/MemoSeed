@@ -1484,19 +1484,28 @@ def retry_item_cache(
             logger.warning("Cache retry: sentence translation failed for item %s: %s", item_id, exc)
             errors.append(f"句子翻译失败: {exc}")
 
-    # Re-generate speech assets. precache_learning_speech_assets skips
-    # already-cached targets, so we can call it for the single item
-    # with both languages — the cached check is per-target.
+    # Re-generate speech assets. precache_learning_speech_assets has
+    # a 3-failure limit that stops trying after 3 TTS errors. For
+    # retry, we bypass it by calling ensure_volcengine_speech_asset
+    # directly with allow_synthesis=True (no failure cap).
     if payload.sentence_english_audio or payload.sentence_chinese_audio or payload.word_english_audio or payload.word_chinese_audio:
         try:
-            precache_learning_speech_assets(
-                db,
-                user_id=current_user.id,
-                course_id=course_id,
-                learning_items=[item],
-                stored_settings=stored_settings,
+            from app.services.speech_asset_cache import build_learning_speech_targets, ensure_volcengine_speech_asset
+            targets = build_learning_speech_targets(
+                db, user_id=current_user.id, learning_items=[item], stored_settings=stored_settings
             )
+            for target in targets:
+                ensure_volcengine_speech_asset(
+                    db,
+                    user_id=current_user.id,
+                    course_id=course_id,
+                    target=target,
+                    stored_settings=stored_settings,
+                    allow_synthesis=True,
+                )
+            db.commit()
         except Exception as exc:
+            db.rollback()
             logger.warning("Cache retry: speech precache failed for item %s: %s", item_id, exc)
             errors.append(f"语音生成失败: {exc}")
 
