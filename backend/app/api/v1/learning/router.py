@@ -1109,7 +1109,19 @@ def list_due_review_items(
             word_item = word_items_by_word.get(main_word, item)
             chinese_meaning = word_translations.get(main_word, "") or getattr(word_item, 'chinese_text', "") or main_word
             word_modes = modes_for_word(main_word)
+            intel = word_intel.get(main_word, {})
+            wlen = len(main_word)
+            # Hint: first-letter prompt for words with persistent first-letter errors
+            first_letter_hint = ""
+            if intel.get("first_letter_errors", 0) >= 2 and wlen >= 3:
+                first_letter_hint = main_word[0]
+            # Syllable trigger: auto-encoding for 4-7 letter words (hardest range)
+            need_syllable = 4 <= wlen <= 7
             for mode in word_modes:
+                review_prompt = None
+                if mode == "chinese_to_english":
+                    if first_letter_hint:
+                        review_prompt = f"首字母:{first_letter_hint}"
                 focus_item = LearningItemRead(
                     id=uuid4(),
                     user_id=current_user.id,
@@ -1118,7 +1130,8 @@ def list_due_review_items(
                     english_text=main_word,
                     chinese_text=chinese_meaning,
                     review_task_type=mode,
-                    source=f"单词复习",
+                    review_prompt=review_prompt,
+                    source=f"单词复习{'syllable' if need_syllable else ''}",
                     focus_words=[main_word],
                     created_at=item.created_at,
                     updated_at=item.updated_at,

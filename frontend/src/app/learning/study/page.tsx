@@ -1542,7 +1542,12 @@ function StudyContent() {
   }, [flushStudyTime]);
 
   useEffect(() => {
-    setWordAnswers(currentWords.map(() => ""));
+    // Phase 2: first-letter hint — pre-fill the first letter for
+    // words where the backend detected persistent first-letter errors.
+    const hintLetter = (currentItem?.review_prompt || "").startsWith("首字母:")
+      ? (currentItem?.review_prompt || "").slice(4)
+      : "";
+    setWordAnswers(currentWords.map((_w, i) => (i === 0 && hintLetter) ? hintLetter : ""));
     setWordStatuses(currentWords.map(() => "idle"));
     setWordErrorCounts(currentWords.map(() => 0));
     setWordConsecutiveCorrect(currentWords.map(() => 0));
