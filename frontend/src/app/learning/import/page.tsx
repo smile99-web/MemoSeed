@@ -55,24 +55,39 @@ export default function LearningImportPage() {
   const [isUploading, setIsUploading] = useState(false);
   const [importProgress, setImportProgress] = useState<LearningImportProgress | null>(null);
   const [isRebuildingCache, setIsRebuildingCache] = useState(false);
-  const [retryingItems, setRetryingItems] = useState<Set<string>>(new Set());
+  const [retryProgress, setRetryProgress] = useState<{current: number; total: number; message: string} | null>(null);
 
-  async function handleRetryItemCache(itemId: string) {
+  async function handleRetryAllFailed() {
     const accessToken = getAccessToken();
-    if (!accessToken || !selectedCourseId) return;
-    setRetryingItems((prev) => new Set(prev).add(itemId));
-    try {
-      await retryItemCache(selectedCourseId, itemId, accessToken, modelSettings);
-      await refreshCacheStatus(selectedCourseId);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "重试失败");
-    } finally {
-      setRetryingItems((prev) => {
-        const next = new Set(prev);
-        next.delete(itemId);
-        return next;
-      });
+    if (!accessToken || !selectedCourseId || !cacheStatus) return;
+    const failedItems = cacheStatus.items.filter((s) =>
+      !s.sentence_chinese_translation_ready ||
+      !s.sentence_english_audio_ready ||
+      !s.sentence_chinese_audio_ready ||
+      !s.word_translations_ready ||
+      !s.word_english_audio_ready ||
+      !s.word_chinese_audio_ready
+    );
+    if (failedItems.length === 0) {
+      setErrorMessage("没有需要重试的项目，所有缓存已完成。");
+      return;
     }
+    setErrorMessage(null);
+    setRetryProgress({ current: 0, total: failedItems.length, message: "开始重试..." });
+    let successCount = 0;
+    let failCount = 0;
+    for (let i = 0; i < failedItems.length; i++) {
+      setRetryProgress({ current: i + 1, total: failedItems.length, message: `正在重试 ${i + 1}/${failedItems.length}...` });
+      try {
+        await retryItemCache(selectedCourseId, failedItems[i].learning_item_id, accessToken, modelSettings);
+        successCount++;
+      } catch {
+        failCount++;
+      }
+    }
+    await refreshCacheStatus(selectedCourseId);
+    setRetryProgress(null);
+    setErrorMessage(failCount > 0 ? `重试完成: ${successCount} 项成功, ${failCount} 项失败` : `全部 ${successCount} 项重试成功!`);
   }
   const [cacheRebuildProgress, setCacheRebuildProgress] = useState<CourseCacheRebuildProgress | null>(null);
   const [cacheStatus, setCacheStatus] = useState<CourseCacheStatus | null>(null);
@@ -781,6 +796,18 @@ export default function LearningImportPage() {
                   <p className="text-muted-foreground">{cacheStatus.summary.word_chinese_audio_ready} / {cacheStatus.summary.total_terms}</p>
                 </div>
               </div>
+              <div className="mt-4 flex items-center gap-3">
+                <Button
+                  variant="outline"
+                  disabled={retryProgress !== null}
+                  onClick={() => { void handleRetryAllFailed(); }}
+                >
+                  {retryProgress ? "正在重试..." : "🔄 重试所有黄色项目"}
+                </Button>
+                {retryProgress ? (
+                  <span className="text-sm text-muted-foreground">{retryProgress.message}</span>
+                ) : null}
+              </div>
             </CardContent>
           </Card>
         ) : null}
@@ -805,39 +832,19 @@ export default function LearningImportPage() {
                   <tbody>
                     {items.map((item) => {
                       const itemCacheStatus = getItemCacheStatus(item.id);
-                      const hasFailed = itemCacheStatus && (
-                        !itemCacheStatus.sentence_chinese_translation_ready ||
-                        !itemCacheStatus.sentence_english_audio_ready ||
-                        !itemCacheStatus.sentence_chinese_audio_ready ||
-                        !itemCacheStatus.word_translations_ready ||
-                        !itemCacheStatus.word_english_audio_ready ||
-                        !itemCacheStatus.word_chinese_audio_ready
-                      );
-                      const isRetrying = retryingItems.has(item.id);
                       return (
                         <tr className="border-t" key={item.id}>
                           <td className="px-3 py-2">{itemTypeLabels[item.item_type]}</td>
                           <td className="px-3 py-2">{item.english_text}</td>
                           <td className="px-3 py-2">{item.chinese_text}</td>
                           <td className="px-3 py-2">
-                            <div className="flex flex-wrap items-center gap-1">
+                            <div className="flex flex-wrap gap-1">
                               {renderCacheBadge("句子中文", itemCacheStatus?.sentence_chinese_translation_ready)}
                               {renderCacheBadge("句子英文发音", itemCacheStatus?.sentence_english_audio_ready)}
                               {renderCacheBadge("句子中文发音", itemCacheStatus?.sentence_chinese_audio_ready)}
                               {renderCacheBadge("单词释义", itemCacheStatus?.word_translations_ready)}
                               {renderCacheBadge("单词英文发音", itemCacheStatus?.word_english_audio_ready)}
                               {renderCacheBadge("单词中文发音", itemCacheStatus?.word_chinese_audio_ready)}
-                              {hasFailed ? (
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  className="ml-2 h-6 px-2 text-xs"
-                                  disabled={isRetrying}
-                                  onClick={() => { void handleRetryItemCache(item.id); }}
-                                >
-                                  {isRetrying ? "重试中..." : "🔄 重试"}
-                                </Button>
-                              ) : null}
                             </div>
                           </td>
                         </tr>
