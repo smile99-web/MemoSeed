@@ -61,13 +61,36 @@ def ensure_word_translations(
         if is_valid_chinese_translation(word, translation)
     }
     # P2: Fill from built-in dictionary (instant, no API call needed)
+    # ALSO persist to the DB so the cache-status check (which queries
+    # word_translations table) sees these as "ready". Without the DB
+    # write, words in BUILTIN_WORD_DICTIONARY would appear in the
+    # return value but remain "yellow" in the cache status UI forever.
     for word in normalized_words:
         if word not in translations and word in BUILTIN_WORD_DICTIONARY:
             builtin = BUILTIN_WORD_DICTIONARY[word]
             if is_valid_chinese_translation(word, builtin):
                 translations[word] = builtin
+                translation = db.scalar(
+                    select(WordTranslation).where(
+                        WordTranslation.user_id == user_id,
+                        WordTranslation.word == word,
+                    )
+                )
+                if translation is None:
+                    db.add(WordTranslation(
+                        user_id=user_id,
+                        course_id=course_id,
+                        word=word,
+                        chinese_text=builtin,
+                        source="dictionary",
+                    ))
+                else:
+                    translation.chinese_text = builtin
+                    translation.source = "dictionary"
     missing_words = [word for word in normalized_words if word not in translations]
     if settings is None:
+        if normalized_words:
+            db.flush()
         return translations
 
     for word in missing_words:
