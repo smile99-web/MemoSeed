@@ -535,6 +535,15 @@ function StudyContent() {
   useEffect(() => {
     setIsFocusMode(false);
   }, [studyMode]);
+  // Phase-1 optimization: time-of-day suggestion
+  const timeSuggestion = (() => {
+    const hour = new Date().getHours();
+    if (hour >= 19 && hour < 21) return "🌟 现在是学习黄金时段,建议优先练习困难词(urgent/high 级)";
+    if (hour >= 21 && hour < 23) return "⏰ 晚间学习效率不错,可以多练拼写题";
+    if (hour >= 12 && hour < 17) return "💡 下午时段建议先做选择题热身,再做拼写";
+    return null;
+  })();
+
   // AI review recommendations from the "推荐复习" button on the home page
   const isAiReview = searchParams.get("ai") === "1";
   const [aiRecommendedWords, setAiRecommendedWords] = useState<string[]>([]);
@@ -3161,6 +3170,11 @@ function StudyContent() {
         const otherModes = (["review", "learn", "mix"] as StudyMode[]).filter((m) => m !== studyMode);
         return (
           <>
+          {timeSuggestion ? (
+            <div className="mx-4 mt-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2.5 ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3">
+              <p className="text-xs font-bold text-blue-700 ipad:text-sm">{timeSuggestion}</p>
+            </div>
+          ) : null}
           {aiRecommendedWords.length > 0 ? (
             <div className="mx-4 mt-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3">
               <p className="text-sm font-bold text-amber-700">🤖 AI 推荐复习 · {aiRecommendedWords.length} 个重点词优先</p>
