@@ -170,8 +170,12 @@ def derive_word_status(word_state: WordMemoryState) -> str:
     # single non-reset equivalent `consecutive_error_count <= 1` (tolerate
     # one natural slip). Cumulative thresholds (memory_strength,
     # recall_correct_count, no_hint_correct_date_count) are unchanged.
+    # 0.75 matches the dashboard's summarize_word threshold. Previously
+    # 0.82 was too strict — 63 words with avg_strength 0.78, avg_rc 21.7,
+    # and avg_nd 7.8 met all conditions EXCEPT the strength check and
+    # were stuck in "near_mastered" despite being clearly mastered.
     if (
-        word_state.memory_strength >= 0.82
+        word_state.memory_strength >= 0.75
         and word_state.recall_correct_count >= 3
         and word_state.no_hint_correct_date_count >= 3
         and word_state.consecutive_error_count <= 1

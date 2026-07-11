@@ -1138,7 +1138,20 @@ def schedule_memory_review(
             for mistake in unresolved_mistakes:
                 mistake.is_resolved = True
     else:
-        memory_state.repetition_count = 0
+        # Do NOT reset repetition_count to 0 on a single error.
+        # The previous code `repetition_count = 0` caused FSRS to
+        # treat every lapse as a "first review" — giving the word a
+        # minimal interval (e.g., 10 minutes) and forcing it back
+        # into the queue almost immediately. The child would then
+        # see the same word again too soon, fail again (it's too
+        # fresh!), and the cycle repeated indefinitely. Words like
+        # "it" had rc=126 but repetition_count=0 and stayed
+        # "difficult" forever.
+        #
+        # Now we only increment lapse_count. FSRS will shorten the
+        # interval (via lapse_count penalty) but won't completely
+        # forget that this word has been practiced before. This
+        # breaks the "rapid-fire failure" loop.
         memory_state.lapse_count += 1
     update_memory_counters(memory_state, is_correct, review_mode)
 
