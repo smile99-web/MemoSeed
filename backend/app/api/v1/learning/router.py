@@ -1471,14 +1471,18 @@ def retry_item_cache(
         stored_settings,
     )
 
-    # Re-generate the sentence Chinese translation if missing.
-    if payload.sentence_chinese_translation and needs_translation(item.chinese_text):
+    errors: list[str] = []
+
+    # Re-generate the sentence Chinese translation.
+    if payload.sentence_chinese_translation:
         try:
             item.chinese_text = translate_english_to_chinese(item.english_text, translation_settings)
             db.add(item)
             db.commit()
-        except ValueError:
+        except Exception as exc:
             db.rollback()
+            logger.warning("Cache retry: sentence translation failed for item %s: %s", item_id, exc)
+            errors.append(f"句子翻译失败: {exc}")
 
     # Re-generate speech assets. precache_learning_speech_assets skips
     # already-cached targets, so we can call it for the single item
@@ -1492,8 +1496,9 @@ def retry_item_cache(
                 learning_items=[item],
                 stored_settings=stored_settings,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Cache retry: speech precache failed for item %s: %s", item_id, exc)
+            errors.append(f"语音生成失败: {exc}")
 
     # Re-generate word/term translations if requested.
     if payload.word_translations:
@@ -1501,8 +1506,17 @@ def retry_item_cache(
         try:
             ensure_word_translations(db, current_user.id, item_terms, translation_settings, course_id)
             db.commit()
-        except Exception:
+        except Exception as exc:
             db.rollback()
+            logger.warning("Cache retry: word translations failed for item %s: %s", item_id, exc)
+            errors.append(f"单词翻译失败: {exc}")
+
+    # If everything failed, raise an error so the frontend knows.
+    if errors and len(errors) >= 3:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="；".join(errors),
+        )
 
     # Return the full updated cache status so the UI can refresh in-place.
     return get_course_cache_status(course_id, current_user, db)
