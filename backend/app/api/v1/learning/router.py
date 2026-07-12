@@ -996,7 +996,12 @@ def list_due_review_items(
             if strength >= 0.90 and intel.get("consecutive_errors", 0) <= 0:
                 return ["chinese_to_english"]
 
-            # Standard: recognition → audio spelling test (retry handled by frontend)
+            # Standard: recognition → audio spelling test.
+            # Long words (7+ letters) get an extra spelling round for
+            # more intensive practice — the child spells it twice
+            # instead of once, helping cement the longer word pattern.
+            if len(word) >= 7:
+                return ["listen_choose_chinese", "listen_spell", "chinese_to_english"]
             return ["listen_choose_chinese", "listen_spell"]
 
         # P0-1: Warm-up — sort by strength (highest first = easiest words first)
