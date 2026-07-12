@@ -1775,8 +1775,11 @@ function StudyContent() {
         // caused review-mode users to always restart from item 0 — never
         // resuming where they left off. Now read and write share the same
         // key, and the same bounds check applies in every mode.
-        const safeIndex = dueReviewItems.length === 0
-          && Number.isInteger(savedIndex)
+        // Resume from saved position regardless of dueReviewItems.
+        // The previous check `dueReviewItems.length === 0` blocked
+        // progress restoration in review mode — all 169 words were
+        // re-queued but the saved index was always discarded.
+        const safeIndex = Number.isInteger(savedIndex)
           && savedIndex >= 0
           && savedIndex < mergedItems.length
             ? savedIndex
