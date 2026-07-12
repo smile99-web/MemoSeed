@@ -820,7 +820,9 @@ def calculate_fsrs_interval(
     Multipliers:
       - strength <  0.30  -> 0.50x (heavily struggling: review more often)
       - 0.30 <= s < 0.70 -> 0.70x (in-progress band: build it)
-      - strength >= 0.70  -> 1.00x (close-to-mastered: FSRS default)
+      - 0.70 <= s < 0.90 -> 1.00x (close-to-mastered: FSRS default)
+      - 0.90 <= s < 0.95 -> 1.50x (mastered: graduate faster)
+      - strength >= 0.95  -> 2.00x (firmly mastered: longest intervals)
 
     The 3/day cap + stuck-word parking keep these shortened intervals
     from running away.
@@ -831,6 +833,10 @@ def calculate_fsrs_interval(
             interval_days *= 0.50
         elif current_strength < 0.70:
             interval_days *= 0.70
+        elif current_strength >= 0.95:
+            interval_days *= 2.00
+        elif current_strength >= 0.90:
+            interval_days *= 1.50
     return timedelta(days=constrain_stability(interval_days))
 
 
@@ -1044,7 +1050,12 @@ def update_memory_counters(memory_state: MemoryState, is_correct: bool, review_m
     if is_correct:
         memory_state.consecutive_correct_count += 1
         memory_state.consecutive_error_count = 0
-        if review_mode.startswith("word-recall"):
+        # Also count listen_spell and chinese_to_english as recall, so
+        # the recall_correct_count tracks ALL successful spellings
+        # regardless of the review mode. Previously only word-recall
+        # was counted, which meant words spelled correctly in other
+        # modes never showed progress.
+        if review_mode.startswith("word-recall") or review_mode.startswith("listen_spell") or review_mode.startswith("chinese_to_english"):
             memory_state.recall_correct_count += 1
         elif review_mode.startswith("word-hinted"):
             memory_state.hinted_correct_count += 1
@@ -1054,8 +1065,13 @@ def update_memory_counters(memory_state: MemoryState, is_correct: bool, review_m
             memory_state.context_correct_count += 1
         return
 
+    # Do NOT reset consecutive_correct_count on a single error.
+    # The child HAS spelled this word correctly before — one slip
+    # doesn't erase that. The previous behavior (reset to 0) caused
+    # words to get stuck in the "difficult" loop: one error erased
+    # all progress, the mastery check failed, and the word kept
+    # re-appearing with minimal intervals.
     memory_state.consecutive_error_count += 1
-    memory_state.consecutive_correct_count = 0
 
 
 def calculate_interval_days(delay: timedelta) -> int:
