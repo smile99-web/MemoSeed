@@ -2906,7 +2906,12 @@ function StudyContent() {
     if (!currentItem || !isChoiceReviewTask || !choice) {
       return;
     }
-    const correctAnswer = hasChineseText(currentItem.review_answer) ? currentItem.review_answer : reviewTaskWordTranslation;
+    // Always fall back to sync currentItem.chinese_text — reviewTaskWordTranslation
+    // is set async in useEffect and may be empty on first render, causing
+    // the "6-choose-1 number key selects wrong" bug.
+    const correctAnswer = hasChineseText(currentItem.review_answer) ? currentItem.review_answer
+      : hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation
+      : (currentItem?.chinese_text || "");
     const isCorrect = isCorrectChoiceAnswer(choice, correctAnswer);
     // Debug: track which key selected which option vs the correct answer
     setLastDigitSelection({ key: explicitChoice ? "explicit" : "space", selected: choice, correct: correctAnswer ?? "" });
