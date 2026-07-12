@@ -664,6 +664,9 @@ export default function HomePage() {
                 <Button asChild size="lg" className="ipad:text-lg ipad:px-6 ipad:py-6">
                   <Link href="/learning/study?mode=review&ai=1">🤖 推荐复习</Link>
                 </Button>
+                <Button asChild size="lg" variant="outline" className="ipad:text-lg ipad:px-6 ipad:py-6">
+                  <Link href="/learning/study?mode=review&phonics=1">🔤 自然拼读</Link>
+                </Button>
                 <Button asChild size="lg" className="ipad:text-lg ipad:px-6 ipad:py-6">
                   <Link href="/learning/study?mode=review">📚 单词复习</Link>
                 </Button>

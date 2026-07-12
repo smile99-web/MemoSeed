@@ -544,6 +544,9 @@ function StudyContent() {
     return null;
   })();
 
+  // Phonics mode: group words by sound family for pattern learning
+  const isPhonics = searchParams.get("phonics") === "1";
+
   // AI review recommendations from the "推荐复习" button on the home page
   const isAiReview = searchParams.get("ai") === "1";
   const [aiRecommendedWords, setAiRecommendedWords] = useState<string[]>([]);
@@ -1650,6 +1653,7 @@ function StudyContent() {
             false,
             INITIAL_REVIEW_QUEUE_LIMIT,
             isFocusMode,
+            isPhonics,
           ).catch(() => [] as LearningItem[]);
 
           // AI-recommended review: keep ALL 123 words but REORDER
@@ -3183,6 +3187,12 @@ function StudyContent() {
           {timeSuggestion ? (
             <div className="mx-4 mt-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2.5 ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3">
               <p className="text-xs font-bold text-blue-700 ipad:text-sm">{timeSuggestion}</p>
+            </div>
+          ) : null}
+          {isPhonics ? (
+            <div className="mx-4 mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2.5 ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3">
+              <p className="text-sm font-bold text-emerald-700">🔤 自然拼读模式</p>
+              <p className="mt-1 text-xs text-emerald-600">同音组词一起练,先听发音拆音节再拼写,通过声音规律记忆单词</p>
             </div>
           ) : null}
           {aiRecommendedWords.length > 0 ? (

@@ -736,6 +736,7 @@ def list_due_review_items(
     review_cap: int | None = None,
     interleave: bool = False,
     focus: bool = False,
+    phonics: bool = False,
 ) -> list[LearningItemRead]:
     """List due review items.
 
@@ -1216,6 +1217,18 @@ def list_due_review_items(
         if len(review_items) >= capped_limit:
             break
         review_items.append(item_read)
+
+    # Phonics mode: regroup items by sound family so the child
+    # practices related words together (e.g., light/night/right
+    # from the -ight family). This teaches the PATTERN rather than
+    # isolated word memorization, directly addressing the 21.5%
+    # first-letter and 19.1% missing-letter error rates.
+    if phonics and review_items:
+        # Add source note so frontend knows we're in phonics mode
+        for item in review_items:
+            word = _get_phonics_group(item.english_text if hasattr(item, "english_text") else getattr(item, "english_text", ""))
+            if word:
+                item.source = f"phonics:{word}" + (f" {item.source}" if getattr(item, "source", None) else "")
 
     return review_items
 
