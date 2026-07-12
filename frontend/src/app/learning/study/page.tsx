@@ -2553,7 +2553,7 @@ function StudyContent() {
 
     const prevErrorCount = wordErrorCounts[index] ?? 0;
 
-    if (prevErrorCount >= 3) {
+    if (prevErrorCount >= 1) {
       const nextConsecutive = (wordConsecutiveCorrect[index] ?? 0) + 1;
       setWordConsecutiveCorrect((current) => {
         const next = [...current];
@@ -2587,6 +2587,13 @@ function StudyContent() {
         next[index] = 0;
         return next;
       });
+
+      // Auto-advance after 3 correct retries on single-word items
+      if (currentItem?.item_type === "word" && currentWords.length === 1) {
+        updateAnswerState("sentence-complete");
+        setFeedback("拼写完成！点击「下一句」继续。", "success");
+        return;
+      }
     }
 
     if (currentItem) {
@@ -2610,6 +2617,13 @@ function StudyContent() {
     }, 400);
 
     recordSuccessfulWordSpelling(expectedWord, currentRawAnswer, prevErrorCount, prevErrorCount >= 3, currentItem?.item_type === "word");
+
+    // Auto-advance for single-word spelling items on first-try correct
+    if (currentItem?.item_type === "word" && currentWords.length === 1 && prevErrorCount === 0) {
+      updateAnswerState("sentence-complete");
+      setFeedback("拼写正确！点击「下一句」继续。", "success");
+      return;
+    }
 
     // Focus mode rotation: track consecutive correct, auto-rotate after 3
     if (isFocusMode && currentItem) {

@@ -984,41 +984,20 @@ def list_due_review_items(
         def modes_for_word(word: str) -> list[str]:
             """Return the optimal question mode sequence for a given word.
 
-            Flow (user-confirmed order):
-              1. listen_choose_chinese — recognition first, build confidence
-              2. chinese_to_english — spelling test (DON'T show answer yet)
-              3. If wrong (unknown>=3) → hidden_recall (learn from mistake, 3s)
-                 → chinese_to_english (retry after seeing)
-              4. english_to_chinese — only if meaning is weak
+            Flow (user-confirmed, simplified):
+              1. listen_choose_chinese — recognition
+              2. listen_spell — hear English, spell it (real test)
+              3. If wrong → frontend shows hint + 3-retry loop
             """
             intel = word_intel.get(word, {})
             strength = intel.get("strength", 0)
-            meaning_errors = intel.get("meaning_errors", 0)
-            unknown_errors = intel.get("unknown_errors", 0)
 
             # Low-strength word → only 1 quick spelling verification
             if strength >= 0.90 and intel.get("consecutive_errors", 0) <= 0:
                 return ["chinese_to_english"]
 
-            modes: list[str] = []
-
-            # Step 1: Recognition — hear English, pick Chinese (build confidence)
-            modes.append("listen_choose_chinese")
-
-            # Step 2: Spelling test — see Chinese, spell English (real test)
-            modes.append("chinese_to_english")
-
-            # Step 3: If the word is very difficult (unknown >= 3), show
-            # preview AFTER the spelling attempt, then retry.
-            if unknown_errors >= 3 or intel.get("consecutive_errors", 0) >= 3:
-                modes.append("hidden_recall")
-                modes.append("chinese_to_english")
-
-            # Step 4: Meaning check only if meaning is weak
-            if meaning_errors > 1 or strength < 0.5:
-                modes.append("english_to_chinese")
-
-            return modes
+            # Standard: recognition → audio spelling test (retry handled by frontend)
+            return ["listen_choose_chinese", "listen_spell"]
 
         # P0-1: Warm-up — sort by strength (highest first = easiest words first)
         def _item_strength(item: LearningItemRead) -> float:
