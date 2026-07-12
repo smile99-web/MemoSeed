@@ -134,9 +134,16 @@ def build_micro_task_learning_item(
 ) -> tuple[LearningItemRead, bool]:
     task_updated = False
     english_text = task.word
-    # Use pre-cached Chinese translation if available; fall back to prompt text
+    # Use pre-cached Chinese translation if available. NEVER fall back
+    # to task.prompt_text — that's the English question prompt (e.g.
+    # "What does 'apple' mean?"), NOT the Chinese answer. Previously
+    # the `if cached_translation` check was falsy for the empty
+    # string, so an empty cache entry would silently copy the
+    # English prompt into chinese_text, creating an English/Chinese
+    # mismatch. If no cached translation exists, leave chinese_text
+    # empty so the LLM call in _enrich_review_choices fills it later.
     cached_translation = (word_translations or {}).get(task.word.strip().lower(), "")
-    chinese_text = cached_translation if cached_translation else task.prompt_text
+    chinese_text = cached_translation  # may be empty
     review_prompt = task.prompt_text
     source = f"微型任务：{task.task_type}：{task.word}"
     item_type = "word"
