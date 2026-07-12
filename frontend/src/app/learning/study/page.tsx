@@ -1607,7 +1607,7 @@ function StudyContent() {
         void playCurrentItemIntro(currentItem, seqId);
       }
       if (currentItem?.review_task_type === "hidden_recall" && currentWords[0]) {
-        window.setTimeout(function () { showWordPreview(0, currentWords[0]); }, 1200);
+        window.setTimeout(function () { showWordPreview(0, currentWords[0]); }, 800);
       }
     }
   }, [clearMistakePracticePreview, clearWordPreview, currentItem, currentWords, dynamicReviewWordIndexes, playCurrentItemIntro, setPendingMistakePractice, showWordPreview, startVoiceSequence, updateAnswerState, startEncodingFn]);
@@ -2302,7 +2302,7 @@ function StudyContent() {
     setChildHint(null);
     setSentenceWordMeanings(loadingMeanings);
     updateAnswerState("word-meaning-review");
-    setFeedback("拼写完成！看一看每个单词的中文意思，5 秒后继续。");
+    setFeedback("拼写完成！看一看每个单词的中文意思，3 秒后继续。");
 
     const meanings = await buildSentenceWordMeaningMap(words);
     if (currentItemRef.current?.id !== itemId || (answerStateRef.current as AnswerState) !== "word-meaning-review") {

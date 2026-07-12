@@ -30,7 +30,7 @@ TASK_TYPE_LABELS = {
     "english_to_chinese": "英文选中文",
     "match_translation": "中英文配对",
     "missing_letter": "缺字母填空",
-    "hidden_recall": "看 5 秒后隐藏重拼",
+    "hidden_recall": "看 3 秒后隐藏重拼",
 }
 
 ERROR_TYPE_TASK_STRATEGIES = {
