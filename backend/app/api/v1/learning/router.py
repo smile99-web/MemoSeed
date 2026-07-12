@@ -957,7 +957,7 @@ def list_due_review_items(
         # session. Previously this was gated by `if focus and ...` so the
         # word review mode had NO choice tasks when focus was off, leaving
         # only pure-spelling items from the WordReviewTask table.
-        REVIEW_WORD_COUNT = 3 if focus else 10
+        REVIEW_WORD_COUNT = 3 if focus else len(sentence_review_items)
         import random
         pool = sentence_review_items[:max(REVIEW_WORD_COUNT * 3, len(sentence_review_items))]
         random.shuffle(pool)
