@@ -662,9 +662,14 @@ function StudyContent() {
     if (!currentItem || !isChoiceReviewTask) {
       return [];
     }
+    // Use chinese_text directly from currentItem (sync, available at render)
+    // rather than reviewTaskWordTranslation (async, set in useEffect).
+    // The race between these two caused the recurring "选择[]" bug where
+    // options were empty on first render.
+    const itemChinese = hasChineseText(currentItem.chinese_text) ? currentItem.chinese_text : "";
     const backendAnswer = hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "";
-    const fallbackAnswer = hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "";
-    const correctAnswer = backendAnswer || fallbackAnswer;
+    const fallbackAnswer = hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : itemChinese;
+    const correctAnswer = backendAnswer || fallbackAnswer || itemChinese;
     const fallbackChoices = (currentItem.review_choices && currentItem.review_choices.length > 0 ? currentItem.review_choices : [])
       .filter((choice) => hasChineseText(choice));
     const choicesWithAnswer = correctAnswer && !fallbackChoices.some((choice) => isCorrectChoiceAnswer(choice, correctAnswer))
