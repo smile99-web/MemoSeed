@@ -1224,11 +1224,39 @@ def list_due_review_items(
     # isolated word memorization, directly addressing the 21.5%
     # first-letter and 19.1% missing-letter error rates.
     if phonics and review_items:
-        # Add source note so frontend knows we're in phonics mode
+        # Step 1: assign each item to its phonics family
+        family_items: dict[str, list[LearningItemRead]] = {}
+        ungrouped: list[LearningItemRead] = []
         for item in review_items:
-            word = _get_phonics_group(item.english_text if hasattr(item, "english_text") else getattr(item, "english_text", ""))
-            if word:
-                item.source = f"phonics:{word}" + (f" {item.source}" if getattr(item, "source", None) else "")
+            eng = (item.english_text or "").strip().lower()
+            if not eng:
+                ungrouped.append(item)
+                continue
+            main_word = tokenize_words(eng)[0] if tokenize_words(eng) else ""
+            if not main_word:
+                ungrouped.append(item)
+                continue
+            family = _get_phonics_group(main_word)
+            if family:
+                family_items.setdefault(family, []).append(item)
+            else:
+                ungrouped.append(item)
+        # Step 2: interleave families (2 words per family, then switch)
+        # so the child sees the pattern clearly without getting bored
+        rebuilt: list[LearningItemRead] = []
+        family_keys = sorted(family_items.keys())
+        max_fam = max((len(v) for v in family_items.values()), default=0)
+        for i in range(max_fam):
+            for key in family_keys:
+                items = family_items[key]
+                if i < len(items):
+                    item = items[i]
+                    # Tag the first item in each family group
+                    if i == 0:
+                        item = item.model_copy(update={"source": f"phonics:{key}" + (f" {item.source}" if item.source else "")})
+                    rebuilt.append(item)
+        # Tail: ungrouped words after all families
+        review_items = rebuilt + ungrouped
 
     return review_items
 

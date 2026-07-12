@@ -639,6 +639,8 @@ function StudyContent() {
 
   const currentItem = items[currentIndex] ?? null;
   currentItemIdRef.current = currentItem?.id ?? "";
+  // Phonics: extract sound family from source tag for display
+  const currentPhonicsFamily = isPhonics ? ((currentItem?.source || "").match(/^phonics:(\w+)/) || [])[1] || null : null;
   const currentWords = useMemo(() => tokenizeEnglish(currentItem?.english_text ?? ""), [currentItem]);
   const dynamicReviewWords = useMemo(() => getDynamicReviewWords(currentItem), [currentItem]);
   const dynamicReviewWordIndexes = useMemo(() => {
@@ -3357,6 +3359,11 @@ function StudyContent() {
               ) : null}
               {encodingStage === "whole_recall" && previewCountdownSeconds > 0 ? (
                 <div className="mx-auto rounded-md bg-amber-100 px-6 py-3 text-4xl font-bold text-amber-950 ipad:text-5xl ipad-lg:text-6xl">{encodingWord}</div>
+              ) : null}
+              {currentPhonicsFamily ? (
+                <div className="mx-auto max-w-2xl rounded-lg bg-emerald-100 px-3 py-1.5 text-center">
+                  <p className="text-sm font-bold text-emerald-800">🔤 <span className="text-lg">{currentPhonicsFamily}</span> 音组</p>
+                </div>
               ) : null}
               {reviewTaskModeLabel || reviewTaskInstruction ? (
                 <div className="mx-auto max-w-2xl space-y-2">
