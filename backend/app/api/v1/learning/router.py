@@ -984,36 +984,42 @@ def list_due_review_items(
         def modes_for_word(word: str) -> list[str]:
             """Return the optimal question mode sequence for a given word.
 
-            Phase 1 optimizations:
-              - Skip meaning choice if meaning_errors <= 1 (93% of errors are spelling)
-              - Add hidden_recall before spelling if unknown_errors >= 2 (28% of errors)
-              - Low-strength word: use only 1 verification question
+            New flow (optimized for efficiency):
+              1. chinese_to_english (spell first - test what child knows)
+              2. If wrong → hidden_recall (learn from the mistake, 3s preview)
+              3. listen_choose_chinese (recognition check)
+              Meaning choice is skipped unless meaning_errors > 1.
+
+            The previous flow showed the answer BEFORE testing (listen_choose →
+            hidden_recall → spelling), which defeated the purpose of review
+            and slowed down the session with unnecessary steps.
             """
             intel = word_intel.get(word, {})
             strength = intel.get("strength", 0)
             meaning_errors = intel.get("meaning_errors", 0)
             unknown_errors = intel.get("unknown_errors", 0)
 
-            modes: list[str] = []
-
-            # Low-strength word (正确率>=90%) → only 1 quick verification
+            # Low-strength word → only 1 quick spelling verification
             if strength >= 0.90 and intel.get("consecutive_errors", 0) <= 0:
                 return ["chinese_to_english"]
 
-            # Build custom mode list
-            # Step 1: Listen-based recognition (always start with confidence)
+            modes: list[str] = []
+
+            # Step 1: Spelling test FIRST (don't preview the answer)
+            modes.append("chinese_to_english")
+
+            # Step 2: Only show preview AFTER a likely mistake (unknown >= 3)
+            # The child sees the word for 3s and retries — learning from error
+            if unknown_errors >= 3 or intel.get("consecutive_errors", 0) >= 3:
+                modes.append("hidden_recall")
+                modes.append("chinese_to_english")  # retry after seeing the answer
+
+            # Step 3: Recognition check (did the preview help?)
             modes.append("listen_choose_chinese")
 
-            # Step 2: English→Chinese choice — skip if meaning is already solid
+            # Step 4: Meaning check only if meaning is weak
             if meaning_errors > 1 or strength < 0.5:
                 modes.append("english_to_chinese")
-
-            # Step 3: Preview for difficult words before spelling
-            if unknown_errors >= 2 or intel.get("consecutive_errors", 0) >= 3:
-                modes.append("hidden_recall")
-
-            # Step 4: Spelling
-            modes.append("chinese_to_english")
 
             return modes
 
