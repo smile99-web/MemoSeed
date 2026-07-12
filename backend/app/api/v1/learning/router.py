@@ -997,9 +997,13 @@ def list_due_review_items(
                 return ["chinese_to_english"]
 
             # Standard: recognition → audio spelling test.
-            # Long words (7+ letters) get an extra spelling round for
-            # more intensive practice — the child spells it twice
-            # instead of once, helping cement the longer word pattern.
+            # Long words get extra spelling rounds — the child spells
+            # them multiple times per session to build muscle memory.
+            # 10+ letters: 4 modes (see the word, spell by ear, spell
+            # by sight, then see again)
+            if len(word) >= 10:
+                return ["listen_choose_chinese", "hidden_recall", "listen_spell", "chinese_to_english"]
+            # 7-9 letters: 3 modes (spell twice)
             if len(word) >= 7:
                 return ["listen_choose_chinese", "listen_spell", "chinese_to_english"]
             return ["listen_choose_chinese", "listen_spell"]

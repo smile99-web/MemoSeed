@@ -1003,13 +1003,15 @@ def adjust_delay_for_learning_item(delay: timedelta, learning_item: LearningItem
         word = normalize_word(words[0]) if words else ""
         if word in EASY_FUNCTION_WORDS and memory_state.lapse_count == 0:
             delay *= 1.25
-        # Long words (7+ letters): shorter intervals for more frequent practice.
-        # Data shows these are the hardest to spell — they need more
-        # repetitions per day to build muscle memory for the letter
-        # sequence. Previously threshold was >= 8 with 0.75x; now >= 7
-        # with 0.60x (more aggressive) to get the word back sooner.
-        if len(word) >= 7 or word in HARD_ABSTRACT_WORDS or memory_state.lapse_count >= 2:
-            delay *= 0.60
+        # Long words: shorter intervals for more frequent practice.
+        # The child CAN master even 10-letter words (e.g. blackboard)
+        # when the review intensity is right — the issue is not
+        # ability, but interval design. More letters = more muscle
+        # memory needed = more frequent reviews.
+        if len(word) >= 10:
+            delay *= 0.50  # very long: come back 2x as often
+        elif len(word) >= 7 or word in HARD_ABSTRACT_WORDS or memory_state.lapse_count >= 2:
+            delay *= 0.60  # long: come back 40% sooner
     if not was_sub_day:
         if learning_item.difficulty_level >= 4:
             delay *= 0.85
