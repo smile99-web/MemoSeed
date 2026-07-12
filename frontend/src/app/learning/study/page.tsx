@@ -3027,7 +3027,10 @@ function StudyContent() {
 		        // digitIdx computed from event.code above
 		        const choiceItems = choiceOptionsRef.current;
 		        if (choiceItems && digitIdx >= 0 && digitIdx < choiceItems.length) {
-			          void confirmChoiceSelection(choiceItems[digitIdx]);
+			          const selected = choiceItems[digitIdx];
+			          if (selected && selected.trim()) {
+			            void confirmChoiceSelection(selected);
+			          }
 
 		        }
 		        return;
@@ -3381,10 +3384,12 @@ function StudyContent() {
                       if (!dm) return;
                       const idx = parseInt(dm[2], 10) - 1;
                       if (idx >= 0 && idx < (choiceReviewOptions.length || 0)) {
+                        const selected = choiceReviewOptions[idx];
+                        if (!selected || !selected.trim()) return;
                         e.preventDefault();
                         e.stopPropagation();
                         e.nativeEvent.stopImmediatePropagation();
-                        void confirmChoiceSelection(choiceReviewOptions[idx]);
+                        void confirmChoiceSelection(selected);
                       }
                     }}
                     tabIndex={0}
