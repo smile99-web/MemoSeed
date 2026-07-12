@@ -496,14 +496,32 @@ def get_or_create_word_memory_item(
         # caused the child to see the English word ("the", "apple") as
         # the Chinese prompt in spelling tasks. If the existing item
         # doesn't have Chinese text, try to fill it from the source.
-        if not existing_item.chinese_text or not any("一" <= c <= "鿿" for c in existing_item.chinese_text):
-            if source_item is not None and source_item.chinese_text:
-                existing_item.chinese_text = source_item.chinese_text
+        # Don't copy source_item.chinese_text directly — the source may
+    # be a SENTENCE whose Chinese text is the full translated sentence
+    # (e.g. "晚安。" not "给" for the word "to"). Instead look up
+    # the word's actual translation from the word_translations table.
+    if not existing_item.chinese_text or not any("一" <= c <= "鿿" for c in existing_item.chinese_text):
+        if source_item is not None:
+            from app.services.word_translation_cache import get_cached_word_translations
+            cached = get_cached_word_translations(db, user_id, [normalized_word])
+            word_tr = cached.get(normalized_word, "")
+            if word_tr and any("一" <= c <= "鿿" for c in word_tr):
+                existing_item.chinese_text = word_tr
+            elif source_item.chinese_text and any("一" <= c <= "鿿" for c in source_item.chinese_text):
+                # Only use source_item's Chinese if it looks like a single
+                # word (short, no punctuation), not a full sentence.
+                if len(source_item.chinese_text) < 12 and source_item.item_type == "word":
+                    existing_item.chinese_text = source_item.chinese_text
         return existing_item
 
-    # Use source_item's Chinese text if available, otherwise leave empty
-    # (the translation service fills it later)
-    initial_chinese = source_item.chinese_text if (source_item is not None and source_item.chinese_text) else ""
+    # Look up word translation from DB; fall back to source_item only
+    # for word-type sources with short Chinese text
+    initial_chinese = ""
+    from app.services.word_translation_cache import get_cached_word_translations
+    cached = get_cached_word_translations(db, user_id, [normalized_word])
+    initial_chinese = cached.get(normalized_word, "")
+    if not initial_chinese and source_item is not None and source_item.chinese_text and source_item.item_type == "word":
+        initial_chinese = source_item.chinese_text
     learning_item = LearningItem(
         user_id=user_id,
         course_id=None,
