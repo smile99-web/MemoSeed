@@ -1671,14 +1671,19 @@ function StudyContent() {
                 setAiRecommendedWords(allWords);
                 setAiReasoning(advice.reasoning || "");
 
-                // Assign each due item to its band (default: medium)
-                const bandOrder = { urgent: 0, high: 1, medium: 2, low: 3 } as const;
+                // Assign each due item to its band.
+                // Default band = 9 (uncategorized) → pushed to the very
+                // back. Only AI-analyzed words get bands 0-3 and stay
+                // at the front. This creates a VISIBLE difference between
+                // "推荐复习" (AI words first) and "单词复习" (FSRS order).
+                const bandOrder = { urgent: 0, high: 1, medium: 2, low: 3, unknown: 9 } as const;
                 const banded = dueReviewItems.map((item) => {
                   const word = (item.english_text || "").trim().toLowerCase();
-                  let band = 2;
+                  let band = 9; // uncategorized → back
                   if (bands.urgent?.some((w) => w.trim().toLowerCase() === word)) band = 0;
                   else if (bands.high?.some((w) => w.trim().toLowerCase() === word)) band = 1;
                   else if (bands.low?.some((w) => w.trim().toLowerCase() === word)) band = 3;
+                  else if (bands.medium?.some((w) => w.trim().toLowerCase() === word)) band = 2;
                   return { item, band };
                 });
                 banded.sort((a, b) => a.band - b.band);
