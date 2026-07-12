@@ -684,7 +684,7 @@ def build_daily_report(db: Session, user_id: UUID, report_date: date | None = No
         )
         .group_by(LearningItem.english_text)
         .order_by(func.count(ReviewLog.id).desc())
-        .limit(10)
+        .limit(200)
     ).all()
     per_word_breakdown = [
         {"word": w, "reviews": int(c), "correct": int(corr or 0)}
@@ -811,6 +811,7 @@ def build_daily_report(db: Session, user_id: UUID, report_date: date | None = No
         "accuracy_rate": accuracy_rate,
         "study_duration_minutes": study_minutes,
         "words_practiced": words_practiced,
+        "total_unique_words": len(per_word_breakdown),
         "new_words_practiced": new_words_practiced,
         "per_word_breakdown": per_word_breakdown,
         "per_type_breakdown": per_type_breakdown,
