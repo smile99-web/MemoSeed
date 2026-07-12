@@ -496,11 +496,7 @@ def get_or_create_word_memory_item(
         # caused the child to see the English word ("the", "apple") as
         # the Chinese prompt in spelling tasks. If the existing item
         # doesn't have Chinese text, try to fill it from the source.
-        # Don't copy source_item.chinese_text directly — the source may
-    # be a SENTENCE whose Chinese text is the full translated sentence
-    # (e.g. "晚安。" not "给" for the word "to"). Instead look up
-    # the word's actual translation from the word_translations table.
-    if not existing_item.chinese_text or not any("一" <= c <= "鿿" for c in existing_item.chinese_text):
+        if not existing_item.chinese_text or not any("一" <= c <= "鿿" for c in existing_item.chinese_text):
         if source_item is not None:
             from app.services.word_translation_cache import get_cached_word_translations
             cached = get_cached_word_translations(db, user_id, [normalized_word])
