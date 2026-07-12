@@ -984,15 +984,12 @@ def list_due_review_items(
         def modes_for_word(word: str) -> list[str]:
             """Return the optimal question mode sequence for a given word.
 
-            New flow (optimized for efficiency):
-              1. chinese_to_english (spell first - test what child knows)
-              2. If wrong → hidden_recall (learn from the mistake, 3s preview)
-              3. listen_choose_chinese (recognition check)
-              Meaning choice is skipped unless meaning_errors > 1.
-
-            The previous flow showed the answer BEFORE testing (listen_choose →
-            hidden_recall → spelling), which defeated the purpose of review
-            and slowed down the session with unnecessary steps.
+            Flow (user-confirmed order):
+              1. listen_choose_chinese — recognition first, build confidence
+              2. chinese_to_english — spelling test (DON'T show answer yet)
+              3. If wrong (unknown>=3) → hidden_recall (learn from mistake, 3s)
+                 → chinese_to_english (retry after seeing)
+              4. english_to_chinese — only if meaning is weak
             """
             intel = word_intel.get(word, {})
             strength = intel.get("strength", 0)
@@ -1005,17 +1002,17 @@ def list_due_review_items(
 
             modes: list[str] = []
 
-            # Step 1: Spelling test FIRST (don't preview the answer)
+            # Step 1: Recognition — hear English, pick Chinese (build confidence)
+            modes.append("listen_choose_chinese")
+
+            # Step 2: Spelling test — see Chinese, spell English (real test)
             modes.append("chinese_to_english")
 
-            # Step 2: Only show preview AFTER a likely mistake (unknown >= 3)
-            # The child sees the word for 3s and retries — learning from error
+            # Step 3: If the word is very difficult (unknown >= 3), show
+            # preview AFTER the spelling attempt, then retry.
             if unknown_errors >= 3 or intel.get("consecutive_errors", 0) >= 3:
                 modes.append("hidden_recall")
-                modes.append("chinese_to_english")  # retry after seeing the answer
-
-            # Step 3: Recognition check (did the preview help?)
-            modes.append("listen_choose_chinese")
+                modes.append("chinese_to_english")
 
             # Step 4: Meaning check only if meaning is weak
             if meaning_errors > 1 or strength < 0.5:
