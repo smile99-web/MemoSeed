@@ -482,6 +482,13 @@ def get_or_create_word_memory_item(
     if not normalized_word:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Word is required")
 
+    def _is_valid_chinese(eng: str, ch: str | None) -> bool:
+        if not ch or not ch.strip(): return False
+        if not any("一" <= c <= "鿿" for c in ch): return False
+        if ch.strip().lower() == eng.strip().lower(): return False
+        if len(ch) > 15 or any(p in ch for p in ("。","！","？","……","，","；")): return False
+        return True
+
     existing_item = db.scalar(
         select(LearningItem).where(
             LearningItem.user_id == user_id,
@@ -496,19 +503,21 @@ def get_or_create_word_memory_item(
                 from app.services.word_translation_cache import get_cached_word_translations
                 cached = get_cached_word_translations(db, user_id, [normalized_word])
                 word_tr = cached.get(normalized_word, "")
-                if word_tr and any("\u4e00" <= c <= "\u9fff" for c in word_tr):
+                if _is_valid_chinese(normalized_word, word_tr):
                     existing_item.chinese_text = word_tr
-                elif source_item.chinese_text and any("\u4e00" <= c <= "\u9fff" for c in source_item.chinese_text):
-                    if len(source_item.chinese_text) < 12 and source_item.item_type == "word":
-                        existing_item.chinese_text = source_item.chinese_text
+                elif source_item is not None and _is_valid_chinese(normalized_word, source_item.chinese_text):
+                    existing_item.chinese_text = source_item.chinese_text
         return existing_item
 
     initial_chinese = ""
     from app.services.word_translation_cache import get_cached_word_translations
     cached = get_cached_word_translations(db, user_id, [normalized_word])
-    initial_chinese = cached.get(normalized_word, "")
-    if not initial_chinese and source_item is not None and source_item.chinese_text and source_item.item_type == "word":
-        initial_chinese = source_item.chinese_text
+    initial_chinese = cached.get(normalized_word, "") if _is_valid_chinese(normalized_word, cached.get(normalized_word, "")) else ""
+    if not initial_chinese and source_item is not None:
+        src_ch = source_item.chinese_text if _is_valid_chinese(normalized_word, source_item.chinese_text) else ""
+        if src_ch:
+            initial_chinese = src_ch
+    # If still empty, leave blank — the translation service fills it later
     learning_item = LearningItem(
         user_id=user_id,
         course_id=None,
@@ -925,8 +934,10 @@ def list_due_review_items(
     for item in item_by_id.values():
         if item.item_type == "word" and item.source == WORD_MEMORY_SOURCE and normalize_word(item.english_text) in covered_task_words:
             continue
-        # Skip items without Chinese text — no child should see a word without Chinese context
-        if not item.chinese_text or not any("\u4e00" <= c <= "\u9fff" for c in item.chinese_text):
+        # Guard: skip items with invalid Chinese (empty, English-as-Chinese, sentence-level)
+        ch = item.chinese_text or ""
+        eng = item.english_text or ""
+        if not any("\u4e00" <= c <= "\u9fff" for c in ch) or ch.strip().lower() == eng.strip().lower() or len(ch) > 15 or any(p in ch for p in ("\u3002","\uff01","\uff1f","\u2026\u2026","\uff0c","\uff1b")):
             continue
         item_read = LearningItemRead.model_validate(item)
         focus_words = focus_words_by_item_id.get(item.id, [])
