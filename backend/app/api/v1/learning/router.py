@@ -7,8 +7,9 @@ from typing import Annotated
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
@@ -81,6 +82,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 WORD_MEMORY_SOURCE = "word-memory"
+MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024  # 10 MB upload cap for imports
 GENERIC_WORD_DISTRACTORS = [
     "老师",
     "学生",
@@ -853,18 +855,28 @@ def list_due_review_items(
     task_rows = db.execute(
         select(WordReviewTask, LearningItem)
         .outerjoin(LearningItem, LearningItem.id == WordReviewTask.learning_item_id)
+        .outerjoin(WordMemoryState, WordMemoryState.id == WordReviewTask.word_memory_state_id)
         .where(
             WordReviewTask.user_id == current_user.id,
             WordReviewTask.status == "pending",
             WordReviewTask.due_at <= now,
+            # Respect the rotation / micro-spacing clock: when the word's
+            # memory state has been pushed into the future (focus rotation),
+            # its tasks must not be served early.
+            or_(
+                WordReviewTask.word_memory_state_id.is_(None),
+                WordMemoryState.next_micro_review_at.is_(None),
+                WordMemoryState.next_micro_review_at <= now,
+            ),
         )
         .order_by(WordReviewTask.priority_score.desc(), WordReviewTask.due_at.asc())
         .limit(min(effective_review_cap + 15, 35))  # keep session manageable
     ).all()
-    covered_task_words = {task.word for task, _source_item in task_rows}
+    # Compute AFTER type filtering below (covered words must match served tasks)
     # P1-5: Filter out removed task types (recall_word, cloze_sentence).
     REMOVED_TASK_TYPES = {"recall_word", "cloze_sentence"}
     task_rows = [(t, s) for t, s in task_rows if t.task_type not in REMOVED_TASK_TYPES]
+    covered_task_words = {task.word for task, _source_item in task_rows}
     # P0-2: Per-word-per-session cap. Without this, a single word with 5+ pending
     # micro-review tasks (one per mode) would monopolize the session — the child
     # sees "drink, can, go" 20 times each because every completed task makes the
@@ -888,6 +900,11 @@ def list_due_review_items(
         task_word_translations = ensure_word_translations(
             db, current_user.id, unique_task_words, cloze_settings, None
         )
+        # Persist LLM/dictionary cache writes deterministically. Previously
+        # they only survived when the unrelated has_task_updates flag happened
+        # to trigger a commit later; otherwise the same words were re-sent to
+        # the LLM on every session.
+        db.commit()
     valid_task_words = {w for w, t in task_word_translations.items() if t}
 
     task_review_items: list[LearningItemRead] = []
@@ -918,10 +935,15 @@ def list_due_review_items(
     mistake_statement = (
         select(MistakeLog, LearningItem)
         .join(LearningItem, LearningItem.id == MistakeLog.learning_item_id)
+        .outerjoin(MemoryState, MemoryState.learning_item_id == LearningItem.id)
         .where(
             MistakeLog.user_id == current_user.id,
             MistakeLog.is_resolved.is_(False),
             LearningItem.user_id == current_user.id,
+            # Respect the review clock: mistakes on items that are not due
+            # yet (e.g. just-rotated focus words) must not force the item
+            # back into today's queue.
+            or_(MemoryState.next_review_at.is_(None), MemoryState.next_review_at <= now),
         )
         .order_by(MistakeLog.occurred_at.desc())
     )
@@ -967,7 +989,10 @@ def list_due_review_items(
         # only pure-spelling items from the WordReviewTask table.
         REVIEW_WORD_COUNT = 3 if focus else len(sentence_review_items)
         import random
-        pool = sentence_review_items[:max(REVIEW_WORD_COUNT * 3, len(sentence_review_items))]
+        # Shuffle ONLY the leading pool used for word-review modes. `max`
+        # here made the slice cover the whole list — destroying the FSRS
+        # priority sort above and serving lowest-priority items first.
+        pool = sentence_review_items[:min(REVIEW_WORD_COUNT * 3, len(sentence_review_items))]
         random.shuffle(pool)
         sentence_review_items = pool + sentence_review_items[len(pool):]
         # Mixed mode set: 2 recognition tasks first (build confidence),
@@ -1083,6 +1108,9 @@ def list_due_review_items(
             word_translations = ensure_word_translations(
                 db, current_user.id, list(focus_words_set), cloze_settings, None
             )
+            # Persist translation cache writes (same determinism fix as the
+            # task-word path above)
+            db.commit()
             # Filter out words that don't have valid Chinese translations
             valid_words = {w for w, t in word_translations.items() if t}
             top_items = [
@@ -1149,21 +1177,11 @@ def list_due_review_items(
                     updated_at=item.updated_at,
                 )
                 focus_items.append(focus_item)
-        # Focus-mode only: push served items to tomorrow so they don't
-        # re-appear in the next session. In non-focus mode, items stay
-        # on their natural FSRS schedule (no artificial push).
-        if focus:
-            tomorrow = now + timedelta(days=1)
-            for item in top_items:
-                db.execute(
-                    update(MemoryState)
-                    .where(
-                        MemoryState.learning_item_id == item.id,
-                        MemoryState.next_review_at < tomorrow,  # ← don't overwrite park
-                    )
-                    .values(next_review_at=tomorrow)
-                )
-            db.commit()
+        # Note: served focus items are NOT pushed to tomorrow here. A
+        # blanket push-on-serve wiped the queue on every refetch (page
+        # refresh = everything due tomorrow = nothing left to review).
+        # Rotation is handled per-word by /memory/focus-rotate when the
+        # word's correct streak completes.
         # Sentences first (discover new weak words), then word-only
         # review (practice already-discovered words). Each word that
         # appears in the word review section is excluded from the
@@ -1272,12 +1290,14 @@ def create_learning_item(
         if course is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Course not found")
 
+    # Exact case-insensitive match (ilike would treat % and _ in the
+    # payload as wildcards and produce false duplicates)
     existing_item = db.scalar(
         select(LearningItem).where(
             LearningItem.user_id == current_user.id,
             LearningItem.course_id == payload.course_id,
             LearningItem.item_type == payload.item_type,
-            LearningItem.english_text.ilike(payload.english_text.strip()),
+            func.lower(LearningItem.english_text) == payload.english_text.strip().lower(),
         )
     )
     if existing_item is not None:
@@ -1954,16 +1974,27 @@ async def import_learning_items_file(
     content = await file.read()
     if not content:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty")
+    if len(content) > MAX_IMPORT_FILE_BYTES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File too large (max 10 MB)")
 
-    if extension == ".txt":
-        parse_result = parse_txt_import(content, filename)
-    else:
-        parse_result = parse_xlsx_import(content, filename)
+    try:
+        if extension == ".txt":
+            parse_result = parse_txt_import(content, filename)
+        else:
+            parse_result = parse_xlsx_import(content, filename)
+    except ValueError as exc:
+        # Bad encoding / unreadable content — a client error, not a 500
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"无法解析文件: {exc}") from exc
 
     stored_settings = get_private_model_settings(db, current_user.id)
     translation_settings = build_llm_translation_settings(llm_provider, llm_base_url, llm_model, llm_api_key, stored_settings)
 
-    imported_items, duplicate_skipped_items = import_learning_items(
+    # Blocking DB + LLM translation work — run in the threadpool so the
+    # event loop stays responsive for other requests during long imports.
+    imported_items, duplicate_skipped_items = await run_in_threadpool(
+        import_learning_items,
         db,
         current_user.id,
         course_id,

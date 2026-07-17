@@ -190,6 +190,11 @@ async function synthesizeAndCachePhonemeAudio(phoneme: string): Promise<Blob | n
   }
 }
 
+// Monotonic token: starting a new phonics playback supersedes any in-flight
+// loop from a previous word/click, so stale phonemes don't keep playing
+// over the new item's audio.
+let phonicsPlaybackToken = 0;
+
 async function playPhonicsAudio(word: string, chunkIndex: number, gpMap: Record<string, string> | null | undefined, cachedSyllables?: string[] | null, onTtsPlay?: ((blob: Blob) => void) | null): Promise<void> {
   const chunks = splitIntoSyllables(word, cachedSyllables);
   const chunk = chunks[chunkIndex];
@@ -207,14 +212,21 @@ async function playPhonicsAudio(word: string, chunkIndex: number, gpMap: Record<
   const graphemes = getGraphemesForChunk(chunk, gpMap);
 
   stopAudioPlayback();
+  const myToken = ++phonicsPlaybackToken;
 
   // Use Volcengine TTS for each phoneme
   for (let i = 0; i < graphemes.length; i += 1) {
+    if (myToken !== phonicsPlaybackToken) {
+      return; // superseded by a newer playback while awaiting synthesis
+    }
     const grapheme = graphemes[i];
     const phoneme = gpMap[grapheme];
     if (!phoneme) continue;
 
     const blob = await synthesizeAndCachePhonemeAudio(phoneme);
+    if (myToken !== phonicsPlaybackToken) {
+      return;
+    }
     if (blob) {
       if (onTtsPlay) {
         onTtsPlay(blob);
@@ -512,6 +524,10 @@ function StudyContent() {
   }
 
   const [previewCountdownSeconds, setPreviewCountdownSeconds] = useState(0);
+  // Total seconds the current countdown started from — the progress bar
+  // divides by this, NOT by WORD_PREVIEW_MS, because whole_recall uses an
+  // adaptive (word-length-based) duration.
+  const [previewCountdownTotal, setPreviewCountdownTotal] = useState(Math.round(WORD_PREVIEW_MS / 1000));
   const [celebrationTrigger, setCelebrationTrigger] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -610,6 +626,8 @@ function StudyContent() {
   const encodingStartTimeRef = useRef(0);
   const encodingStageStartTimeRef = useRef(0);
   const encodingStageTimeoutRef = useRef<number | null>(null);
+  const encodingItemIdRef = useRef<string>("");
+  const hiddenPreviewTimeoutRef = useRef<number | null>(null);
   const wordMeaningReviewTimeoutRef = useRef<number | null>(null);
 
   const [encodingStage, setEncodingStage] = useState<EncodingStage | null>(null);
@@ -810,6 +828,7 @@ function StudyContent() {
 
     // Start countdown bar
     const previewSeconds = Math.round(WORD_PREVIEW_MS / 1000);
+    setPreviewCountdownTotal(previewSeconds);
     setPreviewCountdownSeconds(previewSeconds);
     if (previewCountdownIntervalRef.current !== null) {
       window.clearInterval(previewCountdownIntervalRef.current);
@@ -978,6 +997,12 @@ function StudyContent() {
   }, [speakClearEnglishSentence, speakFocusedEnglishWord]);
 
   const advanceEncodingStage = useCallback(async function advanceEncodingStage(stage: EncodingStage, word: string, chineseText: string) {
+    // Item guard: encoding stages advance via timers/awaits. If the user moved
+    // to another item, the stale chain must die here — otherwise the old word's
+    // encoding UI/voice hijacks the new item (clears its input, kills its audio).
+    if (encodingItemIdRef.current && currentItemIdRef.current !== encodingItemIdRef.current) {
+      return;
+    }
     const settings = modelSettingsRef.current;
     const sequenceId = startVoiceSequence();
     let nextStage: EncodingStage | null = null;
@@ -1037,6 +1062,7 @@ function StudyContent() {
       const previewMs = getAdaptivePreviewDuration(word);
       const previewSeconds = Math.round(previewMs / 1000);
       setFeedback("记住它！还剩 " + previewSeconds + " 秒：" + word);
+      setPreviewCountdownTotal(previewSeconds);
       setPreviewCountdownSeconds(previewSeconds);
       if (previewCountdownIntervalRef.current !== null) {
         window.clearInterval(previewCountdownIntervalRef.current);
@@ -1059,6 +1085,10 @@ function StudyContent() {
       }
       encodingStageTimeoutRef.current = window.setTimeout(function () {
         encodingStageTimeoutRef.current = null;
+        // Item guard: the user may have moved on during the preview countdown
+        if (encodingItemIdRef.current && currentItemIdRef.current !== encodingItemIdRef.current) {
+          return;
+        }
         if (previewCountdownIntervalRef.current !== null) {
           window.clearInterval(previewCountdownIntervalRef.current);
           previewCountdownIntervalRef.current = null;
@@ -1081,6 +1111,7 @@ function StudyContent() {
     const now = Date.now();
     encodingStartTimeRef.current = now;
     encodingStageStartTimeRef.current = now;
+    encodingItemIdRef.current = currentItemIdRef.current;
     setEncodingStage("meaning_intro");
     setEncodingWord(word);
     setEncodingChineseText(chineseText);
@@ -1147,6 +1178,11 @@ function StudyContent() {
 
   const playCurrentItemIntro = useCallback(async function playCurrentItemIntro(item: LearningItem, sequenceId: number) {
     const settings = modelSettingsRef.current;
+    // Item guard: this function awaits network/TTS. Any branch that continues
+    // after an await MUST verify the item is still current — otherwise stale
+    // continuations act on the NEW item (auto-skip it, clear its translation).
+    const introItemId = item.id;
+    const isStale = () => currentItemIdRef.current !== introItemId;
     let chineseText = item.chinese_text;
     let englishText = item.english_text;
     const focusedWords = getDynamicReviewWords(item);
@@ -1176,15 +1212,16 @@ function StudyContent() {
         try {
           const accessToken = getAccessToken();
           if (accessToken) {
-            const introItemId = item.id;
             const response = await translateLearningText(focusedWord, accessToken, modelSettingsRef.current);
             // Race guard: a late resolve must not overwrite the NEXT item's translation
-            if (currentItemIdRef.current === introItemId) {
+            if (!isStale()) {
               setReviewTaskWordTranslation(response.chinese_text);
             }
           }
         } catch {
-          setReviewTaskWordTranslation("");
+          if (!isStale()) {
+            setReviewTaskWordTranslation("");
+          }
         }
       }
     } else if (shouldUseSingleWordIntro && focusedWord) {
@@ -1198,10 +1235,9 @@ function StudyContent() {
       try {
         const accessToken = getAccessToken();
         if (accessToken) {
-          const introItemId = item.id;
           const response = await translateLearningText(focusedWord, accessToken, modelSettingsRef.current);
           // Race guard: abort if the user already advanced to the next item
-          if (currentItemIdRef.current !== introItemId) {
+          if (isStale()) {
             return;
           }
           chineseText = response.chinese_text;
@@ -1225,6 +1261,11 @@ function StudyContent() {
     // P1-6: Auto-skip items without a valid Chinese translation.
     // No child should ever see a word without Chinese context.
     if (shouldUseSingleWordIntro && focusedWord && !hasChineseText(chineseText)) {
+      // Item guard: the translation fetch may have failed AFTER the user
+      // already moved to the next item — never auto-skip the NEW item.
+      if (isStale()) {
+        return;
+      }
       handleNextItem({ completedCurrentItem: true });
       return;
     }
@@ -1504,6 +1545,11 @@ function StudyContent() {
     pendingStudyMsRef.current = 0;
     courseRunStartedActiveMsRef.current = 0;
     courseRunCorrectWordKeysRef.current = new Set();
+    // Focus-mode correct streaks are per-course: same-named words in another
+    // course must not inherit old counts
+    focusCorrectCountRef.current.clear();
+    // Deferred dynamic-review words belong to the previous course
+    setDeferredDynamicWords([]);
     lastStudyTickAtRef.current = Date.now();
     lastStudyActivityAtRef.current = Date.now();
     isStudyPausedRef.current = false;
@@ -1605,6 +1651,22 @@ function StudyContent() {
     setChoiceResult(null);
     setEncodingStage(null);
     encodingStageRef.current = null;
+    // Kill ALL timers/intervals from the previous item — encoding stage chain,
+    // preview countdown, hidden-recall preview. Without this, stale timers fire
+    // on the NEW item (old word's preview/encoding UI hijacks it).
+    clearEncodingTimeout();
+    if (previewCountdownIntervalRef.current !== null) {
+      window.clearInterval(previewCountdownIntervalRef.current);
+      previewCountdownIntervalRef.current = null;
+    }
+    if (hiddenPreviewTimeoutRef.current !== null) {
+      window.clearTimeout(hiddenPreviewTimeoutRef.current);
+      hiddenPreviewTimeoutRef.current = null;
+    }
+    encodingItemIdRef.current = "";
+    // Reset the encoding-duration clock too — otherwise every later review in
+    // the session reports encoding_duration_ms measured from the FIRST encoding.
+    encodingStartTimeRef.current = 0;
     // P1-2: Multi-modal encoding — trigger for new words AND weak review words.
     // Previously only triggered for non-review-task word items (almost never).
     // Now also triggers for word review items that are single-word and new/weak.
@@ -1631,10 +1693,15 @@ function StudyContent() {
         void playCurrentItemIntro(currentItem, seqId);
       }
       if (currentItem?.review_task_type === "hidden_recall" && currentWords[0]) {
-        window.setTimeout(function () { showWordPreview(0, currentWords[0]); }, 800);
+        const previewItemId = currentItem.id;
+        hiddenPreviewTimeoutRef.current = window.setTimeout(function () {
+          hiddenPreviewTimeoutRef.current = null;
+          if (currentItemIdRef.current !== previewItemId) return;
+          showWordPreview(0, currentWords[0]);
+        }, 800);
       }
     }
-  }, [clearMistakePracticePreview, clearWordPreview, currentItem, currentWords, dynamicReviewWordIndexes, playCurrentItemIntro, setPendingMistakePractice, showWordPreview, startVoiceSequence, updateAnswerState, startEncodingFn]);
+  }, [clearEncodingTimeout, clearMistakePracticePreview, clearWordPreview, currentItem, currentWords, dynamicReviewWordIndexes, playCurrentItemIntro, setPendingMistakePractice, showWordPreview, startVoiceSequence, updateAnswerState, startEncodingFn]);
 
   useEffect(() => {
     if (answerState === "mistake-word-practice") {
@@ -1870,7 +1937,7 @@ function StudyContent() {
       return nextItems;
     });
     setFeedback(`已插入 ${freshReviewItems.length} 条新的到期复习内容，完成当前题后会优先复习。`);
-  }, [courseId, studyMode]);
+  }, [courseId, isFocusMode, studyMode]);
 
   useEffect(() => {
     if (studyMode === "review" || !courseId || isLoading) {
@@ -1960,6 +2027,23 @@ function StudyContent() {
     setFeedback(null);
     setSelectedChoice(null);
     setChoiceResult(null);
+    // Also kill any in-flight encoding chain — "再来一次" during an encoding
+    // stage must not let the old timers fire into the reset state.
+    clearEncodingTimeout();
+    if (previewCountdownIntervalRef.current !== null) {
+      window.clearInterval(previewCountdownIntervalRef.current);
+      previewCountdownIntervalRef.current = null;
+    }
+    if (hiddenPreviewTimeoutRef.current !== null) {
+      window.clearTimeout(hiddenPreviewTimeoutRef.current);
+      hiddenPreviewTimeoutRef.current = null;
+    }
+    encodingItemIdRef.current = "";
+    // Reset the encoding-duration clock too — otherwise every later review in
+    // the session reports encoding_duration_ms measured from the FIRST encoding.
+    encodingStartTimeRef.current = 0;
+    setEncodingStage(null);
+    encodingStageRef.current = null;
     window.setTimeout(() => inputRefs.current[dynamicReviewWordIndexes[0] ?? 0]?.focus(), 0);
   }
 
@@ -2098,7 +2182,7 @@ function StudyContent() {
       }
       return wrappedIndex;
     });
-  }, [courseId, items.length, showCourseCompletion, startVoiceSequence]);
+  }, [courseId, isFocusMode, items, items.length, showCourseCompletion, startVoiceSequence]);
 
   const isGeneratedItem = useCallback(function isGeneratedItem(item: LearningItem): boolean {
     return item.id.startsWith("generated-") || Boolean(item.review_task_id);
@@ -2169,7 +2253,12 @@ function StudyContent() {
     await Promise.all(
       words.map(async (word) => {
         try {
-          const response = await translateLearningText(word, accessToken, modelSettings);
+          // Timeout guard: a hung translation request must not stall the
+          // mistake-practice flow (the meaning quiz handles "" gracefully)
+          const response = await Promise.race([
+            translateLearningText(word, accessToken, modelSettings),
+            new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error("translate timeout")), 2500)),
+          ]);
           translations[word] = response.chinese_text;
         } catch {
           translations[word] = "";
@@ -2187,10 +2276,11 @@ function StudyContent() {
     setHasFinalizedCurrentItem(true);
     const accessToken = getAccessToken();
     const uniqueMistakenWords = getUniqueMistakenWords();
-    if (accessToken && !currentItem.review_task_id && !isGeneratedItem(currentItem)) {
+    const scheduleItemId = getSourceLearningItemId(currentItem);
+    if (accessToken && scheduleItemId && !currentItem.review_task_id) {
       try {
         await scheduleMemoryReview(accessToken, {
-          learning_item_id: currentItem.id,
+          learning_item_id: scheduleItemId,
           score: calculateSentenceScore(uniqueMistakenWords.length),
           review_mode: "sentence-spelling",
           response_text: uniqueMistakenWords.length > 0 ? `错词：${uniqueMistakenWords.join(", ")}` : "全部拼写正确",
@@ -2355,13 +2445,26 @@ function StudyContent() {
     }
 
     isCompletingSentenceRef.current = true;
+    const completingItemId = currentItem.id;
+    // Item guard: this function awaits network calls. If the user skips to the
+    // next item mid-flight, the stale continuation must not mark the NEW item
+    // as complete or inject the OLD item's mistake practice.
+    const isStaleCompletion = () => currentItemIdRef.current !== completingItemId;
     const uniqueMistakenWords = getUniqueMistakenWords();
     inputRefs.current.forEach((input) => input?.blur());
     await finalizeCurrentSentenceReview();
+    if (isStaleCompletion()) {
+      isCompletingSentenceRef.current = false;
+      return;
+    }
 
     let dynamicSentenceFeedback: string | null = null;
     if (deferredDynamicWords.length > 0) {
       const didInsertDynamicSentence = await insertDynamicSentenceAfterCurrent(deferredDynamicWords);
+      if (isStaleCompletion()) {
+        isCompletingSentenceRef.current = false;
+        return;
+      }
       setDeferredDynamicWords([]);
       dynamicSentenceFeedback = didInsertDynamicSentence
         ? "上一轮错词复习句已生成，稍后会进入新的 5 到 7 个单词复习句。"
@@ -2461,7 +2564,12 @@ function StudyContent() {
   }
 
   async function handleFirstLetterMistake(expectedWord: string) {
+    const itemIdAtError = currentItemIdRef.current;
     const translatedWord = await translateWordForHint(expectedWord);
+    // Item guard: translation took up to 2.5s — abort if the user moved on
+    if (currentItemIdRef.current !== itemIdAtError) {
+      return;
+    }
     if (isDictationModeRef.current) {
       setFeedback(translatedWord ? `首字母不对，请参考中文意思重试。中文：${translatedWord}` : "首字母不对，请重试。", "error");
       return;
@@ -2473,7 +2581,12 @@ function StudyContent() {
   async function handleSpellingMistake(index: number, expectedWord: string, typedWord: string, errorCount: number, errorType: string) {
     const cachedSyllables = currentItem?.syllables;
     const hint = buildChildFriendlyHint(expectedWord, errorType, getMatchedPrefixLength(expectedWord, typedWord), cachedSyllables);
+    const itemIdAtError = currentItemIdRef.current;
     const translatedWord = await translateWordForHint(expectedWord);
+    // Item guard: translation took up to 2.5s — abort if the user moved on
+    if (currentItemIdRef.current !== itemIdAtError) {
+      return;
+    }
     const hintText = translatedWord ? `${hint.text} 中文意思：${translatedWord}` : hint.text;
     setChildHint({ ...hint, text: hintText });
     setFeedback(hintText, "error");
@@ -2485,6 +2598,12 @@ function StudyContent() {
 
   function checkWord(index: number) {
     if (answerStateRef.current !== "typing" || isCompletingSentenceRef.current) {
+      return;
+    }
+    // Already-judged-correct words must not be re-judged: re-running the
+    // correct branch would inflate streak/milestone counts and submit
+    // duplicate FSRS review logs every time.
+    if ((wordStatuses[index] ?? "idle") === "correct") {
       return;
     }
     if (previewWordIndex === index) {
@@ -2558,7 +2677,11 @@ function StudyContent() {
         void logWordMistake(learningItemId, expectedWord, actualWord, accessToken, errorType).catch(() => undefined);
       }
       if (nextErrorCount === 3 || (errorType === "unknown" && nextErrorCount >= 2)) {
+        const itemIdAtError = currentItemIdRef.current;
         void translateWordForHint(expectedWord).then((translatedWord) => {
+          // Item guard: the user may have skipped to the next item during the
+          // (up to 2.5s) translation — never show the OLD word's preview there.
+          if (currentItemIdRef.current !== itemIdAtError) return;
           if (translatedWord) {
             void playChineseThenEnglish(translatedWord, expectedWord);
           }
@@ -2576,6 +2699,26 @@ function StudyContent() {
     }
 
     const prevErrorCount = wordErrorCounts[index] ?? 0;
+
+    // Encoding whole_recall: one correct spelling completes the encoding flow.
+    // Must run BEFORE the re-spell (prevErrorCount>=1) and single-word
+    // auto-complete branches below, which otherwise return early and leave the
+    // encoding stage stuck forever (encodingStartTimeRef never reset).
+    if (encodingStageRef.current === "whole_recall") {
+      if (currentItem) {
+        markCorrectWord(currentItem, expectedWord, index);
+      }
+      playCorrectDing();
+      recordSuccessfulWordSpelling(expectedWord, currentRawAnswer, prevErrorCount, prevErrorCount >= 3, currentItem?.item_type === "word");
+      setWordErrorCounts((current) => {
+        const nextCounts = [...current];
+        nextCounts[index] = 0;
+        return nextCounts;
+      });
+      clearEncodingTimeout();
+      void advanceEncodingStage("whole_recall", expectedWord, currentItem?.chinese_text ?? "");
+      return;
+    }
 
     if (prevErrorCount >= 1) {
       const nextConsecutive = (wordConsecutiveCorrect[index] ?? 0) + 1;
@@ -2678,17 +2821,7 @@ function StudyContent() {
       setTimeout(() => setMilestoneMessage(null), 4000);
     }
 
-    // After encoding whole_recall success, complete encoding
-    if (encodingStageRef.current === "whole_recall") {
-      setWordErrorCounts((current) => {
-        const nextCounts = [...current];
-        nextCounts[index] = 0;
-        return nextCounts;
-      });
-      clearEncodingTimeout();
-      void advanceEncodingStage("whole_recall", expectedWord, currentItem?.chinese_text ?? "");
-      return;
-    }
+    // (encoding whole_recall completion is handled at the top of the correct path)
 
     setWordErrorCounts((current) => {
       const nextCounts = [...current];
@@ -2817,8 +2950,15 @@ function StudyContent() {
     setMistakePracticeConsecutiveCorrect(0);
     recordSuccessfulWordSpelling(expectedWord, mistakePracticeAnswer, mistakePracticeErrorCount, true, true);
 
+    // Guard: without a Chinese translation the meaning quiz would offer the
+    // English word itself as the "correct" answer — skip the quiz instead.
+    if (!hasChineseText(currentMistakePracticeTranslation)) {
+      advanceAfterMistakeMeaning(expectedWord);
+      return;
+    }
+
     // Build the meaning-quiz options using the child-friendly distractor pool
-    const correctMeaning = currentMistakePracticeTranslation || expectedWord;
+    const correctMeaning = currentMistakePracticeTranslation;
     const quizOptions = buildMeaningQuizOptions(correctMeaning);
     setMistakeMeaningQuizOptions(quizOptions);
     setMistakeMeaningQuizCorrect(correctMeaning);
@@ -2831,30 +2971,10 @@ function StudyContent() {
     window.setTimeout(() => mistakePracticeInputRef.current?.focus(), 0);
   }
 
-  /** Handle the meaning-quiz multiple-choice selection. */
-  function handleMistakeMeaningChoice(selectedOption: string) {
-    setMistakeMeaningQuizSelected(selectedOption);
-    const isCorrect = selectedOption === mistakeMeaningQuizCorrect;
-    const expectedWord = mistakePracticeWords[mistakePracticeIndex] || "";
-
-    if (!isCorrect) {
-      // Wrong meaning — go back to spelling. Reset consecutive counter
-      // so the child must re-earn the 3 correct spellings before the
-      // meaning quiz is shown again.
-      setMistakePracticeConsecutiveCorrect(0);
-      setMistakePracticeErrorCount(0);
-      setMistakePracticeAnswer("");
-      setMistakePracticeStatus("idle");
-      updateAnswerState("mistake-word-practice");
-      setFeedback(
-        `中文意思不对哦。${expectedWord} 的正确意思是「${mistakeMeaningQuizCorrect}」。请重新拼写 ${expectedWord}。`,
-        "error",
-      );
-      window.setTimeout(() => mistakePracticeInputRef.current?.focus(), 0);
-      return;
-    }
-
-    // Correct meaning — advance to the next word.
+  /** Advance after a mistake word's meaning quiz is passed (or skipped when
+   *  no Chinese translation is available). Moves to the next mistake word,
+   *  or back to the sentence respell when all words are done. */
+  function advanceAfterMistakeMeaning(expectedWord: string) {
     const nextIndex = mistakePracticeIndex + 1;
     if (currentItem) {
       markCorrectWord(currentItem, expectedWord, `mistake-${normalizeEnglishKey(expectedWord)}`);
@@ -2878,6 +2998,9 @@ function StudyContent() {
 
     // All mistake words practiced — back to sentence context for final
     // respell, then advance to the next sentence.
+    // Defer this round's mistake words so the next completed sentence
+    // generates a dynamic review sentence containing them.
+    setDeferredDynamicWords(mistakePracticeWords);
     setMistakePracticeWords([]);
     setMistakePracticeAnswer("");
     setMistakePracticeStatus("idle");
@@ -2914,6 +3037,33 @@ function StudyContent() {
       void playCurrentItemIntro(currentItem, respellSequenceId);
     }
     window.setTimeout(() => inputRefs.current[firstRespellIdx]?.focus(), 0);
+  }
+
+  /** Handle the meaning-quiz multiple-choice selection. */
+  function handleMistakeMeaningChoice(selectedOption: string) {
+    setMistakeMeaningQuizSelected(selectedOption);
+    const isCorrect = selectedOption === mistakeMeaningQuizCorrect;
+    const expectedWord = mistakePracticeWords[mistakePracticeIndex] || "";
+
+    if (!isCorrect) {
+      // Wrong meaning — go back to spelling. Reset consecutive counter
+      // so the child must re-earn the 3 correct spellings before the
+      // meaning quiz is shown again.
+      setMistakePracticeConsecutiveCorrect(0);
+      setMistakePracticeErrorCount(0);
+      setMistakePracticeAnswer("");
+      setMistakePracticeStatus("idle");
+      updateAnswerState("mistake-word-practice");
+      setFeedback(
+        `中文意思不对哦。${expectedWord} 的正确意思是「${mistakeMeaningQuizCorrect}」。请重新拼写 ${expectedWord}。`,
+        "error",
+      );
+      window.setTimeout(() => mistakePracticeInputRef.current?.focus(), 0);
+      return;
+    }
+
+    // Correct meaning — advance to the next word.
+    advanceAfterMistakeMeaning(expectedWord);
   }
 
   const confirmChoiceSelection = useCallback(async function confirmChoiceSelection(explicitChoice?: string) {
@@ -2960,28 +3110,36 @@ function StudyContent() {
 
     if (accessToken && learningItemId && word) {
       try {
-        await logWordReview(
-          {
-            learning_item_id: learningItemId,
-            review_task_id: currentItem.review_task_id,
-            word,
-            score: isCorrect ? 4 : 1,
-            review_mode: `word-${currentItem.review_task_type}`,
-            response_text: choice,
-            error_type: isCorrect ? undefined : "meaning",
-            // Real elapsed time, not 0. See the comment in
-            // recordWordMemoryReview above.
-            duration_seconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
-          },
-          accessToken,
-        );
+        // Timeout guard: a hung network call must not freeze the choice flow
+        await Promise.race([
+          logWordReview(
+            {
+              learning_item_id: learningItemId,
+              review_task_id: currentItem.review_task_id,
+              word,
+              score: isCorrect ? 4 : 1,
+              review_mode: `word-${currentItem.review_task_type}`,
+              response_text: choice,
+              error_type: isCorrect ? undefined : "meaning",
+              // Real elapsed time, not 0. See the comment in
+              // recordWordMemoryReview above.
+              duration_seconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
+            },
+            accessToken,
+          ),
+          new Promise((resolve) => window.setTimeout(resolve, 5000)),
+        ]);
       } catch {
         // Choice task telemetry should not stop the learning flow.
       }
     }
     if (!isCorrect) {
+      // A wrong choice breaks the word's focus-mode correct streak
+      if (word) {
+        focusCorrectCountRef.current.delete(normalizeEnglishKey(word));
+      }
       setFeedback("这个选项不对，已加入错词专项复习。", "error");
-      const correctMeaning = (hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "") || (hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "");
+      const correctMeaning = (hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "") || (hasChineseText(currentItem.chinese_text) ? currentItem.chinese_text : "") || (hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "");
       if (word && correctMeaning) {
         void playEnglishThenChinese(word, correctMeaning);
       }
@@ -2994,10 +3152,14 @@ function StudyContent() {
       }, 800);
       return;
     }
-    const correctMeaning = (hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "") || (hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "") || choice;
+    const correctMeaning = (hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "") || (hasChineseText(currentItem.chinese_text) ? currentItem.chinese_text : "") || (hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "") || choice;
     // Play Chinese meaning audio FIRST, then advance
     if (word && correctMeaning) {
-      await playEnglishThenChinese(word, correctMeaning);
+      // Timeout guard: a hung TTS call must not freeze the flow on green
+      await Promise.race([
+        playEnglishThenChinese(word, correctMeaning),
+        new Promise((resolve) => window.setTimeout(resolve, 8000)),
+      ]);
     }
     setFeedback("选择正确！", "success");
     // Brief pause so user can see the green highlight, then advance
@@ -3034,12 +3196,14 @@ function StudyContent() {
     }
 
     let practiceTranslations = pendingMistakePracticeTranslationsRef.current;
+    // Clear pending BEFORE awaiting translations so a re-entrant call during
+    // the await sees empty words and returns immediately
+    setPendingMistakePractice([], {});
     const hasMissingTranslation = words.some((word) => !practiceTranslations[word]);
     if (hasMissingTranslation) {
       practiceTranslations = { ...practiceTranslations, ...(await translateMistakePracticeWords(words)) };
     }
 
-    setPendingMistakePractice([], {});
     setMistakePracticeWords(words);
     setMistakePracticeTranslations(practiceTranslations);
     setMistakePracticeIndex(0);
@@ -3152,6 +3316,18 @@ function StudyContent() {
 	          return;
 	        }
 	        // Space: do NOT auto-advance — press Enter or click button
+	        return;
+	      }
+
+	      // word-meaning-review auto-advances after a timer; space/enter
+	      // skips the wait (previously the keys were just swallowed).
+	      if (currentState === "word-meaning-review") {
+	        if (wordMeaningReviewTimeoutRef.current !== null) {
+	          window.clearTimeout(wordMeaningReviewTimeoutRef.current);
+	          wordMeaningReviewTimeoutRef.current = null;
+	        }
+	        setSentenceWordMeanings({});
+	        void completeCurrentSentence({ fromWordMeaningReview: true });
 	        return;
 	      }
 	    }
@@ -3591,7 +3767,7 @@ function StudyContent() {
                     记住它！还剩 {previewCountdownSeconds} 秒
                   </div>
                   <div className="h-2 w-full overflow-hidden rounded-full bg-amber-100">
-                    <div className="h-full rounded-full bg-amber-500 transition-all duration-200 ease-linear" style={{ width: `${(previewCountdownSeconds / Math.round(WORD_PREVIEW_MS / 1000)) * 100}%` }} />
+                    <div className="h-full rounded-full bg-amber-500 transition-all duration-200 ease-linear" style={{ width: `${(previewCountdownSeconds / Math.max(1, previewCountdownTotal)) * 100}%` }} />
                   </div>
                 </div>
               ) : null}

@@ -10,7 +10,7 @@ import { apiRequest, getFreshAccessToken } from "@/lib/api";
 import { PointsHeatmapCompact } from "./replay/points-heatmap";
 import { getAccessToken } from "@/lib/auth";
 import { DayDetail, Heatmap, HeatmapDay, getDayDetail, getHeatmap } from "@/lib/learning-replay";
-import { getModelSettings, savePersistedModelSettings } from "@/lib/model-settings";
+import { getModelSettings, loadPersistedModelSettings, savePersistedModelSettings } from "@/lib/model-settings";
 import {
   DailyReport,
   ErrorBreakdown,
@@ -49,7 +49,7 @@ const statusLabels: Record<WordMasterySummary["status"], string> = {
   mastered: "已掌握",
 };
 
-const replayDayLabels = ["", "Mon", "", "Wed", "", "Fri", ""];
+const replayDayLabels = ["Mon", "", "Wed", "", "Fri", "", ""]; // Monday-first grid: (getUTCDay() + 6) % 7
 const replayMonthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 function formatPercent(value: number): string {
@@ -239,9 +239,13 @@ function LearningReplayCard({
         {heatmap ? (
           <div className="overflow-x-auto pb-1">
             <div className="inline-block min-w-full">
-              <div className="flex pl-6 text-[10px] text-muted-foreground" style={{ height: 14 }}>
+              {/* Month labels: absolute-positioned. The day-label gutter is
+                  w-6 + pr-1 + gap = 30px and the week pitch is 12+2 = 14px;
+                  the previous `relative; left: week*13` both accumulated
+                  flex offsets and drifted ~1px per week. */}
+              <div className="relative text-[10px] text-muted-foreground" style={{ height: 14 }}>
                 {grid.monthLabels.map((month) => (
-                  <div key={`replay-month-${month.week}`} style={{ position: "relative", left: `${month.week * 13}px` }}>
+                  <div key={`replay-month-${month.week}`} style={{ position: "absolute", left: `${30 + month.week * 14}px` }}>
                     {month.label}
                   </div>
                 ))}
@@ -463,6 +467,7 @@ export default function DashboardPage() {
   const [learningHeatmap, setLearningHeatmap] = useState<Heatmap | null>(null);
   const [selectedReplayDate, setSelectedReplayDate] = useState<string | null>(null);
   const [selectedReplayDayDetail, setSelectedReplayDayDetail] = useState<DayDetail | null>(null);
+  const replayDateRequestRef = useRef<string>("");
   const [selectedCourseId] = useState<string>("");
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [selectedWordHistory, setSelectedWordHistory] = useState<WordHistoryResponse | null>(null);
@@ -479,14 +484,20 @@ export default function DashboardPage() {
 
       try {
         const courseId = selectedCourseId || undefined;
-        // Phase 1: critical data (show page immediately)
+        // Phase 1: critical data (show page immediately). Secondary calls
+        // fall back to null on failure but log a warning — silent swallows
+        // made past outages (404 storms, expired tokens) undiagnosable.
+        const warn = (name: string) => (err: unknown) => {
+          console.warn(`[dashboard] ${name} failed:`, err);
+          return null;
+        };
         const [dashboardData, reportData, planData, curveData, errorData, streakData] = await Promise.all([
           getMemoryDashboardWithCourse(accessToken, courseId),
-          getDailyReport(accessToken).catch(() => null),
-          getTodayPlan(accessToken).catch(() => null),
-          getRetentionCurve(accessToken, courseId).catch(() => null),
-          getErrorBreakdown(accessToken).catch(() => null),
-          getStudyStreak(accessToken).catch(() => null),
+          getDailyReport(accessToken).catch(warn("daily-report")),
+          getTodayPlan(accessToken).catch(warn("today-plan")),
+          getRetentionCurve(accessToken, courseId).catch(warn("retention-curve")),
+          getErrorBreakdown(accessToken).catch(warn("error-breakdown")),
+          getStudyStreak(accessToken).catch(warn("study-streak")),
         ]);
         setDashboard(dashboardData);
         setDailyReport(reportData);
@@ -499,11 +510,11 @@ export default function DashboardPage() {
         // Phase 2: secondary data (load after page renders, non-blocking)
         void (async () => {
           const [forecastData, pointsData, progressData, heatmapData, adviceData] = await Promise.all([
-            getReviewForecast(accessToken).catch(() => null),
-            getPointsSummary(accessToken).catch(() => null),
-            getTodayProgress(accessToken).catch(() => null),
-            getHeatmap(accessToken).catch(() => null),
-            getReviewAdvice(accessToken).catch(() => null),
+            getReviewForecast(accessToken).catch(warn("review-forecast")),
+            getPointsSummary(accessToken).catch(warn("points-summary")),
+            getTodayProgress(accessToken).catch(warn("today-progress")),
+            getHeatmap(accessToken).catch(warn("heatmap")),
+            getReviewAdvice(accessToken).catch(warn("review-advice")),
           ]);
           setReviewForecast(forecastData);
           setPointsSummary(pointsData);
@@ -536,7 +547,9 @@ export default function DashboardPage() {
       link.href = url;
       link.download = `memoseed-export-${new Date().toISOString().slice(0, 10)}.json`;
       link.click();
-      URL.revokeObjectURL(url);
+      // Delay revocation: revoking immediately after click() can cancel the
+      // download before the browser has opened the blob.
+      window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "导出数据失败");
     } finally {
@@ -600,7 +613,9 @@ export default function DashboardPage() {
     setIsTogglingSlowLearner(true);
     const nextValue = !useSlowLearner;
     try {
-      const settings = getModelSettings();
+      // Load the freshest server settings first — saving a stale local copy
+      // would overwrite settings changed on other devices.
+      const settings = await loadPersistedModelSettings(accessToken);
       settings.useSlowLearnerProfile = nextValue;
       await savePersistedModelSettings(settings, accessToken);
       setUseSlowLearner(nextValue);
@@ -683,12 +698,20 @@ export default function DashboardPage() {
       setErrorMessage("请先登录后再查看学习回放");
       return;
     }
+    // Race guard: a slow response for date A must not overwrite the detail
+    // of date B selected after it.
+    replayDateRequestRef.current = date;
     setSelectedReplayDate(date);
     setSelectedReplayDayDetail(null);
     try {
-      setSelectedReplayDayDetail(await getDayDetail(accessToken, date));
+      const detail = await getDayDetail(accessToken, date);
+      if (replayDateRequestRef.current === date) {
+        setSelectedReplayDayDetail(detail);
+      }
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "读取学习回放失败");
+      if (replayDateRequestRef.current === date) {
+        setErrorMessage(error instanceof Error ? error.message : "读取学习回放失败");
+      }
     }
   }
 

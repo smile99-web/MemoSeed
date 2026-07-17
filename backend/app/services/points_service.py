@@ -167,8 +167,9 @@ def get_points_summary(db: Session, user_id: UUID) -> dict[str, Any]:
         .limit(20)
     ).all()
 
-    # Today's earned
-    today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    # Today's earned — LOCAL day boundary, not UTC midnight (UTC midnight is
+    # 08:00 in Shanghai, so morning points counted towards "yesterday")
+    today_start = datetime.now(LOCAL_TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0)
     today_points = db.scalar(
         select(func.sum(PointsLog.points_changed)).where(
             PointsLog.user_id == user_id,

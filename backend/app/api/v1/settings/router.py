@@ -90,12 +90,23 @@ def sanitize_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "volcengineTtsApiKeyConfigured",
         "useSlowLearnerProfile",
     }
+    boolean_keys = {
+        "llmApiKeyConfigured",
+        "volcengineTtsApiKeyConfigured",
+        "useSlowLearnerProfile",
+    }
     sanitized: dict[str, Any] = {}
     for key, value in settings.items():
         if key not in allowed_keys:
             continue
         if key == "ttsSpeedPreference":
             if isinstance(value, (int, float, str)):
+                sanitized[key] = value
+            continue
+        if key in boolean_keys:
+            # Flags arrive as JSON booleans — the previous str-only filter
+            # silently dropped them, so the slow-learner toggle never saved.
+            if isinstance(value, bool):
                 sanitized[key] = value
             continue
         if isinstance(value, str):

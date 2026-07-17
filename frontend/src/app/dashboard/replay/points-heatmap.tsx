@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-const DAY_LABELS = ["", "Mon", "", "Wed", "", "Fri", ""];
+const DAY_LABELS = ["Mon", "", "Wed", "", "Fri", "", ""]; // Monday-first grid: (getUTCDay() + 6) % 7
 const POINTS_COLORS = ["#ebedf0", "#dbeafe", "#93c5fd", "#3b82f6", "#1d4ed8"];
 
 interface PointsDay {
@@ -15,6 +15,7 @@ export function PointsHeatmapCompact() {
   const [days, setDays] = useState<PointsDay[]>([]);
   const [totalPoints, setTotalPoints] = useState(0);
   const [activeDays, setActiveDays] = useState(0);
+  const [year, setYear] = useState<number>(() => new Date().getFullYear());
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [selectedData, setSelectedData] = useState<PointsDay | null>(null);
 
@@ -35,6 +36,7 @@ export function PointsHeatmapCompact() {
         setDays(data.days);
         setTotalPoints(data.total_points);
         setActiveDays(data.active_days);
+        setYear(data.year);
       } catch { /* */ }
     })();
   }, []);
@@ -50,7 +52,8 @@ export function PointsHeatmapCompact() {
 
   const grid = useMemo(() => {
     if (!days.length) return { weeks: [] as Array<Array<PointsDay | null>>, monthLabels: [] as Array<{ week: number; label: string }> };
-    const year = new Date().getFullYear();
+    // Align the grid to the year the API actually returned, not "now" —
+    // browsing a past year must not shift every cell by the weekday delta.
     const firstDay = new Date(Date.UTC(year, 0, 1));
     const startWeekday = (firstDay.getUTCDay() + 6) % 7;
     const cells: Array<PointsDay | null> = [];
@@ -70,7 +73,7 @@ export function PointsHeatmapCompact() {
       }
     });
     return { weeks, monthLabels };
-  }, [days]);
+  }, [days, year]);
 
   if (!days.length) return null;
 
@@ -78,7 +81,7 @@ export function PointsHeatmapCompact() {
     <div>
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
         <div className="text-muted-foreground">
-          {new Date().getFullYear()} 年 · 累计 {totalPoints} 分 · 活跃 {activeDays} 天
+          {year} 年 · 累计 {totalPoints} 分 · 活跃 {activeDays} 天
           {selectedData ? (
             <span className="ml-2 font-semibold text-amber-700">
               {selectedData.date} · {selectedData.points > 0 ? "+" : ""}{selectedData.points} 分
@@ -97,9 +100,9 @@ export function PointsHeatmapCompact() {
       </div>
       <div className="overflow-x-auto">
         <div className="inline-block min-w-full">
-          <div className="flex pl-6 text-[10px] text-muted-foreground" style={{ height: 14 }}>
+          <div className="relative text-[10px] text-muted-foreground" style={{ height: 14 }}>
             {grid.monthLabels.map((m) => (
-              <div key={`pm-${m.week}`} style={{ position: "relative", left: `${m.week * 13}px` }}>{m.label}</div>
+              <div key={`pm-${m.week}`} style={{ position: "absolute", left: `${30 + m.week * 14}px` }}>{m.label}</div>
             ))}
           </div>
           <div className="flex gap-[2px]">

@@ -35,6 +35,8 @@ def get_heatmap(
     year: Optional[int] = Query(None),
 ) -> HeatmapResponse:
     """Annual heatmap of study minutes per day."""
+    if year is not None and (year < 2000 or year > 2100):
+        raise HTTPException(status_code=400, detail="year must be 2000-2100")
     # First-visit auto-backfill from existing review_logs
     backfill_events_from_review_logs(db, current_user.id)
     return HeatmapResponse(**build_heatmap(db, current_user.id, year))

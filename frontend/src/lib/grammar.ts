@@ -1,4 +1,4 @@
-import { getApiBaseUrl } from "@/lib/api-base-url";
+import { apiRequest } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
 
 /**
@@ -69,33 +69,15 @@ export interface GrammarHistoryResponse {
   overall_accuracy: number;
 }
 
-async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const accessToken = getAccessToken();
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(init.headers as Record<string, string> | undefined),
-  };
-  if (accessToken) {
-    headers.Authorization = `Bearer ${accessToken}`;
-  }
-  const response = await fetch(`${getApiBaseUrl()}${path}`, {
-    ...init,
-    headers,
-    cache: "no-store",
+async function fetchJson<T>(path: string, init: { method?: "GET" | "POST"; body?: object } = {}): Promise<T> {
+  // apiRequest handles 401 → refresh-token → retry and parses error bodies.
+  // The previous raw fetch meant an expired access token killed grammar
+  // practice until a manual re-login.
+  return apiRequest<T, object>(path, {
+    method: init.method ?? "GET",
+    body: init.body,
+    accessToken: getAccessToken() ?? undefined,
   });
-  if (!response.ok) {
-    let detail = `HTTP ${response.status}`;
-    try {
-      const body = (await response.json()) as { detail?: string };
-      if (body.detail) {
-        detail = body.detail;
-      }
-    } catch {
-      // body wasn't JSON — keep the status-based detail
-    }
-    throw new Error(detail);
-  }
-  return (await response.json()) as T;
 }
 
 export async function getGrammarLevels(): Promise<GrammarLevelsInfo> {
@@ -105,7 +87,7 @@ export async function getGrammarLevels(): Promise<GrammarLevelsInfo> {
 export async function generateGrammarQuestions(level: number): Promise<GrammarQuestionSet> {
   return fetchJson<GrammarQuestionSet>("/grammar/generate", {
     method: "POST",
-    body: JSON.stringify({ level }),
+    body: { level },
   });
 }
 
@@ -118,7 +100,7 @@ export async function startGrammarSession(payload: {
 }): Promise<GrammarSessionSummary> {
   return fetchJson<GrammarSessionSummary>("/grammar/sessions", {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: payload,
   });
 }
 
@@ -137,7 +119,7 @@ export async function submitGrammarAnswer(
 ): Promise<GrammarSessionSummary> {
   return fetchJson<GrammarSessionSummary>(`/grammar/sessions/${sessionId}/answers`, {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: payload,
   });
 }
 

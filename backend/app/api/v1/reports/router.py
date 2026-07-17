@@ -247,6 +247,11 @@ def import_user_data(
         id_maps["courses"][str(row.get("id"))] = course.id
         summary["courses"] += 1
 
+    existing_item_keys: dict[tuple[str, str, str], Any] = {}
+    for _id, _course_id, _item_type, _eng in db.execute(
+        select(LearningItem.id, LearningItem.course_id, LearningItem.item_type, LearningItem.english_text).where(LearningItem.user_id == current_user.id)
+    ).all():
+        existing_item_keys[(str(_course_id), _item_type, (_eng or "").strip().lower())] = _id
     for row in as_rows(payload.get("learning_items")):
         course_id = id_maps["courses"].get(str(row.get("course_id"))) if row.get("course_id") else None
         learning_item = LearningItem(
@@ -261,41 +266,68 @@ def import_user_data(
         )
         if not learning_item.english_text:
             continue
+        # Idempotent re-import: an item with the same natural key already
+        # exists — reuse it instead of duplicating (and cascade the existing
+        # id to memory_states/review_logs below).
+        item_key = (str(course_id), learning_item.item_type, learning_item.english_text.strip().lower())
+        if item_key in existing_item_keys:
+            id_maps["learning_items"][str(row.get("id"))] = existing_item_keys[item_key]
+            continue
         db.add(learning_item)
         db.flush()
+        existing_item_keys[item_key] = learning_item.id
         id_maps["learning_items"][str(row.get("id"))] = learning_item.id
         summary["learning_items"] += 1
 
+    existing_memory_states: dict[Any, MemoryState] = {}
+    mapped_item_ids = list(id_maps["learning_items"].values())
+    if mapped_item_ids:
+        existing_memory_states = {
+            ms.learning_item_id: ms
+            for ms in db.scalars(select(MemoryState).where(MemoryState.learning_item_id.in_(mapped_item_ids))).all()
+        }
     for row in as_rows(payload.get("memory_states")):
         learning_item_id = id_maps["learning_items"].get(str(row.get("learning_item_id")))
         if learning_item_id is None:
             continue
-        memory_state = MemoryState(
-            learning_item_id=learning_item_id,
-            interval_days=as_int(row.get("interval_days"), 0),
-            ease_factor=as_float(row.get("ease_factor"), 2.5),
-            memory_strength=as_float(row.get("memory_strength"), 0.0),
-            forget_risk=as_float(row.get("forget_risk"), 1.0),
-            repetition_count=as_int(row.get("repetition_count"), 0),
-            lapse_count=as_int(row.get("lapse_count"), 0),
-            consecutive_correct_count=as_int(row.get("consecutive_correct_count"), 0),
-            consecutive_error_count=as_int(row.get("consecutive_error_count"), 0),
-            recall_correct_count=as_int(row.get("recall_correct_count"), 0),
-            hinted_correct_count=as_int(row.get("hinted_correct_count"), 0),
-            preview_correct_count=as_int(row.get("preview_correct_count"), 0),
-            context_correct_count=as_int(row.get("context_correct_count"), 0),
-            last_reviewed_at=parse_datetime(row.get("last_reviewed_at")),
-            next_review_at=parse_datetime(row.get("next_review_at")) or datetime.now(UTC),
-        )
-        db.add(memory_state)
+        memory_state = existing_memory_states.get(learning_item_id)
+        if memory_state is None:
+            memory_state = MemoryState(learning_item_id=learning_item_id)
+            db.add(memory_state)
+            db.flush()
+            existing_memory_states[learning_item_id] = memory_state
+        # Upsert: overwrite scheduling fields with the imported snapshot
+        memory_state.interval_days = as_int(row.get("interval_days"), 0)
+        memory_state.ease_factor = as_float(row.get("ease_factor"), 2.5)
+        memory_state.memory_strength = as_float(row.get("memory_strength"), 0.0)
+        memory_state.forget_risk = as_float(row.get("forget_risk"), 1.0)
+        memory_state.repetition_count = as_int(row.get("repetition_count"), 0)
+        memory_state.lapse_count = as_int(row.get("lapse_count"), 0)
+        memory_state.consecutive_correct_count = as_int(row.get("consecutive_correct_count"), 0)
+        memory_state.consecutive_error_count = as_int(row.get("consecutive_error_count"), 0)
+        memory_state.recall_correct_count = as_int(row.get("recall_correct_count"), 0)
+        memory_state.hinted_correct_count = as_int(row.get("hinted_correct_count"), 0)
+        memory_state.preview_correct_count = as_int(row.get("preview_correct_count"), 0)
+        memory_state.context_correct_count = as_int(row.get("context_correct_count"), 0)
+        memory_state.last_reviewed_at = parse_datetime(row.get("last_reviewed_at"))
+        memory_state.next_review_at = parse_datetime(row.get("next_review_at")) or datetime.now(UTC)
         db.flush()
         id_maps["memory_states"][str(row.get("id"))] = memory_state.id
         summary["memory_states"] += 1
 
+    existing_review_keys = {
+        (str(rl.learning_item_id), rl.reviewed_at, rl.score, rl.review_mode)
+        for rl in db.scalars(select(ReviewLog).where(ReviewLog.user_id == current_user.id)).all()
+    }
     for row in as_rows(payload.get("review_logs")):
         learning_item_id = id_maps["learning_items"].get(str(row.get("learning_item_id")))
         if learning_item_id is None:
             continue
+        reviewed_at = parse_datetime(row.get("reviewed_at")) or datetime.now(UTC)
+        review_key = (str(learning_item_id), reviewed_at, as_int(row.get("score"), 0), str(row.get("review_mode") or "import"))
+        if review_key in existing_review_keys:
+            continue  # exact duplicate — re-import must not double-count
+        existing_review_keys.add(review_key)
         db.add(
             ReviewLog(
                 user_id=current_user.id,
@@ -306,15 +338,24 @@ def import_user_data(
                 is_correct=as_bool(row.get("is_correct")),
                 response_text=str(row.get("response_text")) if row.get("response_text") is not None else None,
                 duration_seconds=as_int(row.get("duration_seconds"), 0),
-                reviewed_at=parse_datetime(row.get("reviewed_at")) or datetime.now(UTC),
+                reviewed_at=reviewed_at,
             )
         )
         summary["review_logs"] += 1
 
+    existing_mistake_keys = {
+        (str(ml.learning_item_id), ml.occurred_at, ml.expected_answer, ml.actual_answer)
+        for ml in db.scalars(select(MistakeLog).where(MistakeLog.user_id == current_user.id)).all()
+    }
     for row in as_rows(payload.get("mistake_logs")):
         learning_item_id = id_maps["learning_items"].get(str(row.get("learning_item_id")))
         if learning_item_id is None:
             continue
+        occurred_at = parse_datetime(row.get("occurred_at")) or datetime.now(UTC)
+        mistake_key = (str(learning_item_id), occurred_at, str(row.get("expected_answer") or ""), str(row.get("actual_answer") or ""))
+        if mistake_key in existing_mistake_keys:
+            continue
+        existing_mistake_keys.add(mistake_key)
         db.add(
             MistakeLog(
                 user_id=current_user.id,
@@ -324,50 +365,65 @@ def import_user_data(
                 expected_answer=str(row.get("expected_answer") or ""),
                 actual_answer=str(row.get("actual_answer") or ""),
                 is_resolved=as_bool(row.get("is_resolved")),
-                occurred_at=parse_datetime(row.get("occurred_at")) or datetime.now(UTC),
+                occurred_at=occurred_at,
                 resolved_at=parse_datetime(row.get("resolved_at")),
             )
         )
         summary["mistake_logs"] += 1
 
+    existing_word_states = {
+        wms.word: wms for wms in db.scalars(select(WordMemoryState).where(WordMemoryState.user_id == current_user.id)).all()
+    }
     for row in as_rows(payload.get("word_memory_states")):
         word = str(row.get("word") or "").strip().lower()
         if not word:
             continue
-        word_state = WordMemoryState(
-            user_id=current_user.id,
-            word=word,
-            learning_item_id=id_maps["learning_items"].get(str(row.get("learning_item_id"))) if row.get("learning_item_id") else None,
-            memory_state_id=id_maps["memory_states"].get(str(row.get("memory_state_id"))) if row.get("memory_state_id") else None,
-            status=str(row.get("status") or "teaching"),
-            memory_strength=as_float(row.get("memory_strength"), 0.0),
-            forget_risk=as_float(row.get("forget_risk"), 1.0),
-            priority_score=as_float(row.get("priority_score"), 1.0),
-            consecutive_correct_count=as_int(row.get("consecutive_correct_count"), 0),
-            consecutive_error_count=as_int(row.get("consecutive_error_count"), 0),
-            recall_correct_count=as_int(row.get("recall_correct_count"), 0),
-            hinted_correct_count=as_int(row.get("hinted_correct_count"), 0),
-            preview_correct_count=as_int(row.get("preview_correct_count"), 0),
-            context_correct_count=as_int(row.get("context_correct_count"), 0),
-            hidden_recall_correct_count=as_int(row.get("hidden_recall_correct_count"), 0),
-            no_hint_correct_date_count=as_int(row.get("no_hint_correct_date_count"), 0),
-            last_no_hint_correct_date=parse_date(row.get("last_no_hint_correct_date")),
-            last_answer_seen_at=parse_datetime(row.get("last_answer_seen_at")),
-            error_type_counts=as_dict(row.get("error_type_counts")),
-            task_type_counts=as_dict(row.get("task_type_counts")),
-            next_micro_review_at=parse_datetime(row.get("next_micro_review_at")),
-            micro_review_stage=as_int(row.get("micro_review_stage"), 0),
-            last_reviewed_at=parse_datetime(row.get("last_reviewed_at")),
-        )
-        db.add(word_state)
+        word_state = existing_word_states.get(word)
+        if word_state is None:
+            word_state = WordMemoryState(user_id=current_user.id, word=word)
+            db.add(word_state)
+            db.flush()
+            existing_word_states[word] = word_state
+        # Upsert by (user_id, word) — the unique constraint would otherwise
+        # abort a re-import with a 500.
+        word_state.learning_item_id = id_maps["learning_items"].get(str(row.get("learning_item_id"))) if row.get("learning_item_id") else None
+        word_state.memory_state_id = id_maps["memory_states"].get(str(row.get("memory_state_id"))) if row.get("memory_state_id") else None
+        word_state.status = str(row.get("status") or "teaching")
+        word_state.memory_strength = as_float(row.get("memory_strength"), 0.0)
+        word_state.forget_risk = as_float(row.get("forget_risk"), 1.0)
+        word_state.priority_score = as_float(row.get("priority_score"), 1.0)
+        word_state.consecutive_correct_count = as_int(row.get("consecutive_correct_count"), 0)
+        word_state.consecutive_error_count = as_int(row.get("consecutive_error_count"), 0)
+        word_state.recall_correct_count = as_int(row.get("recall_correct_count"), 0)
+        word_state.hinted_correct_count = as_int(row.get("hinted_correct_count"), 0)
+        word_state.preview_correct_count = as_int(row.get("preview_correct_count"), 0)
+        word_state.context_correct_count = as_int(row.get("context_correct_count"), 0)
+        word_state.hidden_recall_correct_count = as_int(row.get("hidden_recall_correct_count"), 0)
+        word_state.no_hint_correct_date_count = as_int(row.get("no_hint_correct_date_count"), 0)
+        word_state.last_no_hint_correct_date = parse_date(row.get("last_no_hint_correct_date"))
+        word_state.last_answer_seen_at = parse_datetime(row.get("last_answer_seen_at"))
+        word_state.error_type_counts = as_dict(row.get("error_type_counts"))
+        word_state.task_type_counts = as_dict(row.get("task_type_counts"))
+        word_state.next_micro_review_at = parse_datetime(row.get("next_micro_review_at"))
+        word_state.micro_review_stage = as_int(row.get("micro_review_stage"), 0)
+        word_state.last_reviewed_at = parse_datetime(row.get("last_reviewed_at"))
         db.flush()
         id_maps["word_memory_states"][str(row.get("id"))] = word_state.id
         summary["word_memory_states"] += 1
 
+    existing_task_keys = {
+        (t.word, t.task_type, t.due_at)
+        for t in db.scalars(select(WordReviewTask).where(WordReviewTask.user_id == current_user.id)).all()
+    }
     for row in as_rows(payload.get("word_review_tasks")):
         word = str(row.get("word") or "").strip().lower()
         if not word:
             continue
+        due_at = parse_datetime(row.get("due_at")) or datetime.now(UTC)
+        task_key = (word, str(row.get("task_type") or "chinese_to_english"), due_at)
+        if task_key in existing_task_keys:
+            continue
+        existing_task_keys.add(task_key)
         db.add(
             WordReviewTask(
                 user_id=current_user.id,
@@ -381,69 +437,96 @@ def import_user_data(
                 priority_score=as_float(row.get("priority_score"), 1.0),
                 status=str(row.get("status") or "pending"),
                 source=str(row.get("source") or "import"),
-                due_at=parse_datetime(row.get("due_at")) or datetime.now(UTC),
+                due_at=due_at,
                 completed_at=parse_datetime(row.get("completed_at")),
             )
         )
         summary["word_review_tasks"] += 1
 
+    existing_study_keys = {
+        (str(st.course_id), st.recorded_at, st.duration_seconds)
+        for st in db.scalars(select(StudyTimeLog).where(StudyTimeLog.user_id == current_user.id)).all()
+    }
     for row in as_rows(payload.get("study_time_logs")):
+        course_id = id_maps["courses"].get(str(row.get("course_id"))) if row.get("course_id") else None
+        recorded_at = parse_datetime(row.get("recorded_at")) or datetime.now(UTC)
+        study_key = (str(course_id), recorded_at, as_int(row.get("duration_seconds"), 0))
+        if study_key in existing_study_keys:
+            continue
+        existing_study_keys.add(study_key)
         db.add(
             StudyTimeLog(
                 user_id=current_user.id,
-                course_id=id_maps["courses"].get(str(row.get("course_id"))) if row.get("course_id") else None,
+                course_id=course_id,
                 duration_seconds=as_int(row.get("duration_seconds"), 0),
-                recorded_at=parse_datetime(row.get("recorded_at")) or datetime.now(UTC),
+                recorded_at=recorded_at,
             )
         )
         summary["study_time_logs"] += 1
 
+    existing_completion_keys = {
+        (str(cc.course_id), cc.completed_at)
+        for cc in db.scalars(select(CourseCompletionLog).where(CourseCompletionLog.user_id == current_user.id)).all()
+    }
     for row in as_rows(payload.get("course_completion_logs")):
         course_id = id_maps["courses"].get(str(row.get("course_id")))
         if course_id is None:
             continue
+        completed_at = parse_datetime(row.get("completed_at")) or datetime.now(UTC)
+        completion_key = (str(course_id), completed_at)
+        if completion_key in existing_completion_keys:
+            continue
+        existing_completion_keys.add(completion_key)
         db.add(
             CourseCompletionLog(
                 user_id=current_user.id,
                 course_id=course_id,
                 duration_seconds=as_int(row.get("duration_seconds"), 0),
                 correct_word_count=as_int(row.get("correct_word_count"), 0),
-                completed_at=parse_datetime(row.get("completed_at")) or datetime.now(UTC),
+                completed_at=completed_at,
             )
         )
         summary["course_completion_logs"] += 1
 
+    existing_plans = {
+        dp.plan_date: dp for dp in db.scalars(select(DailyPlan).where(DailyPlan.user_id == current_user.id)).all()
+    }
     for row in as_rows(payload.get("daily_plans")):
-        db.add(
-            DailyPlan(
-                user_id=current_user.id,
-                plan_date=parse_date(row.get("plan_date")) or datetime.now(UTC).date(),
-                warmup_review_minutes=as_int(row.get("warmup_review_minutes"), 10),
-                new_learning_minutes=as_int(row.get("new_learning_minutes"), 20),
-                sentence_training_minutes=as_int(row.get("sentence_training_minutes"), 20),
-                mistake_reinforcement_minutes=as_int(row.get("mistake_reinforcement_minutes"), 10),
-                new_word_limit=as_int(row.get("new_word_limit"), 0),
-                new_phrase_limit=as_int(row.get("new_phrase_limit"), 0),
-                strategy=as_dict(row.get("strategy")),
-            )
-        )
+        plan_date = parse_date(row.get("plan_date")) or datetime.now(UTC).date()
+        daily_plan = existing_plans.get(plan_date)
+        if daily_plan is None:
+            daily_plan = DailyPlan(user_id=current_user.id, plan_date=plan_date)
+            db.add(daily_plan)
+            db.flush()
+            existing_plans[plan_date] = daily_plan
+        daily_plan.warmup_review_minutes = as_int(row.get("warmup_review_minutes"), 10)
+        daily_plan.new_learning_minutes = as_int(row.get("new_learning_minutes"), 20)
+        daily_plan.sentence_training_minutes = as_int(row.get("sentence_training_minutes"), 20)
+        daily_plan.mistake_reinforcement_minutes = as_int(row.get("mistake_reinforcement_minutes"), 10)
+        daily_plan.new_word_limit = as_int(row.get("new_word_limit"), 0)
+        daily_plan.new_phrase_limit = as_int(row.get("new_phrase_limit"), 0)
+        daily_plan.strategy = as_dict(row.get("strategy"))
         summary["daily_plans"] += 1
 
+    existing_reports = {
+        r.report_date: r for r in db.scalars(select(AiDailyReport).where(AiDailyReport.user_id == current_user.id)).all()
+    }
     for row in as_rows(payload.get("ai_daily_reports")):
-        db.add(
-            AiDailyReport(
-                user_id=current_user.id,
-                report_date=parse_date(row.get("report_date")) or datetime.now(UTC).date(),
-                accuracy_rate=as_float(row.get("accuracy_rate"), 0.0),
-                spelling_error_rate=as_float(row.get("spelling_error_rate"), 0.0),
-                sentence_error_rate=as_float(row.get("sentence_error_rate"), 0.0),
-                study_duration_minutes=as_int(row.get("study_duration_minutes"), 0),
-                review_backlog_count=as_int(row.get("review_backlog_count"), 0),
-                high_forget_risk_count=as_int(row.get("high_forget_risk_count"), 0),
-                summary=str(row.get("summary") or ""),
-                next_day_strategy=as_dict(row.get("next_day_strategy")),
-            )
-        )
+        report_date = parse_date(row.get("report_date")) or datetime.now(UTC).date()
+        report = existing_reports.get(report_date)
+        if report is None:
+            report = AiDailyReport(user_id=current_user.id, report_date=report_date)
+            db.add(report)
+            db.flush()
+            existing_reports[report_date] = report
+        report.accuracy_rate = as_float(row.get("accuracy_rate"), 0.0)
+        report.spelling_error_rate = as_float(row.get("spelling_error_rate"), 0.0)
+        report.sentence_error_rate = as_float(row.get("sentence_error_rate"), 0.0)
+        report.study_duration_minutes = as_int(row.get("study_duration_minutes"), 0)
+        report.review_backlog_count = as_int(row.get("review_backlog_count"), 0)
+        report.high_forget_risk_count = as_int(row.get("high_forget_risk_count"), 0)
+        report.summary = str(row.get("summary") or "")
+        report.next_day_strategy = as_dict(row.get("next_day_strategy"))
         summary["ai_daily_reports"] += 1
 
     import_public_model_settings(db, current_user.id, payload.get("model_settings"))
@@ -503,13 +586,19 @@ def unique_name(name: str, existing_names: set[str]) -> str:
 
 def parse_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
-        return value
-    if not isinstance(value, str) or not value:
+        parsed = value
+    elif not isinstance(value, str) or not value:
         return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+    else:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    # Normalize to tz-aware UTC so dedupe-key comparisons against DB
+    # timestamps (always tz-aware) don't silently mismatch.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def parse_date(value: Any) -> date | None:

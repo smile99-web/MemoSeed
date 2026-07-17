@@ -3,9 +3,9 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Integer, func, select
+from sqlalchemy import Integer, exists, func, select
 from sqlalchemy.exc import ProgrammingError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.models.ai_daily_report import AiDailyReport
 from app.models.daily_plan import DailyPlan
@@ -1256,10 +1256,11 @@ def generate_ai_daily_report(db: Session, user_id: UUID, report_date: date | Non
 
 def check_and_generate_daily_report(db: Session, user_id: UUID) -> bool:
     now_local = datetime.now(LOCAL_TIMEZONE)
-    # Run daily report + AI review advice at 23:30 local time.
-    # The child typically finishes learning by 22:00-23:00, so 23:30
-    # catches the full day's data while still being "today".
-    if now_local.hour < 23 or (now_local.hour == 23 and now_local.minute < 30):
+    # Run daily report + AI review advice from 20:00 local time. The trigger
+    # only fires during a study session (study-time heartbeat) — the child
+    # finishes by ~21:00, so the previous 23:30 threshold effectively never
+    # fired and daily reports were never generated.
+    if now_local.hour < 20:
         return False
 
     today = now_local.date()
@@ -1502,17 +1503,25 @@ def build_today_progress(db: Session, user_id: UUID) -> dict[str, object]:
         )
     ) or 0
 
-    # New words actually studied today (first-time review)
+    # New words actually studied today (first-ever review happened today).
+    # NOTE: the previous version filtered on MemoryState.repetition_count == 0,
+    # but the review itself increments that counter — so by query time every
+    # reviewed word had repetition_count > 0 and completed_new was always 0.
+    EarlierReview = aliased(ReviewLog)
     completed_new = db.scalar(
         select(func.count(func.distinct(ReviewLog.learning_item_id))).where(
             ReviewLog.user_id == user_id,
             ReviewLog.reviewed_at >= today_start,
             ReviewLog.learning_item_id.in_(
-                select(LearningItem.id).outerjoin(MemoryState, MemoryState.learning_item_id == LearningItem.id).where(
+                select(LearningItem.id).where(
                     LearningItem.user_id == user_id,
                     LearningItem.item_type == "word",
-                    (MemoryState.id.is_(None)) | (MemoryState.repetition_count == 0),
                 )
+            ),
+            ~exists().where(
+                EarlierReview.user_id == user_id,
+                EarlierReview.learning_item_id == ReviewLog.learning_item_id,
+                EarlierReview.reviewed_at < today_start,
             ),
         )
     ) or 0

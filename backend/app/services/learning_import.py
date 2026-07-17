@@ -80,7 +80,14 @@ def parse_learning_line(line: str, source: str) -> ParsedLearningItem | None:
 
 
 def parse_txt_import(content: bytes, filename: str) -> ImportParseResult:
-    text = content.decode("utf-8-sig")
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            # Common for files exported from Chinese Windows tools
+            text = content.decode("gb18030")
+        except UnicodeDecodeError as exc:
+            raise ValueError("文件编码无法识别，请使用 UTF-8 或 GBK 编码的文本文件") from exc
     items: list[ParsedLearningItem] = []
     skipped_items: list[ImportSkippedItem] = []
     rows = text.splitlines()

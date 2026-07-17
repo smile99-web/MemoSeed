@@ -6,7 +6,7 @@ import { getFreshAccessToken } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
 import { Heatmap, HeatmapDay, getHeatmap } from "@/lib/learning-replay";
 
-const DAY_LABELS = ["", "Mon", "", "Wed", "", "Fri", ""];
+const DAY_LABELS = ["Mon", "", "Wed", "", "Fri", "", ""]; // Monday-first grid: (getUTCDay() + 6) % 7
 
 export function LearningReplayCompact({ onSelectDate }: { onSelectDate?: (d: string) => void }) {
   const [heatmap, setHeatmap] = useState<Heatmap | null>(null);
@@ -88,9 +88,9 @@ export function LearningReplayCompact({ onSelectDate }: { onSelectDate?: (d: str
       </div>
       <div className="overflow-x-auto">
         <div className="inline-block min-w-full">
-          <div className="flex pl-6 text-[10px] text-muted-foreground" style={{ height: 14 }}>
+          <div className="relative text-[10px] text-muted-foreground" style={{ height: 14 }}>
             {grid.monthLabels.map((m) => (
-              <div key={`m-${m.week}`} style={{ position: "relative", left: `${m.week * 13}px` }}>{m.label}</div>
+              <div key={`m-${m.week}`} style={{ position: "absolute", left: `${30 + m.week * 14}px` }}>{m.label}</div>
             ))}
           </div>
           <div className="flex gap-[2px]">

@@ -3,7 +3,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -12,9 +12,12 @@ from app.models.course import Course
 from app.models.course_completion_log import CourseCompletionLog
 from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
+from app.models.mistake_log import MistakeLog
 from app.models.study_time_log import StudyTimeLog
 from app.models.user import User
 from app.models.user_points import PointsLog
+from app.models.word_memory_state import WordMemoryState
+from app.models.word_review_task import WordReviewTask
 from app.schemas.memory import CourseCompletionRequest, CourseProgressStats, FsrsFitResponse, MemoryDashboardResponse, MemoryScheduleResponse, MemoryStateRead, PointsAwardRequest, PointsSummaryResponse, ReviewForecastResponse, ReviewScoreRequest, StudyTimeLogRequest, TodayProgressResponse
 from app.services.memory_dashboard import build_memory_dashboard, build_review_forecast, build_today_progress, check_and_generate_daily_report
 from app.services.ai_review_advisor import generate_review_advice, get_todays_recommendations
@@ -41,21 +44,64 @@ def rotate_focus_word(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> dict:
-    """Rotate a mastered focus word out — push next_review_at to tomorrow."""
-    memory_state = db.scalar(
-        select(MemoryState).where(
-            MemoryState.learning_item_id == learning_item_id,
-            MemoryState.learning_item_id.in_(
-                select(LearningItem.id).where(LearningItem.user_id == current_user.id)
-            ),
+    """Rotate a mastered focus word out — push all its review clocks to tomorrow.
+
+    Pushing only MemoryState.next_review_at was not enough: pending
+    WordReviewTasks and unresolved MistakeLogs kept re-serving the word in
+    the same session, undoing the rotation.
+    """
+    learning_item = db.scalar(
+        select(LearningItem).where(
+            LearningItem.id == learning_item_id,
+            LearningItem.user_id == current_user.id,
         )
     )
-    if memory_state is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory state not found")
-    memory_state.next_review_at = datetime.now(UTC) + timedelta(days=1)
-    db.add(memory_state)
+    if learning_item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning item not found")
+
+    now = datetime.now(UTC)
+    tomorrow = now + timedelta(days=1)
+    memory_state = db.scalar(
+        select(MemoryState).where(MemoryState.learning_item_id == learning_item.id)
+    )
+    if memory_state is not None:
+        memory_state.next_review_at = tomorrow
+        db.add(memory_state)
+
+    word = (learning_item.english_text or "").strip().lower()
+    if word:
+        # Supersede pending micro-review tasks for this word and push the
+        # word-level clock — otherwise the task queue re-serves it today.
+        db.execute(
+            update(WordReviewTask)
+            .where(
+                WordReviewTask.user_id == current_user.id,
+                func.lower(WordReviewTask.word) == word,
+                WordReviewTask.status == "pending",
+            )
+            .values(status="superseded", updated_at=now)
+        )
+        db.execute(
+            update(WordMemoryState)
+            .where(
+                WordMemoryState.user_id == current_user.id,
+                func.lower(WordMemoryState.word) == word,
+            )
+            .values(next_micro_review_at=tomorrow, updated_at=now)
+        )
+    # Rotation means the word is mastered — resolve its open mistakes so the
+    # mistake-injection path doesn't pull it back into the queue.
+    db.execute(
+        update(MistakeLog)
+        .where(
+            MistakeLog.user_id == current_user.id,
+            MistakeLog.learning_item_id == learning_item.id,
+            MistakeLog.is_resolved.is_(False),
+        )
+        .values(is_resolved=True, resolved_at=now)
+    )
     db.commit()
-    return {"rotated": True, "next_review_at": memory_state.next_review_at.isoformat()}
+    return {"rotated": True, "next_review_at": tomorrow.isoformat()}
 
 
 @router.get("/today-progress", response_model=TodayProgressResponse)
@@ -148,6 +194,14 @@ def record_study_time(
 
     db.add(StudyTimeLog(user_id=current_user.id, course_id=payload.course_id, duration_seconds=payload.duration_seconds))
     db.commit()
+    # Daily study reward (once per local day) — the heartbeat is the only
+    # reliable "child studied today" signal, so the award is wired here.
+    try:
+        from app.services.points_service import award_daily_study_points
+        award_daily_study_points(db, current_user.id)
+        db.commit()
+    except Exception:
+        db.rollback()  # points must never break study-time recording
     check_and_generate_daily_report(db, current_user.id)
 
 
@@ -230,13 +284,18 @@ def get_points_heatmap(
     """Daily points heatmap data for the given year."""
     from datetime import date, timedelta
 
+    if year is not None and (year < 2000 or year > 2100):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="year must be 2000-2100")
     target_year = year or datetime.now(UTC).year
     start_dt = datetime(target_year, 1, 1, tzinfo=UTC)
     end_dt = datetime(target_year + 1, 1, 1, tzinfo=UTC)
 
+    # Bucket by Asia/Shanghai — func.date() alone uses UTC and attributes
+    # evening points (local next day) to the previous day.
+    local_date_expr = func.date(func.timezone("Asia/Shanghai", PointsLog.created_at))
     rows = db.execute(
         select(
-            func.date(PointsLog.created_at).label("d"),
+            local_date_expr.label("d"),
             func.sum(PointsLog.points_changed).label("pts"),
         )
         .where(
@@ -244,7 +303,7 @@ def get_points_heatmap(
             PointsLog.created_at >= start_dt,
             PointsLog.created_at < end_dt,
         )
-        .group_by(func.date(PointsLog.created_at))
+        .group_by(local_date_expr)
     ).all()
 
     by_date: dict[str, int] = {str(d): int(p or 0) for d, p in rows}
@@ -286,7 +345,9 @@ def award_points_endpoint(
     db: Annotated[Session, Depends(get_db)],
 ) -> dict:
     from app.services.points_service import award_points
-    return award_points(db, current_user.id, payload.points_change, payload.reason, payload.detail, payload.learning_item_id)
+    result = award_points(db, current_user.id, payload.points_change, payload.reason, payload.detail, payload.learning_item_id)
+    db.commit()  # award_points only flushes; without this the award rolls back
+    return result
 
 
 @router.get("/review-advice")

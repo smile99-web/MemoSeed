@@ -95,6 +95,27 @@ def record_answer(
         # is sealed. The frontend can guard against this with a UI flag.
         raise ValueError(f"Session {session_id} is already completed")
 
+    existing = db.scalar(
+        select(GrammarAnswer).where(
+            GrammarAnswer.session_id == session_id,
+            GrammarAnswer.question_id == question_id,
+        )
+    )
+    if existing is not None:
+        # Re-recording (child changed answer / client retry after a network
+        # error): update in place instead of inserting a duplicate row that
+        # would double-count the question in correct_count.
+        if existing.is_correct != is_correct:
+            session.correct_count = (session.correct_count or 0) + (1 if is_correct else -1)
+        existing.user_answer = user_answer
+        existing.correct_answer = correct_answer
+        existing.is_correct = is_correct
+        existing.time_spent_ms = time_spent_ms
+        db.commit()
+        db.refresh(session)
+        db.refresh(existing)
+        return session, existing
+
     answer = GrammarAnswer(
         session_id=session_id,
         user_id=user_id,

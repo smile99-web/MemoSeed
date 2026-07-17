@@ -214,7 +214,8 @@ export async function playAudioBlob(audioBlob: Blob, playbackRate = 1): Promise<
   const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
   const source = audioContext.createBufferSource();
   source.buffer = audioBuffer;
-  source.playbackRate.value = Math.max(0.25, Math.min(playbackRate, 4));
+  const clampedRate = Math.max(0.25, Math.min(playbackRate, 4));
+  source.playbackRate.value = clampedRate;
   source.connect(audioContext.destination);
 
   stopAudioPlayback();
@@ -239,7 +240,9 @@ export async function playAudioBlob(audioBlob: Blob, playbackRate = 1): Promise<
       }
       resolveActiveAudioPlayback = null;
       reject(new Error("Audio playback timed out"));
-    }, AUDIO_PLAYBACK_TIMEOUT_MS);
+      // Timeout scales with 1/rate: a 25s clip played at 0.5x takes 50s —
+      // the fixed 30s timeout used to kill slow playback mid-audio.
+    }, AUDIO_PLAYBACK_TIMEOUT_MS / clampedRate);
     resolveActiveAudioPlayback = resolve;
     source.onended = () => {
       if (activeAudioSource !== source) {

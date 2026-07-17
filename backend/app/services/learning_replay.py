@@ -5,6 +5,7 @@ from typing import Iterable
 from uuid import UUID
 
 from sqlalchemy import select, func, and_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from zoneinfo import ZoneInfo
 
@@ -89,7 +90,13 @@ def record_learning_event(
         error_type=review_log.error_type,
     )
     db.add(event)
-    db.flush()
+    try:
+        with db.begin_nested():
+            db.flush()
+    except IntegrityError:
+        # Unique index on review_log_id — a concurrent request already
+        # recorded this event. Treat as "no new event" instead of a 500.
+        return None
     _increment_minute_stat(db, event)
     return event
 
@@ -153,6 +160,12 @@ def _fill_gap_minutes(db: Session, user_id: UUID, event: LearningEvent) -> None:
             incorrect_events=0,
         )
         db.add(stat)
+        try:
+            with db.begin_nested():
+                db.flush()
+        except IntegrityError:
+            # Concurrent filler won the race — nothing more to do
+            continue
     _last_event_minute[user_id] = (event.event_date, event.event_hour, event.event_minute)
 
 
@@ -185,7 +198,14 @@ def _increment_minute_stat(db: Session, event: LearningEvent) -> None:
             study_duration_ms=0,
         )
         db.add(stat)
-        db.flush()
+        try:
+            with db.begin_nested():
+                db.flush()
+        except IntegrityError:
+            # Lost an insert race against the unique index — re-read the row
+            stat = db.scalar(stmt)
+            if stat is None:
+                return
     stat.total_events = (stat.total_events or 0) + 1
     if category == "spelling":
         stat.spelling_events = (stat.spelling_events or 0) + 1
@@ -225,18 +245,21 @@ def build_heatmap(db: Session, user_id: UUID, year: int | None = None) -> dict:
         .group_by(LearningMinuteStat.stat_date)
     ).all()
 
-    # Also get StudyTimeLog data for accurate daily study minutes
+    # Also get StudyTimeLog data for accurate daily study minutes.
+    # Bucket by Asia/Shanghai (same as LearningMinuteStat.stat_date) —
+    # func.date() alone uses UTC and pushes evening sessions to the wrong day.
+    local_date_expr = func.date(func.timezone("Asia/Shanghai", StudyTimeLog.recorded_at))
     study_rows = db.execute(
         select(
-            func.date(StudyTimeLog.recorded_at).label("d"),
+            local_date_expr.label("d"),
             func.sum(StudyTimeLog.duration_seconds).label("secs"),
         )
         .where(
             StudyTimeLog.user_id == user_id,
-            func.date(StudyTimeLog.recorded_at) >= start,
-            func.date(StudyTimeLog.recorded_at) <= end,
+            local_date_expr >= start,
+            local_date_expr <= end,
         )
-        .group_by(func.date(StudyTimeLog.recorded_at))
+        .group_by(local_date_expr)
     ).all()
     study_by_date: dict[str, float] = {str(d): float(s or 0) for d, s in study_rows}
 
@@ -307,6 +330,8 @@ def build_day_detail(db: Session, user_id: UUID, day: date) -> dict:
             "correct": r.correct_events,
             "incorrect": r.incorrect_events,
             "accuracy": round((r.correct_events / r.total_events) * 100, 1) if r.total_events else 0.0,
+            # Required by the hour-level study_minutes aggregation below
+            "study_seconds": round((r.study_duration_ms or 0) / 1000, 1),
         })
 
     hours = []
@@ -476,6 +501,24 @@ def build_minute_events(db: Session, user_id: UUID, day: date, hour: int, minute
 
 def backfill_events_from_review_logs(db: Session, user_id: UUID) -> int:
     """Convert missing review logs into replay events and repair zero-duration stats."""
+    # Fast path: when every scored log already has an event there is nothing
+    # to backfill — loading all events + logs on EVERY heatmap fetch was
+    # O(tens of thousands of rows) per request.
+    log_count = db.scalar(
+        select(func.count(ReviewLog.id)).where(
+            ReviewLog.user_id == user_id,
+            ReviewLog.reviewed_at.isnot(None),
+            ReviewLog.score.isnot(None),
+        )
+    ) or 0
+    event_count = db.scalar(
+        select(func.count(LearningEvent.id)).where(
+            LearningEvent.user_id == user_id,
+            LearningEvent.review_log_id.isnot(None),
+        )
+    ) or 0
+    if event_count >= log_count:
+        return 0
     existing_events = {
         event.review_log_id: event
         for event in db.scalars(

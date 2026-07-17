@@ -1128,6 +1128,23 @@ def schedule_memory_review(
 
     learning_item = db.scalar(select(LearningItem).where(LearningItem.id == learning_item_id, LearningItem.user_id == user_id))
     if learning_item is None:
+        # Focus-mode/AI-generated items carry synthetic ids that do not exist
+        # in the DB. For word-level reviews the response_text IS the word —
+        # resolve by word text so the review is never lost to a 404.
+        word = normalize_word(response_text or "")
+        if word and " " not in word:
+            learning_item = db.scalar(
+                select(LearningItem).where(
+                    LearningItem.user_id == user_id,
+                    func.lower(LearningItem.english_text) == word,
+                ).limit(1)
+            )
+            if learning_item is not None:
+                logger.warning(
+                    "Synthetic learning_item_id %s resolved by word %r",
+                    learning_item_id, word,
+                )
+    if learning_item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning item not found")
 
     now = datetime.now(UTC)

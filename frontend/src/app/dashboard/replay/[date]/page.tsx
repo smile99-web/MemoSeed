@@ -39,30 +39,42 @@ export default function DayReplayPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setDayDetail(null);
     void (async () => {
       const token = getAccessToken() ?? await getFreshAccessToken();
       if (!token || !date) {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
         return;
       }
       try {
         const d = await getDayDetail(token, date);
-        setDayDetail(d);
+        if (!cancelled) setDayDetail(d);
       } catch { /* */ }
       finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     })();
+    return () => { cancelled = true; };
   }, [date]);
 
   useEffect(() => {
-    const hour = Number(searchParams.get("hour"));
-    const minute = Number(searchParams.get("minute"));
-    if (Number.isInteger(hour) && hour >= 0 && hour <= 23) {
-      setSelectedHour(hour);
+    // Number(null) === 0 — without the null checks, a plain visit (no query
+    // params) would auto-select hour 0 and minute 0.
+    const hourParam = searchParams.get("hour");
+    const minuteParam = searchParams.get("minute");
+    if (hourParam !== null) {
+      const hour = Number(hourParam);
+      if (Number.isInteger(hour) && hour >= 0 && hour <= 23) {
+        setSelectedHour(hour);
+      }
     }
-    if (Number.isInteger(minute) && minute >= 0 && minute <= 59) {
-      setSelectedMinute(minute);
+    if (minuteParam !== null) {
+      const minute = Number(minuteParam);
+      if (Number.isInteger(minute) && minute >= 0 && minute <= 59) {
+        setSelectedMinute(minute);
+      }
     }
   }, [searchParams]);
 
@@ -71,14 +83,17 @@ export default function DayReplayPage() {
       setHourDetail(null);
       return;
     }
+    let cancelled = false;
+    setHourDetail(null); // don't show the previous hour's minutes
     void (async () => {
       const token = getAccessToken() ?? await getFreshAccessToken();
       if (!token || !date) return;
       try {
         const h = await getHourDetail(token, date, selectedHour);
-        setHourDetail(h);
+        if (!cancelled) setHourDetail(h);
       } catch { /* */ }
     })();
+    return () => { cancelled = true; };
   }, [date, selectedHour]);
 
   useEffect(() => {
@@ -86,14 +101,17 @@ export default function DayReplayPage() {
       setMinuteEvents(null);
       return;
     }
+    let cancelled = false;
+    setMinuteEvents(null); // don't show the previous minute's events
     void (async () => {
       const token = getAccessToken() ?? await getFreshAccessToken();
       if (!token || !date) return;
       try {
         const m = await getMinuteEvents(token, date, selectedHour, selectedMinute);
-        setMinuteEvents(m);
+        if (!cancelled) setMinuteEvents(m);
       } catch { /* */ }
     })();
+    return () => { cancelled = true; };
   }, [date, selectedHour, selectedMinute]);
 
   if (loading) {
@@ -128,7 +146,11 @@ export default function DayReplayPage() {
                 <button
                   type="button"
                   className="mb-2 text-left text-sm font-semibold text-slate-700 hover:text-emerald-600"
-                  onClick={() => setSelectedHour(selectedHour === h.hour ? null : h.hour)}
+                  onClick={() => {
+                    const next = selectedHour === h.hour ? null : h.hour;
+                    setSelectedHour(next);
+                    setSelectedMinute(null); // minute selection belongs to the previously open hour
+                  }}
                 >
                   ⏰ {h.label} · {h.total_events || h.minutes.reduce((s, m) => s + m.total, 0)} 题 · 正确率 {h.accuracy || 0}%{(h.study_minutes || 0) > 0 ? ` · ${h.study_minutes}分钟` : ''}
                 </button>
@@ -141,7 +163,7 @@ export default function DayReplayPage() {
                     ))}
                   </div>
                 ) : null}
-                {selectedHour === h.hour && hourDetail ? (
+                {selectedHour === h.hour && hourDetail && hourDetail.hour === h.hour ? (
                   <div className="mt-2 space-y-2">
                     <div className="grid grid-cols-2 gap-1 text-xs md:grid-cols-3">
                       {hourDetail.minutes.map((m) => {
@@ -176,7 +198,7 @@ export default function DayReplayPage() {
                         );
                       })}
                     </div>
-                    {selectedMinute !== null && minuteEvents ? (
+                    {selectedMinute !== null && minuteEvents && minuteEvents.minute === selectedMinute && minuteEvents.hour === selectedHour ? (
                       <div className="mt-3 rounded border border-emerald-200 bg-emerald-50/50 p-3">
                         <h4 className="mb-2 text-sm font-semibold text-emerald-700">第 {selectedMinute} 分钟的练习记录</h4>
                         {minuteEvents.events.length === 0 ? (
