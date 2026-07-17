@@ -668,8 +668,12 @@ function StudyContent() {
     // options were empty on first render.
     const itemChinese = hasChineseText(currentItem.chinese_text) ? currentItem.chinese_text : "";
     const backendAnswer = hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "";
-    const fallbackAnswer = hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : itemChinese;
-    const correctAnswer = backendAnswer || fallbackAnswer || itemChinese;
+    const asyncAnswer = hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "";
+    // chinese_text (authoritative for focus items — pre-cached by the backend)
+    // must beat the async translation: the async value can be STALE from the
+    // previous item (late fetch resolve), which put the WRONG meaning into the
+    // options so every pick was judged incorrect (child only saw distractors).
+    const correctAnswer = backendAnswer || itemChinese || asyncAnswer;
     const fallbackChoices = (currentItem.review_choices && currentItem.review_choices.length > 0 ? currentItem.review_choices : [])
       .filter((choice) => hasChineseText(choice));
     const choicesWithAnswer = correctAnswer && !fallbackChoices.some((choice) => isCorrectChoiceAnswer(choice, correctAnswer))
@@ -1164,14 +1168,24 @@ function StudyContent() {
     } else if (isChoiceIntroTask && focusedWord) {
       chineseText = item.review_task_type === "listen_choose_chinese" ? "听英文发音，选择中文意思" : "请选择这个英文单词的中文意思";
       englishText = focusedWord;
-      try {
-        const accessToken = getAccessToken();
-        if (accessToken) {
-          const response = await translateLearningText(focusedWord, accessToken, modelSettingsRef.current);
-          setReviewTaskWordTranslation(response.chinese_text);
+      if (hasChineseText(item.chinese_text)) {
+        // Focus items carry the authoritative pre-cached meaning in chinese_text.
+        // Use it directly — no async fetch, no race with the previous item.
+        setReviewTaskWordTranslation(item.chinese_text);
+      } else {
+        try {
+          const accessToken = getAccessToken();
+          if (accessToken) {
+            const introItemId = item.id;
+            const response = await translateLearningText(focusedWord, accessToken, modelSettingsRef.current);
+            // Race guard: a late resolve must not overwrite the NEXT item's translation
+            if (currentItemIdRef.current === introItemId) {
+              setReviewTaskWordTranslation(response.chinese_text);
+            }
+          }
+        } catch {
+          setReviewTaskWordTranslation("");
         }
-      } catch {
-        setReviewTaskWordTranslation("");
       }
     } else if (shouldUseSingleWordIntro && focusedWord) {
       // Focus mode items have pre-cached Chinese meanings in chinese_text
@@ -1184,7 +1198,12 @@ function StudyContent() {
       try {
         const accessToken = getAccessToken();
         if (accessToken) {
+          const introItemId = item.id;
           const response = await translateLearningText(focusedWord, accessToken, modelSettingsRef.current);
+          // Race guard: abort if the user already advanced to the next item
+          if (currentItemIdRef.current !== introItemId) {
+            return;
+          }
           chineseText = response.chinese_text;
           setReviewTaskWordTranslation(response.chinese_text);
           englishText = focusedWord;
@@ -2910,10 +2929,17 @@ function StudyContent() {
     if (!currentItem || !isChoiceReviewTask || !choice) {
       return;
     }
-    // Always fall back to sync currentItem.chinese_text — reviewTaskWordTranslation
-    // is set async in useEffect and may be empty on first render, causing
-    // the "6-choose-1 number key selects wrong" bug.
+    if (choiceResultRef.current !== null) {
+      // Already judged this item — block the digit-then-space (or double-key)
+      // double confirmation that submitted every choice review TWICE.
+      return;
+    }
+    // chinese_text is the authoritative meaning for focus items (pre-cached by
+    // the backend). It must take precedence over reviewTaskWordTranslation —
+    // the async value can be STALE from the previous item (race), which judged
+    // correct picks as wrong.
     const correctAnswer = hasChineseText(currentItem.review_answer) ? currentItem.review_answer
+      : hasChineseText(currentItem.chinese_text) ? currentItem.chinese_text
       : hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation
       : (currentItem?.chinese_text || "");
     const isCorrect = isCorrectChoiceAnswer(choice, correctAnswer);
