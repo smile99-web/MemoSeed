@@ -195,7 +195,7 @@ class TestRecordAnswer:
             completed_at=None,
             correct_count=3,
         )
-        db = _MockDB(scalar_result=session)
+        db = _MockDB(scalar_result=[session, None])  # session lookup, then no existing answer
         record_answer(
             db,
             user_id=session.user_id,
@@ -223,7 +223,7 @@ class TestRecordAnswer:
             completed_at=None,
             correct_count=3,
         )
-        db = _MockDB(scalar_result=session)
+        db = _MockDB(scalar_result=[session, None])  # session lookup, then no existing answer
         record_answer(
             db,
             user_id=session.user_id,
@@ -240,6 +240,39 @@ class TestRecordAnswer:
         assert session.correct_count == 3, (
             f"Expected correct_count to stay at 3 for a wrong answer, got {session.correct_count}"
         )
+
+    def test_rerecord_same_question_updates_in_place(self):
+        session = SimpleNamespace(
+            id=uuid4(),
+            user_id=uuid4(),
+            completed_at=None,
+            correct_count=1,
+        )
+        existing_answer = SimpleNamespace(
+            is_correct=False,
+            user_answer="B",
+            correct_answer="A",
+            time_spent_ms=1000,
+        )
+        db = _MockDB(scalar_result=[session, existing_answer])
+        record_answer(
+            db,
+            user_id=session.user_id,
+            session_id=session.id,
+            question_id="q4",
+            question_type="choice",
+            level=5,
+            prompt="?",
+            user_answer="A",
+            correct_answer="A",
+            is_correct=True,
+            time_spent_ms=2000,
+        )
+        # Changed answer adjusts correct_count by the delta, no duplicate row
+        assert session.correct_count == 2
+        assert existing_answer.user_answer == "A"
+        assert existing_answer.is_correct is True
+        assert len(db.added_objects) == 0
 
 
 class TestCompleteSession:
@@ -293,18 +326,25 @@ class _MockDB:
     """Tiny in-memory mock for SQLAlchemy Session, enough for these tests.
 
     Supports:
-      - db.scalar(stmt) → returns the configured scalar_result
+      - db.scalar(stmt) → returns the configured scalar_result; when a list
+        is given, each call pops the next result (functions doing multiple
+        scalar lookups configure one entry per query, in order)
       - db.add(obj) → records into added_objects
       - db.commit() → no-op
       - db.refresh(obj) → no-op (objects are real SimpleNamespaces)
     """
 
     def __init__(self, scalar_result):
-        self.scalar_result = scalar_result
+        if isinstance(scalar_result, list):
+            self._scalar_results = list(scalar_result)
+        else:
+            self._scalar_results = [scalar_result]
         self.added_objects: list[object] = []
 
     def scalar(self, _stmt):
-        return self.scalar_result
+        if len(self._scalar_results) > 1:
+            return self._scalar_results.pop(0)
+        return self._scalar_results[0]
 
     def add(self, obj):
         self.added_objects.append(obj)
