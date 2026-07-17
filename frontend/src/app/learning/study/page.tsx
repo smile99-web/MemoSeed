@@ -2048,10 +2048,12 @@ function StudyContent() {
         const token = getAccessToken();
         const rotatedIds = new Set<string>();
         for (const item of items) {
-          if (item.id && !rotatedIds.has(item.id)) {
-            rotatedIds.add(item.id);
+          // Focus items carry synthetic uuid4 ids — rotate by the real learning item id
+          const realId = item.source_item_id ?? (item.id.startsWith("generated-") ? null : item.id);
+          if (realId && !rotatedIds.has(realId)) {
+            rotatedIds.add(realId);
             if (token) {
-              void rotateFocusWord(token, item.id).catch(() => {});
+              void rotateFocusWord(token, realId).catch(() => {});
             }
           }
         }
@@ -2636,8 +2638,10 @@ function StudyContent() {
       focusCorrectCountRef.current.set(wordKey, newCount);
       if (newCount >= 3 && currentItem.id) {
         const token = getAccessToken();
-        if (token) {
-          void rotateFocusWord(token, currentItem.id).then(() => {
+        // Focus items carry synthetic uuid4 ids — rotate by the real learning item id
+        const realId = currentItem.source_item_id ?? (currentItem.id.startsWith("generated-") ? null : currentItem.id);
+        if (token && realId) {
+          void rotateFocusWord(token, realId).then(() => {
             setFocusRotatedMessage(`${expectedWord} 已掌握！下一批`);
             setTimeout(() => setFocusRotatedMessage(null), 3000);
           }).catch(() => {});

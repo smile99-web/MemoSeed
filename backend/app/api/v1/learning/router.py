@@ -615,6 +615,7 @@ def list_learning_items(
                 continue
             choice_item = LearningItemRead(
                 id=uuid4(),
+                source_item_id=item.id,
                 user_id=current_user.id,
                 course_id=item.course_id,
                 item_type="word",
@@ -1134,6 +1135,7 @@ def list_due_review_items(
                         review_prompt = f"首字母:{first_letter_hint}"
                 focus_item = LearningItemRead(
                     id=uuid4(),
+                    source_item_id=word_item.id,
                     user_id=current_user.id,
                     course_id=item.course_id,
                     item_type="word",
@@ -1737,7 +1739,22 @@ def create_word_mistake_log(
 ) -> WordMistakeLogResponse:
     learning_item = db.scalar(select(LearningItem).where(LearningItem.id == payload.learning_item_id, LearningItem.user_id == current_user.id))
     if learning_item is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning item not found")
+        # Focus-mode/AI-generated items carry synthetic ids (uuid4) that do not
+        # exist in the DB. Resolve by word text so the review is NEVER lost —
+        # previously this raised 404 and the review silently vanished while
+        # study time kept recording (heatmap showed minutes, day detail showed 0).
+        _w = normalize_word(getattr(payload, "word", "") or getattr(payload, "expected_word", ""))
+        if _w:
+            learning_item = db.scalar(
+                select(LearningItem).where(
+                    LearningItem.user_id == current_user.id,
+                    LearningItem.english_text == _w,
+                ).limit(1)
+            )
+        logger.warning(
+            "Synthetic learning_item_id %s resolved by word %r (found=%s)",
+            payload.learning_item_id, _w, learning_item is not None,
+        )
 
     word_item = get_or_create_word_memory_item(db, current_user.id, payload.expected_word, learning_item)
     error_type = normalize_word_error_type(payload.error_type)
@@ -1784,7 +1801,22 @@ def create_word_review(
 ) -> WordReviewResponse:
     learning_item = db.scalar(select(LearningItem).where(LearningItem.id == payload.learning_item_id, LearningItem.user_id == current_user.id))
     if learning_item is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning item not found")
+        # Focus-mode/AI-generated items carry synthetic ids (uuid4) that do not
+        # exist in the DB. Resolve by word text so the review is NEVER lost —
+        # previously this raised 404 and the review silently vanished while
+        # study time kept recording (heatmap showed minutes, day detail showed 0).
+        _w = normalize_word(getattr(payload, "word", "") or getattr(payload, "expected_word", ""))
+        if _w:
+            learning_item = db.scalar(
+                select(LearningItem).where(
+                    LearningItem.user_id == current_user.id,
+                    LearningItem.english_text == _w,
+                ).limit(1)
+            )
+        logger.warning(
+            "Synthetic learning_item_id %s resolved by word %r (found=%s)",
+            payload.learning_item_id, _w, learning_item is not None,
+        )
 
     word_item = get_or_create_word_memory_item(db, current_user.id, payload.word, learning_item)
     review_mode = payload.review_mode.strip()[:32]
@@ -1827,7 +1859,7 @@ def create_word_review(
         # review in the focus mode already provides 3 modes per word,
         # so no extra tasks are needed there.
         if review_mode == "sentence-spelling":
-            schedule_micro_review_tasks_for_mistake(db, current_user.id, word_state, learning_item.chinese_text, learning_item.id, error_type or "spelling")
+            schedule_micro_review_tasks_for_mistake(db, current_user.id, word_state, learning_item.chinese_text if learning_item else word_item.english_text, learning_item.id if learning_item else None, error_type or "spelling")
         # Deduct points for wrong answer
         try:
             from app.services.points_service import POINTS_WRONG, award_points

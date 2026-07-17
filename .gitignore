@@ -40,3 +40,4 @@ pnpm-debug.log*
 
 # vps
 .vps_key
+backend/tts_cache/
