@@ -62,8 +62,10 @@ def ensure_lightweight_schema_upgrades() -> None:
             ) agg
             WHERE s.user_id = agg.user_id AND s.stat_date = agg.stat_date
               AND s.stat_hour = agg.stat_hour AND s.stat_minute = agg.stat_minute
-              AND s.id = (
-                  SELECT min(x.id) FROM learning_minute_stats x
+              AND s.ctid = (
+                  -- ctid, not min(id): the id column is uuid and PostgreSQL
+                  -- has no min(uuid) aggregate.
+                  SELECT min(x.ctid) FROM learning_minute_stats x
                   WHERE x.user_id = agg.user_id AND x.stat_date = agg.stat_date
                     AND x.stat_hour = agg.stat_hour AND x.stat_minute = agg.stat_minute
               );
@@ -72,7 +74,7 @@ def ensure_lightweight_schema_upgrades() -> None:
                 SELECT 1 FROM learning_minute_stats b
                 WHERE b.user_id = a.user_id AND b.stat_date = a.stat_date
                   AND b.stat_hour = a.stat_hour AND b.stat_minute = a.stat_minute
-                  AND b.id < a.id
+                  AND b.ctid < a.ctid
             );
         END $$;""",
         # Learning replay: drop duplicate events per review_log (keep the
