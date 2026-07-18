@@ -78,7 +78,7 @@ from app.services.word_memory import (
     supersede_stale_pending_tasks_for_reviewed_words,
     sync_word_memory_from_review,
 )
-from app.services.word_translation_cache import ensure_word_translations, get_cached_word_translations
+from app.services.word_translation_cache import ensure_word_translations, get_cached_word_translations, sanitize_word_translation
 from app.utils import extract_mistake_words, normalize_word, string_setting, tokenize_words
 
 router = APIRouter()
@@ -126,7 +126,8 @@ BASIC_WORD_TRANSLATIONS = {
     "what": "什么",
     "you": "你",
 }
-CHINESE_SENTENCE_MARKERS = set("，。！？；：,.!?;:、 \n\r\t")
+CHINESE_SENTENCE_MARKERS = set("。！？：,.!?;: \n\r\t")  # meaning separators ，；、 are allowed in word choices
+MAX_WORD_CHOICE_LENGTH = 24  # multi-meaning translations (up to 3 meanings) need more than a single-word cap
 
 
 def build_micro_task_learning_item(
@@ -266,7 +267,7 @@ def sanitize_word_choice(value: object) -> str:
         return ""
     if any(marker in text for marker in CHINESE_SENTENCE_MARKERS):
         return ""
-    if len(text) > 6:
+    if len(text) > MAX_WORD_CHOICE_LENGTH:
         return ""
     return text
 
@@ -514,7 +515,8 @@ def get_or_create_word_memory_item(
         if not ch or not ch.strip(): return False
         if not any("一" <= c <= "鿿" for c in ch): return False
         if ch.strip().lower() == eng.strip().lower(): return False
-        if len(ch) > 15 or any(p in ch for p in ("。","！","？","……","，","；")): return False
+        # Word-level Chinese may hold several common meanings separated by ，；、
+        if len(ch) > 24 or any(p in ch for p in ("。","！","？","……")): return False
         return True
 
     existing_item = db.scalar(
@@ -1022,10 +1024,16 @@ def list_due_review_items(
     for item in item_by_id.values():
         if item.item_type == "word" and item.source == WORD_MEMORY_SOURCE and normalize_word(item.english_text) in covered_task_words:
             continue
-        # Guard: skip items with invalid Chinese (empty, English-as-Chinese, sentence-level)
+        # Guard: skip items with invalid Chinese (empty, English-as-Chinese, sentence-level).
+        # Word items may hold several common meanings separated by \uff0c\uff1b\u3001 (multi-meaning
+        # learning), so they only reject sentence-ending punctuation and get a longer cap.
         ch = item.chinese_text or ""
         eng = item.english_text or ""
-        if not any("\u4e00" <= c <= "\u9fff" for c in ch) or ch.strip().lower() == eng.strip().lower() or len(ch) > 15 or any(p in ch for p in ("\u3002","\uff01","\uff1f","\u2026\u2026","\uff0c","\uff1b")):
+        if item.item_type == "word":
+            invalid_chinese = len(ch) > 24 or any(p in ch for p in ("\u3002","\uff01","\uff1f","\u2026\u2026"))
+        else:
+            invalid_chinese = len(ch) > 15 or any(p in ch for p in ("\u3002","\uff01","\uff1f","\u2026\u2026","\uff0c","\uff1b"))
+        if not any("\u4e00" <= c <= "\u9fff" for c in ch) or ch.strip().lower() == eng.strip().lower() or invalid_chinese:
             continue
         item_read = LearningItemRead.model_validate(item)
         focus_words = focus_words_by_item_id.get(item.id, [])
@@ -1627,7 +1635,16 @@ def rebuild_course_cache(
         if sentence_items:
             for index, item in enumerate(sentence_items):
                 try:
-                    item.chinese_text = translate_english_to_chinese(item.english_text, translation_settings)
+                    if item.item_type == "word":
+                        # Word items get 1-3 common meanings from the LLM (multi-meaning learning).
+                        item.chinese_text = sanitize_word_translation(
+                            translate_english_to_chinese(item.english_text, translation_settings, multiple_meanings=True),
+                            source_word=item.english_text,
+                        )
+                        if not item.chinese_text:
+                            raise ValueError("empty after sanitize")
+                    else:
+                        item.chinese_text = translate_english_to_chinese(item.english_text, translation_settings)
                     db.add(item)
                     stats["sentence_translations"] += 1
                 except ValueError:
@@ -1729,7 +1746,14 @@ def retry_item_cache(
     # Re-generate the sentence Chinese translation.
     if payload.sentence_chinese_translation:
         try:
-            item.chinese_text = translate_english_to_chinese(item.english_text, translation_settings)
+            if item.item_type == "word":
+                # Word items get 1-3 common meanings from the LLM (multi-meaning learning).
+                item.chinese_text = sanitize_word_translation(
+                    translate_english_to_chinese(item.english_text, translation_settings, multiple_meanings=True),
+                    source_word=item.english_text,
+                ) or item.chinese_text
+            else:
+                item.chinese_text = translate_english_to_chinese(item.english_text, translation_settings)
             db.add(item)
             db.commit()
         except Exception as exc:

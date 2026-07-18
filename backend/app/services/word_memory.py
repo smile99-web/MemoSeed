@@ -604,7 +604,7 @@ def build_task_choices(
             LearningItem.user_id == user_id,
             LearningItem.chinese_text.isnot(None),
             LearningItem.chinese_text != "",
-            func.length(LearningItem.chinese_text) <= 4,
+            func.length(LearningItem.chinese_text) <= 24,
             LearningItem.chinese_text != correct_chinese,
         )
         .order_by(func.random())
@@ -614,7 +614,7 @@ def build_task_choices(
     unique_distractors: list[str] = []
     for text in distractor_rows:
         text = str(text).strip()
-        if text and len(text) <= 4 and text not in unique_distractors and text != correct_chinese:
+        if text and len(text) <= 24 and text not in unique_distractors and text != correct_chinese:
             unique_distractors.append(text)
         if len(unique_distractors) >= 5:
             break

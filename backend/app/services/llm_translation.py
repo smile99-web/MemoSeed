@@ -20,12 +20,30 @@ def needs_translation(chinese_text: str) -> bool:
     return not chinese_text.strip() or chinese_text.strip() == "待补充"
 
 
-def translate_english_to_chinese(english_text: str, settings: LlmTranslationSettings) -> str:
-    prompt = (
-        "Translate the following English word, phrase, or sentence into concise Simplified Chinese. "
-        "Return only the Chinese translation, with no explanation, quotes, markdown, or extra text.\n\n"
-        f"English: {english_text.strip()}"
-    )
+def translate_english_to_chinese(
+    english_text: str,
+    settings: LlmTranslationSettings,
+    multiple_meanings: bool = False,
+) -> str:
+    if multiple_meanings:
+        prompt = (
+            "Translate the following English word into Simplified Chinese for a child learning English. "
+            "List the 1 to 3 most common meanings, most frequent first, separated by the Chinese "
+            "semicolon \"；\". Keep each meaning short (no more than 6 characters). "
+            "Return only the Chinese meaning(s), with no explanation, quotes, pinyin, markdown, "
+            "or extra text.\n\n"
+            "Examples:\n"
+            "like -> 喜欢；像\n"
+            "right -> 正确的；右边；权利\n"
+            "apple -> 苹果\n\n"
+            f"English: {english_text.strip()}"
+        )
+    else:
+        prompt = (
+            "Translate the following English word, phrase, or sentence into concise Simplified Chinese. "
+            "Return only the Chinese translation, with no explanation, quotes, markdown, or extra text.\n\n"
+            f"English: {english_text.strip()}"
+        )
     response = call_llm_generate(settings, prompt)
     translated_text = response.strip().strip('"“”')
     if not translated_text:

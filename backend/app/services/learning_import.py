@@ -11,7 +11,7 @@ from app.models.learning_item import LearningItem
 from app.schemas.learning import ImportSkippedItem
 from app.services.llm_translation import LlmTranslationSettings, enrich_word_with_phonetics, generate_phonetic_decomposition, needs_translation, translate_english_to_chinese
 from app.services.speech_asset_cache import precache_learning_speech_assets
-from app.services.word_translation_cache import ensure_word_translations, extract_unique_words
+from app.services.word_translation_cache import ensure_word_translations, extract_unique_words, sanitize_word_translation
 
 SUPPORTED_IMPORT_EXTENSIONS = {".txt", ".xlsx"}
 
@@ -199,7 +199,16 @@ def import_learning_items(
                 skipped_items.append(ImportSkippedItem(english_text=parsed_item.english_text, reason=translation_failure_reason))
                 continue
             try:
-                chinese_text = translate_english_to_chinese(parsed_item.english_text, translation_settings)
+                if parsed_item.item_type == "word":
+                    # New words get 1-3 common Chinese meanings from the LLM, not just one.
+                    chinese_text = sanitize_word_translation(
+                        translate_english_to_chinese(parsed_item.english_text, translation_settings, multiple_meanings=True),
+                        source_word=parsed_item.english_text,
+                    )
+                    if not chinese_text:
+                        raise ValueError("LLM translation failed: empty after sanitize")
+                else:
+                    chinese_text = translate_english_to_chinese(parsed_item.english_text, translation_settings)
             except ValueError as exc:
                 translation_failure_reason = str(exc)
                 skipped_items.append(ImportSkippedItem(english_text=parsed_item.english_text, reason=translation_failure_reason))

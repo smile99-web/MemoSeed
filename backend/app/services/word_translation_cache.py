@@ -95,7 +95,10 @@ def ensure_word_translations(
 
     for word in missing_words:
         try:
-            chinese_text = sanitize_word_translation(translate_english_to_chinese(word, settings), source_word=word)
+            chinese_text = sanitize_word_translation(
+                translate_english_to_chinese(word, settings, multiple_meanings=True),
+                source_word=word,
+            )
         except ValueError:
             chinese_text = ""
         if not chinese_text:
@@ -128,12 +131,24 @@ def ensure_word_translations(
 
 
 def sanitize_word_translation(value: str, source_word: str = "") -> str:
+    """Keep multi-meaning translations intact.
+
+    Meaning separators (；、，and ASCII ;) are normalized to the Chinese
+    semicolon so a word can carry several common meanings at once. Only
+    sentence-ending punctuation (newline, 。！？) still truncates the text,
+    since anything after it is usually an explanation the LLM appended.
+    """
     text = value.strip()
     if not text:
         return ""
-    for separator in ("\n", "，", "。", "！", "？", ";", "；"):
+    for separator in ("\n", "。", "！", "？"):
         if separator in text:
             text = text.split(separator, 1)[0].strip()
+    for separator in ("、", "，", ";"):
+        text = text.replace(separator, "；")
+    segments = [segment.strip() for segment in text.split("；")]
+    segments = [segment for segment in segments if segment]
+    text = "；".join(segments[:3])
     text = text[:40]
     return text if is_valid_chinese_translation(source_word, text) else ""
 
