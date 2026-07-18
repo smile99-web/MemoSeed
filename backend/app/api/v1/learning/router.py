@@ -20,6 +20,7 @@ from app.models.course import Course
 from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
 from app.models.mistake_log import MistakeLog
+from app.models.review_log import ReviewLog
 from app.models.speech_asset import SpeechAsset
 from app.models.user import User
 from app.models.word_memory_state import WordMemoryState
@@ -53,6 +54,7 @@ from app.services.learning_import import SUPPORTED_IMPORT_EXTENSIONS, import_lea
 from app.services.llm_translation import DEFAULT_LLM_TRANSLATION_SETTINGS, LlmTranslationSettings, generate_learning_text, needs_translation, translate_english_to_chinese
 from app.services.memory_dashboard import calculate_word_priority
 from app.services.memory_scheduler import (
+    DAILY_REVIEW_ITEM_BUDGET,
     calculate_current_forget_risk,
     calculate_review_priority,
     exceeded_daily_review_filter_clause,
@@ -60,6 +62,7 @@ from app.services.memory_scheduler import (
     park_mastered_words,
     park_stuck_words,
     schedule_memory_review,
+    smooth_overdue_backlog,
     stuck_word_daily_cap_filter_clause,
     stuck_word_filter_clause,
 )
@@ -788,6 +791,21 @@ def list_due_review_items(
     park_mastered_words(db, current_user.id, now)
     park_stuck_words(db, current_user.id, now)
     park_cliff_words(db, current_user.id, now)
+    # P2: spread any oversized overdue backlog across the next few days, then
+    # apply the daily review budget (distinct items already served today).
+    # Without this, 280+ due items made "priority order" meaningless and the
+    # child never reached the end of the queue.
+    smooth_overdue_backlog(db, current_user.id, now)
+    reviewed_today_count = int(
+        db.scalar(
+            select(func.count(func.distinct(ReviewLog.learning_item_id))).where(
+                ReviewLog.user_id == current_user.id,
+                ReviewLog.reviewed_at >= today_start,
+            )
+        )
+        or 0
+    )
+    daily_budget_remaining = max(DAILY_REVIEW_ITEM_BUDGET - reviewed_today_count, 0)
     cloze_settings = build_llm_translation_settings(None, None, None, None, stored_settings)
     has_task_updates = supersede_stale_pending_tasks_for_reviewed_words(db, current_user.id, now)
 
@@ -815,6 +833,10 @@ def list_due_review_items(
 
     due_rows = list(db.execute(due_statement).all())
     due_rows.sort(key=lambda row: (-calculate_review_priority(row[1], now), row[1].next_review_at))
+    # P2: cap the due queue by the remaining daily budget. Micro-review tasks
+    # (below) are still served when the budget is exhausted — they are the
+    # in-flight correction machinery, not new due work.
+    due_rows = due_rows[:daily_budget_remaining] if daily_budget_remaining > 0 else []
     for item, _memory_state in due_rows:
         item_by_id.setdefault(item.id, item)
 

@@ -136,6 +136,36 @@ STUCK_WORD_RESCHEDULE_DAYS = 7   # informational; we don't actually reschedule
 # (e.g. 'truth' reviewed 270 times over 24 days).
 MAX_DAILY_REVIEWS_PER_WORD = 3
 
+# --- P7: Soft failure setback (失败软化) --------------------------------------
+# Previously a single failure crashed post-lapse stability below 1 day (via
+# next_fsrs_forget_stability) and adjust_delay_for_learning_item then clamped
+# EVERY delay to >= 1 day. Net effect: interval_days collapsed to 1 after ANY
+# mistake — production data showed 169 of ~250 words sitting at interval=1,
+# the whole vocabulary re-entering the queue every single day, and mastered
+# words eating 54% of review time (e.g. 'it': 118 unassisted successes in 14
+# days, still interval=1 because 29 slips kept resetting it).
+#
+# Now a lapse applies a *proportional* stability setback based on the
+# consecutive-error streak, and mature words (interval >= 3d) keep a
+# multi-day interval after a slip instead of collapsing to 1 day:
+#   1st consecutive failure -> stability floor = 60% of previous (~half interval)
+#   2nd                     -> 45%
+#   3rd+                    -> 30% (approaching the old collapse)
+# A failure still never *grows* stability (capped at previous stability).
+SOFT_SETBACK_FACTORS = {1: 0.6, 2: 0.45}
+SOFT_SETBACK_DEFAULT_FACTOR = 0.3
+MATURE_INTERVAL_FOR_SOFT_SETBACK_DAYS = 3
+# P10: a failed word must not come back immediately — minimum same-day retry
+# gap. The previous 2-minute floor produced rapid-fire failure loops.
+MIN_FAILURE_RETRY_MINUTES = 10
+
+# --- P2: Daily review budget + backlog smoothing ------------------------------
+# Distinct items served per day are capped; the overdue overflow is spread
+# across the next few days instead of piling up under an "overdue" label
+# that stops meaning anything beyond a few dozen items.
+DAILY_REVIEW_ITEM_BUDGET = 90
+BACKLOG_SMOOTH_SPREAD_DAYS = 3
+
 LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
 WORD_MEMORY_SOURCE = "word-memory"
 EASY_FUNCTION_WORDS = {
@@ -645,6 +675,15 @@ def park_mastered_words(db: Session, user_id: UUID, now: datetime | None = None)
 
     Returns the number of words whose due-date was moved forward. Safe to
     call repeatedly: a no-op if the new due-date is already in the future.
+
+    P8: the selection criteria is now simply WordMemoryState.status ==
+    "mastered". The previous inline criteria (strength >= 0.75 AND recall >= 3
+    AND no_hint >= 3) duplicated derive_word_status but WITHOUT its recent-
+    accuracy gate, so chronically-failing words with strong cumulative
+    counters (e.g. 'early': 152 lapses, 33% recent accuracy) were parked as
+    "mastered" while still failing daily. derive_word_status is now the single
+    source of truth for mastery (recomputed on every review sync; a one-off
+    backfill script re-aligned existing rows at deploy time).
     """
     from app.models.word_memory_state import WordMemoryState
     now = now or datetime.now(UTC)
@@ -661,10 +700,7 @@ def park_mastered_words(db: Session, user_id: UUID, now: datetime | None = None)
         .where(
             LearningItem.user_id == user_id,
             LearningItem.item_type == "word",
-            MemoryState.memory_strength >= 0.75,
-            MemoryState.consecutive_error_count <= 1,
-            WordMemoryState.recall_correct_count >= 3,
-            WordMemoryState.no_hint_correct_date_count >= 3,
+            WordMemoryState.status == "mastered",
             # Only push words whose current next_review_at is BEFORE the
             # target. Idempotency: a word that's already parked past
             # `target_due` is left alone — its rowcount is 0 on repeat
@@ -693,6 +729,42 @@ def park_mastered_words(db: Session, user_id: UUID, now: datetime | None = None)
     )
     db.commit()
     return int(result.rowcount or 0)
+
+
+def smooth_overdue_backlog(db: Session, user_id: UUID, now: datetime | None = None) -> int:
+    """Spread an oversized overdue backlog across the next few days.
+
+    P2: when far more items are due than the child can review in one day, the
+    "overdue" label stops meaning anything and the queue degenerates into
+    whatever order the DB returns. Push the LOWEST-priority overflow to
+    +1..+BACKLOG_SMOOTH_SPREAD_DAYS days.
+
+    Self-throttling: only items overdue by MORE than 24 hours are candidates,
+    so once an item has been pushed it is not touched again the same day.
+    Priority proxy: oldest-due first keeps its slot (the tail of the
+    overdue list is what gets pushed).
+    """
+    now = now or datetime.now(UTC)
+    overdue_cutoff = now - timedelta(days=1)
+    rows = list(db.scalars(
+        select(MemoryState)
+        .join(LearningItem, LearningItem.id == MemoryState.learning_item_id)
+        .where(
+            LearningItem.user_id == user_id,
+            MemoryState.next_review_at <= overdue_cutoff,
+        )
+        .order_by(MemoryState.next_review_at.asc())
+    ).all())
+    overflow = len(rows) - DAILY_REVIEW_ITEM_BUDGET
+    if overflow <= 0:
+        return 0
+    pushed = 0
+    for index, memory_state in enumerate(rows[-overflow:]):
+        memory_state.next_review_at = now + timedelta(days=1 + (index % BACKLOG_SMOOTH_SPREAD_DAYS))
+        db.add(memory_state)
+        pushed += 1
+    db.commit()
+    return pushed
 
 
 def initial_fsrs_difficulty(rating: int, weights: tuple[float, ...] = FSRS_WEIGHTS) -> float:
@@ -904,7 +976,9 @@ def calculate_failure_delay(score: int, lapse_count: int, now: datetime, memory_
         if bedtime <= local_now:
             bedtime = local_now + timedelta(hours=2)
         end_of_day_delay = bedtime.astimezone(UTC) - now
-        delay = max(min(delay, end_of_day_delay), timedelta(minutes=2))
+        # P10: the floor is 10 minutes, not 2 — an immediate re-test of a
+        # just-failed word has no spacing value and feeds the failure loop.
+        delay = max(min(delay, end_of_day_delay), timedelta(minutes=MIN_FAILURE_RETRY_MINUTES))
 
     return delay
 
@@ -988,8 +1062,20 @@ def adjust_delay_for_item_type(delay: timedelta, item_type: str) -> timedelta:
     return delay
 
 
-def adjust_delay_for_learning_item(delay: timedelta, learning_item: LearningItem, memory_state: MemoryState) -> timedelta:
+def adjust_delay_for_learning_item(delay: timedelta, learning_item: LearningItem, memory_state: MemoryState, is_failure: bool = False) -> timedelta:
     delay = adjust_delay_for_item_type(delay, learning_item.item_type)
+    # P7: failure delays bypass ALL day-scale adjustments. Previously every
+    # delay was clamped to >= 1 day at the bottom of this function, which
+    # (a) destroyed the STS same-day retry spacing for learning-phase words
+    #    and (b) collapsed mature-word slips to interval_days=1 — the root
+    #    cause of "169 words due every single day".
+    # Learning-phase failures keep their STS-derived same-day retry (with a
+    # 10-minute floor); mature slips keep the FSRS-derived multi-day setback
+    # exactly as computed.
+    if is_failure:
+        if delay < timedelta(days=1):
+            return max(delay, timedelta(minutes=MIN_FAILURE_RETRY_MINUTES))
+        return delay
     # The previous version had `if delay < timedelta(days=1): return delay`
     # here, which silently skipped every downstream optimization (time-of-day
     # routing, hint-dependency penalty, danger-zone shortening) for new /
@@ -1201,6 +1287,18 @@ def schedule_memory_review(
         next_stability_days = next_fsrs_recall_stability(next_difficulty, previous_stability_days, previous_retrievability, rating, fsrs_weights)
     else:
         next_stability_days = next_fsrs_forget_stability(next_difficulty, previous_stability_days, previous_retrievability, fsrs_weights)
+        # P7: proportional setback floor. Raw post-lapse FSRS stability drops
+        # below 1 day for almost any lapse (w[11] post-lapse formula) — one
+        # slip then reset weeks of interval growth to "tomorrow". Keep the
+        # raw value as a lower bound, but never let a word with real history
+        # fall below previous_stability * streak_factor, and never let a
+        # failure GROW stability (cap at previous).
+        streak = memory_state.consecutive_error_count  # already incremented above
+        factor = SOFT_SETBACK_FACTORS.get(streak, SOFT_SETBACK_DEFAULT_FACTOR)
+        setback_floor = previous_stability_days * factor
+        next_stability_days = constrain_stability(
+            min(max(next_stability_days, setback_floor), previous_stability_days)
+        )
 
     # STS-to-LTS transfer: convert a fraction of current short-term stability
     # into durable long-term stability on each successful review.
@@ -1211,7 +1309,23 @@ def schedule_memory_review(
 
     memory_state.ease_factor = next_difficulty
     if not is_correct:
-        review_delay = calculate_failure_delay(score, memory_state.lapse_count, now, memory_state)
+        if previous_interval >= MATURE_INTERVAL_FOR_SOFT_SETBACK_DAYS and previous_repetition_count > 0:
+            # Mature-word slip: long-form setback derived from the softened
+            # stability (≈ half the previous interval on a first slip). The
+            # word leaves the daily queue for several days instead of
+            # bouncing back tomorrow — this is what finally lets mastered
+            # vocabulary exit the everyday session.
+            setback_strength = clamp(
+                1.0 - calculate_current_forget_risk(memory_state, now),
+                0.0, 1.0,
+            )
+            review_delay = calculate_fsrs_interval(
+                next_stability_days, fsrs_target_retention, setback_strength
+            )
+        else:
+            # Learning-phase failure: same-day spaced retry (≥10 minutes,
+            # bedtime-capped, 2h escape for 3+ lapses).
+            review_delay = calculate_failure_delay(score, memory_state.lapse_count, now, memory_state)
     elif previous_repetition_count == 0:
         # Use STS-derived interval for same-day (sub-24-hour) first successes
         # instead of the hardcoded FIRST_SUCCESS_DELAYS lookup table.
@@ -1243,7 +1357,7 @@ def schedule_memory_review(
             next_stability_days, fsrs_target_retention, current_strength
         )
 
-    review_delay = adjust_delay_for_learning_item(review_delay, learning_item, memory_state)
+    review_delay = adjust_delay_for_learning_item(review_delay, learning_item, memory_state, is_failure=not is_correct)
     memory_state.interval_days = calculate_interval_days(review_delay)
     if is_correct:
         next_retrievability_at_due = calculate_fsrs_retrievability(review_delay.total_seconds() / 86400, next_stability_days)
