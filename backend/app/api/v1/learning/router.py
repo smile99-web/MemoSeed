@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
@@ -837,6 +837,25 @@ def list_due_review_items(
     # (below) are still served when the budget is exhausted — they are the
     # in-flight correction machinery, not new due work.
     due_rows = due_rows[:daily_budget_remaining] if daily_budget_remaining > 0 else []
+    # P9: new-word gate. First-time items (repetition_count == 0) are only
+    # admitted when the child is currently succeeding (7-day accuracy >= 70%)
+    # or the queue is nearly empty. Feeding new words into a struggling,
+    # backlogged queue just manufactures tomorrow's failures.
+    NEW_WORD_GATE_BACKLOG_THRESHOLD = 30
+    NEW_WORD_GATE_MIN_ACCURACY = 0.70
+    if len(due_rows) >= NEW_WORD_GATE_BACKLOG_THRESHOLD:
+        total_7d, correct_7d = db.execute(
+            select(
+                func.count(ReviewLog.id),
+                func.coalesce(func.sum(case((ReviewLog.is_correct, 1), else_=0)), 0),
+            ).where(
+                ReviewLog.user_id == current_user.id,
+                ReviewLog.reviewed_at >= now - timedelta(days=7),
+            )
+        ).one()
+        week_accuracy = (correct_7d / total_7d) if total_7d else 1.0
+        if week_accuracy < NEW_WORD_GATE_MIN_ACCURACY:
+            due_rows = [(item, ms) for item, ms in due_rows if (ms.repetition_count or 0) > 0]
     for item, _memory_state in due_rows:
         item_by_id.setdefault(item.id, item)
 
@@ -1037,31 +1056,31 @@ def list_due_review_items(
         word_intel: dict[str, dict[str, int]] = {}
 
         def modes_for_word(word: str) -> list[str]:
-            """Return the optimal question mode sequence for a given word.
+            """P3 task ladder: recognition -> production, rung chosen by mastery.
 
-            Flow (user-confirmed, simplified):
-              1. listen_choose_chinese — recognition
-              2. listen_spell — hear English, spell it (real test)
-              3. If wrong → frontend shows hint + 3-retry loop
+            Rung map (all are existing, frontend-supported task types):
+              T1/T2 recognition : listen_choose_chinese, english_to_chinese
+              T3 scaffolded     : missing_letter, hidden_recall
+              T4/T5 production  : chinese_to_english, listen_spell
+            P1: intervention words (chronic failures) get assisted forms ONLY.
+            Re-failing the same spelling test for the 100th time teaches
+            nothing — the breakthrough path rebuilds the sound<->letter
+            mapping with recognition and scaffolded spelling first.
             """
             intel = word_intel.get(word, {})
+            status_value = intel.get("status", "")
             strength = intel.get("strength", 0)
 
-            # Low-strength word → only 1 quick spelling verification
-            if strength >= 0.90 and intel.get("consecutive_errors", 0) <= 0:
+            if intel.get("intervention"):
+                return ["listen_choose_chinese", "missing_letter", "hidden_recall"]
+            # T4-T5: near/mastery — straight to production, no scaffold.
+            if status_value in ("mastered", "near_mastered") or strength >= 0.90:
                 return ["chinese_to_english"]
-
-            # Standard: recognition → audio spelling test.
-            # Long words get extra spelling rounds — the child spells
-            # them multiple times per session to build muscle memory.
-            # 10+ letters: 4 modes (see the word, spell by ear, spell
-            # by sight, then see again)
-            if len(word) >= 10:
-                return ["listen_choose_chinese", "hidden_recall", "listen_spell", "chinese_to_english"]
-            # 7-9 letters: 3 modes (spell twice)
-            if len(word) >= 7:
-                return ["listen_choose_chinese", "listen_spell", "chinese_to_english"]
-            return ["listen_choose_chinese", "listen_spell"]
+            # T3-T4: consolidating — recognition warm-up, then production.
+            if status_value == "consolidating" or strength >= 0.6:
+                return ["listen_choose_chinese", "chinese_to_english"]
+            # T1-T3: teaching / difficult / unknown — recognition first.
+            return ["listen_choose_chinese", "english_to_chinese", "missing_letter"]
 
         # P0-1: Warm-up — sort by strength (highest first = easiest words first)
         def _item_strength(item: LearningItemRead) -> float:
@@ -1099,6 +1118,14 @@ def list_due_review_items(
                 intel["unknown_errors"] = sum(error_count_value(v) for k, v in error_counts.items() if k == "unknown")
                 intel["first_letter_errors"] = sum(error_count_value(v) for k, v in error_counts.items() if k == "first-letter")
                 intel["strength"] = max(intel.get("strength", 0), ws.memory_strength or 0)
+                intel["status"] = ws.status or ""
+                # P1: chronic-failure detection — lapse-heavy words that are
+                # still weak, or words the status engine already flags as
+                # difficult, enter breakthrough mode (assisted forms only).
+                intel["intervention"] = bool(
+                    (intel.get("lapse_count", 0) >= 8 and intel["strength"] < 0.5)
+                    or ws.status == "difficult"
+                )
 
         # P1-1: Phonics grouping — bring in pattern-siblings
         seen_patterns: set[str] = set()
@@ -1209,8 +1236,23 @@ def list_due_review_items(
         # appears in the word review section is excluded from the
         # sentence section so the child doesn't see 'your' in 20
         # different sentences during word practice.
-        sentences_for_session = [s for s in sentence_review_items[:3]
-                                if tokenize_words(s.english_text) and tokenize_words(s.english_text)[0].strip().lower() not in seen_main_words]
+        # P4: sentence typing is the child's weakest mode (31% accuracy) —
+        # small doses only, and never sentences containing an intervention
+        # word: re-typing a chronic failure embedded in a sentence compounds
+        # the frustration. Those words get recognition work in the word-only
+        # section instead.
+        intervention_words = {w for w, intel in word_intel.items() if intel.get("intervention")}
+        sentence_candidates: list[LearningItemRead] = []
+        for s in sentence_review_items:
+            s_words = [w.strip().lower() for w in tokenize_words(s.english_text)]
+            if not s_words or s_words[0] in seen_main_words:
+                continue
+            if intervention_words and any(w in intervention_words for w in s_words):
+                continue
+            sentence_candidates.append(s)
+            if len(sentence_candidates) >= 4:
+                break
+        sentences_for_session = sentence_candidates[:2]
 
         # Build the final queue: multi-mode focus items first, then
         # any remaining items from the due queue. Previously this
@@ -1225,8 +1267,10 @@ def list_due_review_items(
         for item in prefix_items:
             for w in tokenize_words(item.english_text if hasattr(item, 'english_text') else item.english_text):
                 prefix_word_set.add(w.strip().lower())
-        tail_items = [s for s in sentence_review_items[3:]
-                      if tokenize_words(s.english_text) and tokenize_words(s.english_text)[0].strip().lower() not in prefix_word_set]
+        prefix_ids = {s.id for s in prefix_items}
+        tail_items = [s for s in sentence_review_items
+                      if s.id not in prefix_ids
+                      and tokenize_words(s.english_text) and tokenize_words(s.english_text)[0].strip().lower() not in prefix_word_set]
         review_items = task_review_items + prefix_items + tail_items
         # Clamp to capped_limit
         return review_items[:capped_limit] if len(review_items) > capped_limit else review_items
