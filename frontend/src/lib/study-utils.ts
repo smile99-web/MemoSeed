@@ -433,11 +433,14 @@ export function getTtsSpeechRate(settings: { ttsSpeedPreference?: number }): num
 }
 
 export function getAdaptivePreviewDuration(word: string): number {
+  // P17: preview budgets slimmed (was 5/8/10/15s by length — the whole-word
+  // stare is the least efficient part of the encoding chain). Still scaled by
+  // word length, capped at 6s.
   const len = normalizeEnglishKey(word).length;
-  if (len <= 3) return 5000;
-  if (len <= 5) return 8000;
-  if (len <= 7) return 10000;
-  return 15000;
+  if (len <= 3) return 3000;
+  if (len <= 5) return 4000;
+  if (len <= 7) return 5000;
+  return 6000;
 }
 
 

@@ -238,9 +238,10 @@ class TestDeriveWordStatusRecencyGate:
         assert status != "near_mastered"
 
     def test_borderline_recency_blocks_mastered_but_allows_demotion_path(self):
-        # 0.72 >= DEMOTION (0.60) but < MASTERED_MIN (0.75): not mastered,
-        # not force-demoted either — falls through to the streak/type checks.
-        status = derive_word_status(_mastered_namespace(), recent_accuracy=0.72)
+        # 0.68 >= DEMOTION (0.60) but < MASTERED_MIN (0.70 after P21): not
+        # mastered, not force-demoted either — falls through to the
+        # streak/type checks (lands on near_mastered for this fixture).
+        status = derive_word_status(_mastered_namespace(), recent_accuracy=0.68)
         assert status != "mastered"
 
     def test_near_mastered_recency_threshold(self):
@@ -252,6 +253,8 @@ class TestDeriveWordStatusRecencyGate:
 
 
 class _ScalarsAllMockDB(_MockDB):
+    """scalars(stmt).all() mock — used by smooth_overdue_backlog tests."""
+
     def __init__(self, rows):
         super().__init__([])
         self._rows = rows
@@ -260,18 +263,31 @@ class _ScalarsAllMockDB(_MockDB):
         return SimpleNamespace(all=lambda: list(self._rows))
 
 
+class _ExecuteRowsMockDB(_MockDB):
+    """execute(stmt).all() mock — P16 switched the recency query from
+    scalars() to execute() returning (is_correct, reviewed_at) rows."""
+
+    def __init__(self, rows):
+        super().__init__([])
+        self._rows = rows
+
+    def execute(self, _stmt):
+        return SimpleNamespace(all=lambda: list(self._rows))
+
+
 class TestGetRecentWordAccuracy:
     def test_ratio_over_window(self):
-        db = _ScalarsAllMockDB([True, False, True, True])
+        now = datetime.now(UTC)
+        db = _ExecuteRowsMockDB([(True, now), (False, now), (True, now), (True, now)])
         accuracy = get_recent_word_accuracy(db, uuid4(), uuid4())
         assert accuracy == 0.75
 
     def test_no_rows_returns_none(self):
-        db = _ScalarsAllMockDB([])
+        db = _ExecuteRowsMockDB([])
         assert get_recent_word_accuracy(db, uuid4(), uuid4()) is None
 
     def test_no_item_returns_none(self):
-        db = _ScalarsAllMockDB([True])
+        db = _ExecuteRowsMockDB([(True, datetime.now(UTC))])
         assert get_recent_word_accuracy(db, uuid4(), None) is None
 
 

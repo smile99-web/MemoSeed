@@ -41,7 +41,7 @@ from sqlalchemy import select  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.models.word_memory_state import WordMemoryState  # noqa: E402
-from app.services.word_memory import derive_word_status, get_recent_word_accuracy  # noqa: E402
+from app.services.word_memory import derive_word_status, get_recent_word_test_stats  # noqa: E402
 
 
 def recompute_user(db, user_id, dry_run: bool = False) -> Counter:
@@ -56,10 +56,17 @@ def recompute_user(db, user_id, dry_run: bool = False) -> Counter:
     for word_state in word_states:
         # Mirror the live sync logic (word_memory.sync_word_memory_from_review):
         # only spend the recency query on words near mastery territory.
+        # P16/P21: stats are REAL-test only (assisted phases excluded) and now
+        # include the spaced-proof signals (distinct correct days, test count)
+        # the P21 graduation gate requires.
         recent_accuracy = None
-        if (word_state.memory_strength or 0) >= 0.6:
-            recent_accuracy = get_recent_word_accuracy(db, user_id, word_state.learning_item_id)
-        new_status = derive_word_status(word_state, recent_accuracy)
+        recent_correct_days = None
+        recent_test_count = None
+        if (word_state.memory_strength or 0) >= 0.5:
+            stats = get_recent_word_test_stats(db, user_id, word_state.learning_item_id)
+            if stats is not None:
+                recent_accuracy, recent_correct_days, recent_test_count = stats
+        new_status = derive_word_status(word_state, recent_accuracy, recent_correct_days, recent_test_count)
         if new_status != word_state.status:
             transitions[f"{word_state.status} -> {new_status}"] += 1
             if not dry_run:

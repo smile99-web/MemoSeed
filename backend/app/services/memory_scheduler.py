@@ -136,6 +136,20 @@ STUCK_WORD_RESCHEDULE_DAYS = 7   # informational; we don't actually reschedule
 # (e.g. 'truth' reviewed 270 times over 24 days).
 MAX_DAILY_REVIEWS_PER_WORD = 3
 
+# P15/P16: review modes that show the answer (or heavy hints) BEFORE the child
+# responds are *assisted* phases, not tests. They can never fail (100%
+# "correct") and used to make up 63% of all review_logs — feeding fake scores
+# to FSRS and polluting every accuracy metric. After P15 they are telemetry
+# only: no review_log, no FSRS mutation, no accuracy contribution.
+# Defined here (not word_memory.py) because word_memory imports this module —
+# the reverse would be circular.
+ASSISTED_REVIEW_MODES = frozenset({
+    "word-preview",
+    "word-hinted",
+    "word-missing_letter",
+    "word-hidden_recall",
+})
+
 # --- P7: Soft failure setback (失败软化) --------------------------------------
 # Previously a single failure crashed post-lapse stability below 1 day (via
 # next_fsrs_forget_stability) and adjust_delay_for_learning_item then clamped
@@ -1358,6 +1372,30 @@ def schedule_memory_review(
         )
 
     review_delay = adjust_delay_for_learning_item(review_delay, learning_item, memory_state, is_failure=not is_correct)
+    if not is_correct:
+        # P18: same-day failure cap. One same-day retry (≥10 min, via
+        # calculate_failure_delay above) is enough — when the child fails the
+        # SAME item a 2nd time within one local day, massed retry has stopped
+        # producing signal and only burns session time (production: one word
+        # was attempted up to 136x in a single day). Push the next attempt to
+        # tomorrow morning instead. Note: assisted modes are always correct
+        # (and post-P15 create no logs at all), so the is_correct filter alone
+        # scopes this to real test failures.
+        local_now = now.astimezone(LOCAL_TIMEZONE)
+        today_start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        prior_failures_today = db.scalar(
+            select(func.count(ReviewLog.id)).where(
+                ReviewLog.user_id == user_id,
+                ReviewLog.learning_item_id == learning_item.id,
+                ReviewLog.is_correct.is_(False),
+                ReviewLog.reviewed_at >= today_start_local,
+            )
+        ) or 0
+        if prior_failures_today >= 1:
+            tomorrow_morning_local = (local_now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
+            overnight_delay = tomorrow_morning_local - local_now
+            if overnight_delay > review_delay:
+                review_delay = overnight_delay
     memory_state.interval_days = calculate_interval_days(review_delay)
     if is_correct:
         next_retrievability_at_due = calculate_fsrs_retrievability(review_delay.total_seconds() / 86400, next_stability_days)

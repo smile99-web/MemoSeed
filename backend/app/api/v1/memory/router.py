@@ -25,7 +25,7 @@ from app.services.ai_review_advisor import generate_review_advice, get_todays_re
 from app.schemas.review import MistakeLogRead, ReviewLogRead
 from app.services.fsrs_fitting import fit_user_fsrs_parameters
 from app.services.learning_replay import record_learning_event
-from app.services.memory_scheduler import schedule_memory_review
+from app.services.memory_scheduler import ASSISTED_REVIEW_MODES, schedule_memory_review
 
 router = APIRouter()
 
@@ -141,6 +141,10 @@ def get_effectiveness_metrics(
     """
     now = datetime.now(UTC)
     user_id = current_user.id
+    # P16: all accuracy metrics count REAL tests only — assisted phases (answer
+    # shown before responding) were 100% "correct" by construction and made
+    # up 63% of logs, so every accuracy number used to be inflated.
+    real_tests_only = ReviewLog.review_mode.notin_(sorted(ASSISTED_REVIEW_MODES))
 
     weekly_rows = db.execute(
         select(
@@ -148,7 +152,7 @@ def get_effectiveness_metrics(
             func.count(ReviewLog.id),
             func.avg(case((ReviewLog.is_correct, 1), else_=0)),
         )
-        .where(ReviewLog.user_id == user_id, ReviewLog.reviewed_at >= now - timedelta(weeks=8))
+        .where(ReviewLog.user_id == user_id, ReviewLog.reviewed_at >= now - timedelta(weeks=8), real_tests_only)
         .group_by("week")
         .order_by("week")
     ).all()
@@ -168,7 +172,7 @@ def get_effectiveness_metrics(
             WordMemoryState.word == func.lower(LearningItem.english_text),
             WordMemoryState.user_id == user_id,
         ))
-        .where(ReviewLog.user_id == user_id, ReviewLog.reviewed_at >= now - timedelta(days=14))
+        .where(ReviewLog.user_id == user_id, ReviewLog.reviewed_at >= now - timedelta(days=14), real_tests_only)
     ).one()
     mastered_time_share = round(share_mastered / share_total, 3) if share_total else 0.0
 
@@ -212,6 +216,7 @@ def get_effectiveness_metrics(
             LearningItem.user_id == user_id,
             LearningItem.item_type == "word",
             ReviewLog.reviewed_at >= now - timedelta(days=14),
+            real_tests_only,
         )
         .group_by(LearningItem.english_text)
         .having(func.count(ReviewLog.id) >= 8)

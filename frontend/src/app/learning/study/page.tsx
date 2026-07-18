@@ -455,7 +455,9 @@ function StudyContent() {
   const [mistakePracticeErrorCount, setMistakePracticeErrorCount] = useState(0);
   const [wordConsecutiveCorrect, setWordConsecutiveCorrect] = useState<number[]>([]);
   const [mistakePracticeConsecutiveCorrect, setMistakePracticeConsecutiveCorrect] = useState(0);
-  const MISTAKE_PRACTICE_REQUIRED_CONSECUTIVE = 3;
+  // P17: 2 consecutive correct (was 3) — one re-proof after a mistake is
+  // enough before the meaning quiz; the third re-type was pure grind.
+  const MISTAKE_PRACTICE_REQUIRED_CONSECUTIVE = 2;
   // Meaning-quiz sub-state: after the child spells the same word correctly
   // 3 times in a row, we show a Chinese-meaning multiple-choice question
   // for that word before advancing to the next one.
@@ -1036,7 +1038,7 @@ function StudyContent() {
       }
       encodingStageTimeoutRef.current = window.setTimeout(function () {
         void advanceEncodingStage("listen", word, chineseText);
-      }, 3000);
+      }, 2500);
       return;
     }
 
@@ -1054,7 +1056,7 @@ function StudyContent() {
       }
       encodingStageTimeoutRef.current = window.setTimeout(function () {
         void advanceEncodingStage("chunk_trace", word, chineseText);
-      }, 6000);
+      }, 4000);
       return;
     }
 
@@ -1127,18 +1129,17 @@ function StudyContent() {
 
     if (!isDictationModeRef.current) {
       await speakInVoiceSequence(sequenceId, chineseText, settings.ttsChineseVoice, "zh-CN", settings);
-      if (!(await waitInVoiceSequence(sequenceId, 800))) return;
+      if (!(await waitInVoiceSequence(sequenceId, 500))) return;
       const speechText = buildFocusedWordSpeechText(word);
       if (speechText) {
-        await speakInVoiceSequence(sequenceId, speechText, settings.ttsEnglishVoice, "en-US", settings, SLOW_ENGLISH_TTS_OPTIONS);
-        if (!(await waitInVoiceSequence(sequenceId, 600))) return;
+        // P17: single slow English play (was played twice — pure dead time).
         await speakInVoiceSequence(sequenceId, speechText, settings.ttsEnglishVoice, "en-US", settings, SLOW_ENGLISH_TTS_OPTIONS);
       }
     }
 
     encodingStageTimeoutRef.current = window.setTimeout(function () {
       void advanceEncodingStage("meaning_intro", word, chineseText);
-    }, 1500);
+    }, 1000);
   }, [advanceEncodingStage, clearEncodingTimeout, clearWordPreview, speakInVoiceSequence, startVoiceSequence, waitInVoiceSequence]);
 
   useEffect(() => {
@@ -1671,16 +1672,18 @@ function StudyContent() {
     // Previously only triggered for non-review-task word items (almost never).
     // Now also triggers for word review items that are single-word and new/weak.
     const isNewWord = Boolean(currentItem && !currentItem.review_task_type && currentItem.item_type === "word" && currentWords[0]);
-    // Only trigger encoding for hidden_recall tasks
-    // where the child needs to memorize the word before spelling it.
-    // listen_spell, chinese_to_english, missing_letter should NOT show the word first.
+    // P17: encoding (8-10s teaching intro) only where it pays off — brand-new
+    // words, and hidden_recall on genuinely hard words (difficulty >= 4).
+    // The old `source?.includes("复习")` branch triggered the full teaching
+    // sequence for nearly every review word, which is how passive teaching
+    // grew to 8-10 minutes per word in the 72h analysis.
     const ENCODING_REVIEW_TYPES = new Set(["hidden_recall"]);
     const isSpellingReview = Boolean(
       currentItem && currentItem.review_task_type && currentItem.item_type === "word"
       && currentWords.length === 1 && currentWords[0]
       && ENCODING_REVIEW_TYPES.has(currentItem.review_task_type)
       && !isChoiceReviewTask
-      && (currentItem.difficulty_level >= 4 || currentItem.source?.includes("复习"))
+      && currentItem.difficulty_level >= 4
     );
     if (isNewWord || isSpellingReview) {
       const encWord = currentWords[0];

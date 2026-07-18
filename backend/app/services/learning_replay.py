@@ -101,6 +101,50 @@ def record_learning_event(
     return event
 
 
+def record_assisted_learning_event(
+    db: Session,
+    user_id: UUID,
+    learning_item: LearningItem | None,
+    review_mode: str,
+    score: int,
+    response_text: str | None = None,
+    duration_ms: int = 0,
+    error_type: str | None = None,
+) -> LearningEvent | None:
+    """P15: record an ASSISTED-phase attempt (answer was shown / heavily
+    hinted) as telemetry only — a LearningEvent + minute stat, with
+    review_log_id=None. Assisted phases must NOT create review_logs, mutate
+    FSRS state, or feed accuracy metrics: they cannot fail, so their 100%
+    "correct" rate used to fake mastery evidence (63% of all review_logs).
+    """
+    now = datetime.now(UTC)
+    local_dt = now.astimezone(LOCAL_TIMEZONE)
+    event = LearningEvent(
+        user_id=user_id,
+        learning_item_id=(learning_item.id if learning_item else None),
+        review_log_id=None,
+        occurred_at=now,
+        event_date=local_dt.date(),
+        event_hour=local_dt.hour,
+        event_minute=local_dt.minute,
+        event_week=local_dt.isocalendar()[1],
+        event_year=local_dt.year,
+        item_type=(learning_item.item_type if learning_item else "word"),
+        review_mode=review_mode,
+        is_correct=True,
+        score=score,
+        english_text=(learning_item.english_text if learning_item else ""),
+        chinese_text=(learning_item.chinese_text if learning_item else None),
+        response_text=response_text,
+        duration_ms=max(0, duration_ms),
+        error_type=error_type,
+    )
+    db.add(event)
+    db.flush()
+    _increment_minute_stat(db, event)
+    return event
+
+
 # Track the last recorded minute per user to fill gaps between events
 _last_event_minute: dict[UUID, tuple[date, int, int]] = {}  # user_id -> (date, hour, minute)
 

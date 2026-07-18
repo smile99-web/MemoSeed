@@ -54,7 +54,10 @@ from app.services.learning_import import SUPPORTED_IMPORT_EXTENSIONS, import_lea
 from app.services.llm_translation import DEFAULT_LLM_TRANSLATION_SETTINGS, LlmTranslationSettings, generate_learning_text, needs_translation, translate_english_to_chinese
 from app.services.memory_dashboard import calculate_word_priority
 from app.services.memory_scheduler import (
+    ASSISTED_REVIEW_MODES,
     DAILY_REVIEW_ITEM_BUDGET,
+    LOCAL_TIMEZONE,
+    MAX_DAILY_REVIEWS_PER_WORD,
     calculate_current_forget_risk,
     calculate_review_priority,
     exceeded_daily_review_filter_clause,
@@ -74,6 +77,7 @@ from app.services.word_memory import (
     build_task_prompt,
     choose_task_sequence,
     complete_word_review_task,
+    get_or_create_word_memory_state,
     schedule_micro_review_tasks_for_mistake,
     supersede_stale_pending_tasks_for_reviewed_words,
     sync_word_memory_from_review,
@@ -855,27 +859,92 @@ def list_due_review_items(
     # (below) are still served when the budget is exhausted — they are the
     # in-flight correction machinery, not new due work.
     due_rows = due_rows[:daily_budget_remaining] if daily_budget_remaining > 0 else []
-    # P9: new-word gate. First-time items (repetition_count == 0) are only
-    # admitted when the child is currently succeeding (7-day accuracy >= 70%)
-    # or the queue is nearly empty. Feeding new words into a struggling,
-    # backlogged queue just manufactures tomorrow's failures.
-    NEW_WORD_GATE_BACKLOG_THRESHOLD = 30
+    # P19: new-word gate — ALWAYS on. The old version only engaged when the
+    # backlog was >= 30 items, so a drained queue let 81 new words flood in
+    # over 14 days (each then needing 8-10 min of teaching). New words enter
+    # only when the child is succeeding on REAL tests (7-day accuracy >= 70%,
+    # assisted 100%-correct phases excluded) AND within a hard budget: at
+    # most 3 new items/day and 10/week. Feeding new words into a struggling
+    # child just manufactures tomorrow's failures.
     NEW_WORD_GATE_MIN_ACCURACY = 0.70
-    if len(due_rows) >= NEW_WORD_GATE_BACKLOG_THRESHOLD:
-        total_7d, correct_7d = db.execute(
-            select(
-                func.count(ReviewLog.id),
-                func.coalesce(func.sum(case((ReviewLog.is_correct, 1), else_=0)), 0),
-            ).where(
-                ReviewLog.user_id == current_user.id,
-                ReviewLog.reviewed_at >= now - timedelta(days=7),
-            )
-        ).one()
-        week_accuracy = (correct_7d / total_7d) if total_7d else 1.0
-        if week_accuracy < NEW_WORD_GATE_MIN_ACCURACY:
-            due_rows = [(item, ms) for item, ms in due_rows if (ms.repetition_count or 0) > 0]
+    NEW_WORD_DAILY_CAP = 3
+    NEW_WORD_WEEKLY_CAP = 10
+    total_7d, correct_7d = db.execute(
+        select(
+            func.count(ReviewLog.id),
+            func.coalesce(func.sum(case((ReviewLog.is_correct, 1), else_=0)), 0),
+        ).where(
+            ReviewLog.user_id == current_user.id,
+            ReviewLog.reviewed_at >= now - timedelta(days=7),
+            ReviewLog.review_mode.notin_(sorted(ASSISTED_REVIEW_MODES)),
+        )
+    ).one()
+    week_accuracy = (correct_7d / total_7d) if total_7d else 1.0
+    # "New today" = items whose FIRST-EVER review happened today (same for
+    # the week, Monday-start local). They consume the new-word budget.
+    local_today = now.astimezone(LOCAL_TIMEZONE).date()
+    week_start = datetime.combine(
+        local_today - timedelta(days=local_today.weekday()), datetime.min.time(), tzinfo=LOCAL_TIMEZONE
+    ).astimezone(UTC)
+    new_today = db.scalar(
+        select(func.count()).select_from(
+            select(ReviewLog.learning_item_id)
+            .where(ReviewLog.user_id == current_user.id)
+            .group_by(ReviewLog.learning_item_id)
+            .having(func.min(ReviewLog.reviewed_at) >= today_start)
+            .subquery()
+        )
+    ) or 0
+    new_this_week = db.scalar(
+        select(func.count()).select_from(
+            select(ReviewLog.learning_item_id)
+            .where(ReviewLog.user_id == current_user.id)
+            .group_by(ReviewLog.learning_item_id)
+            .having(func.min(ReviewLog.reviewed_at) >= week_start)
+            .subquery()
+        )
+    ) or 0
+    new_word_budget = min(NEW_WORD_DAILY_CAP - new_today, NEW_WORD_WEEKLY_CAP - new_this_week)
+    if week_accuracy < NEW_WORD_GATE_MIN_ACCURACY:
+        new_word_budget = 0
+    if new_word_budget <= 0:
+        due_rows = [(item, ms) for item, ms in due_rows if (ms.repetition_count or 0) > 0]
+    else:
+        admitted_new = 0
+        gated_rows: list[tuple[LearningItem, MemoryState]] = []
+        for item, ms in due_rows:
+            if (ms.repetition_count or 0) > 0 or admitted_new < new_word_budget:
+                if (ms.repetition_count or 0) == 0:
+                    admitted_new += 1
+                gated_rows.append((item, ms))
+        due_rows = gated_rows
     for item, _memory_state in due_rows:
         item_by_id.setdefault(item.id, item)
+
+    # P18: words that already hit today's attempt cap (>= MAX_DAILY_REVIEWS_PER_WORD
+    # scored attempts on their word-level item) are excluded EVERYWHERE — the
+    # due queue filter above only covers due_rows; micro-review tasks and
+    # focus items must not sneak the same word back in.
+    over_cap_words: set[str] = {
+        w
+        for (w,) in db.execute(
+            select(LearningItem.english_text).where(
+                LearningItem.user_id == current_user.id,
+                LearningItem.item_type == "word",
+                LearningItem.id.in_(
+                    select(ReviewLog.learning_item_id)
+                    .where(
+                        ReviewLog.user_id == current_user.id,
+                        ReviewLog.reviewed_at >= today_start,
+                    )
+                    .group_by(ReviewLog.learning_item_id)
+                    .having(func.count(ReviewLog.id) >= MAX_DAILY_REVIEWS_PER_WORD)
+                ),
+            )
+        ).all()
+        if w
+    }
+    over_cap_words = {normalize_word(w) for w in over_cap_words}
 
     # Disabled: ensure_due_word_review_tasks was generating 300+ micro-review
     # tasks per session, causing the same handful of words to be repeated
@@ -935,6 +1004,8 @@ def list_due_review_items(
     # P1-5: Filter out removed task types (recall_word, cloze_sentence).
     REMOVED_TASK_TYPES = {"recall_word", "cloze_sentence"}
     task_rows = [(t, s) for t, s in task_rows if t.task_type not in REMOVED_TASK_TYPES]
+    # P18: skip tasks for words that already hit today's attempt cap.
+    task_rows = [(t, s) for t, s in task_rows if t.word.strip().lower() not in over_cap_words]
     covered_task_words = {task.word for task, _source_item in task_rows}
     # P0-2: Per-word-per-session cap. Without this, a single word with 5+ pending
     # micro-review tasks (one per mode) would monopolize the session — the child
@@ -1042,6 +1113,20 @@ def list_due_review_items(
         sentence_review_items.append(item_read)
     # Sort by priority: highest-risk cross-course items first
     sentence_review_items.sort(key=lambda it: -item_priority.get(it.id, 0.0))
+
+    # P20: whole-sentence typing is the most expensive mode (~80s per attempt
+    # at 35% accuracy — the single biggest time sink in the 72h analysis).
+    # Cap it at 3 sentences/day; beyond that the session is word work only.
+    SENTENCE_DAILY_CAP = 3
+    sentence_attempts_today = db.scalar(
+        select(func.count(ReviewLog.id)).where(
+            ReviewLog.user_id == current_user.id,
+            ReviewLog.reviewed_at >= today_start,
+            ReviewLog.review_mode.like("sentence-%"),
+        )
+    ) or 0
+    if sentence_attempts_today >= SENTENCE_DAILY_CAP:
+        sentence_review_items = [it for it in sentence_review_items if it.item_type != "sentence"]
 
     if sentence_review_items:
         # Multi-mode review: for each due word, generate 3 question types
@@ -1216,6 +1301,9 @@ def list_due_review_items(
                 continue
             main_word = words[0].strip().lower()
             if main_word in seen_main_words:
+                continue
+            # P18: don't re-serve a word that already hit today's attempt cap.
+            if main_word in over_cap_words:
                 continue
             seen_main_words.add(main_word)
             # Use the word-level item if available; fall back to the
@@ -1963,6 +2051,102 @@ def create_word_review(
     word_item = get_or_create_word_memory_item(db, current_user.id, payload.word, learning_item)
     review_mode = payload.review_mode.strip()[:32]
     error_type = normalize_word_error_type(payload.error_type) if payload.error_type else None
+
+    # P15: assisted phases (answer shown / heavy hints BEFORE responding) can
+    # never fail, so they are telemetry-only — no review_log, no FSRS
+    # mutation, no mistake_log, no accuracy contribution. They used to be 63%
+    # of all review_logs with a fake 100% correct rate, which both inflated
+    # FSRS stability and poisoned every accuracy metric. The teaching value
+    # is preserved: the task completes, points are awarded, and the event is
+    # recorded for the replay timeline.
+    if review_mode in ASSISTED_REVIEW_MODES:
+        now_utc = datetime.now(UTC)
+        word_state = get_or_create_word_memory_state(db, current_user.id, word_item.english_text, word_item.id)
+        word_state.last_reviewed_at = now_utc
+        if review_mode == "word-preview":
+            word_state.hidden_recall_correct_count += 1
+            word_state.last_answer_seen_at = now_utc
+        db.add(word_state)
+        complete_word_review_task(db, current_user.id, payload.review_task_id, True)
+        try:
+            from app.services.points_service import POINTS_CORRECT_HINTED, POINTS_CORRECT_PREVIEW, award_points
+            if review_mode == "word-hinted":
+                award_points(db, current_user.id, POINTS_CORRECT_HINTED, "word_hinted", f"提示后正确拼写 +{POINTS_CORRECT_HINTED}", word_item.id)
+            elif review_mode == "word-preview":
+                award_points(db, current_user.id, POINTS_CORRECT_PREVIEW, "word_preview", f"预览后正确拼写 +{POINTS_CORRECT_PREVIEW}", word_item.id)
+            else:
+                award_points(db, current_user.id, POINTS_CORRECT_HINTED, "word_assisted", f"辅助练习 +{POINTS_CORRECT_HINTED}", word_item.id)
+        except Exception:
+            pass  # points failure should never block learning
+        try:
+            from app.services.learning_replay import record_assisted_learning_event
+            encoding_ms = int(payload.encoding_duration_ms or 0)
+            total_ms = int(payload.duration_seconds or 0) * 1000
+            record_assisted_learning_event(
+                db,
+                current_user.id,
+                word_item,
+                review_mode,
+                payload.score,
+                response_text=(payload.response_text or "").strip() or None,
+                duration_ms=min(encoding_ms or total_ms or 20_000, 5 * 60 * 1000),
+                error_type=error_type,
+            )
+        except Exception as exc:
+            logger.warning("Failed to record assisted learning event: %s", exc)
+        db.commit()
+        return WordReviewResponse(learning_item_id=word_item.id, word=word_item.english_text)
+
+    # P18: in-flight daily attempt cap. The due-queue already hides items
+    # with >= MAX_DAILY_REVIEWS_PER_WORD reviews today, but task/focus items
+    # can still submit further attempts. Beyond the cap, log the attempt for
+    # telemetry WITHOUT mutating FSRS state or spawning correction tasks —
+    # extra same-day repetitions produce no learning signal (production: one
+    # word was tested up to 136x in a single day).
+    today_start = datetime.now(LOCAL_TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0)
+    attempts_today = db.scalar(
+        select(func.count(ReviewLog.id)).where(
+            ReviewLog.user_id == current_user.id,
+            ReviewLog.learning_item_id == word_item.id,
+            ReviewLog.reviewed_at >= today_start,
+        )
+    ) or 0
+    if attempts_today >= MAX_DAILY_REVIEWS_PER_WORD:
+        log_only_review_log = ReviewLog(
+            user_id=current_user.id,
+            learning_item_id=word_item.id,
+            review_mode=review_mode,
+            error_type=error_type,
+            score=payload.score,
+            is_correct=payload.score >= 3,
+            response_text=(payload.response_text or "").strip(),
+            duration_seconds=payload.duration_seconds,
+            encoding_stage=payload.encoding_stage,
+            encoding_duration_ms=payload.encoding_duration_ms,
+        )
+        db.add(log_only_review_log)
+        db.flush()
+        # reviewed_at is a server_default — refresh so the replay event below
+        # can read it (record_learning_event skips logs with reviewed_at=None).
+        db.refresh(log_only_review_log)
+        complete_word_review_task(db, current_user.id, payload.review_task_id, log_only_review_log.is_correct)
+        try:
+            from app.services.points_service import POINTS_CORRECT_NO_HINT, POINTS_WRONG, award_points
+            if log_only_review_log.is_correct:
+                award_points(db, current_user.id, POINTS_CORRECT_NO_HINT, "word_correct", f"正确拼写 +{POINTS_CORRECT_NO_HINT}", word_item.id)
+            else:
+                award_points(db, current_user.id, POINTS_WRONG, "word_wrong", f"拼写错误 {POINTS_WRONG}", word_item.id)
+        except Exception:
+            pass  # points failure should never block learning
+        try:
+            from app.services.learning_replay import record_learning_event
+            capped_ms = min(int(payload.duration_seconds or 0) * 1000, 5 * 60 * 1000)
+            record_learning_event(db, current_user.id, log_only_review_log, word_item, duration_ms=capped_ms or 20_000)
+        except Exception as exc:
+            logger.warning("Failed to record learning replay event for capped word review: %s", exc)
+        db.commit()
+        return WordReviewResponse(learning_item_id=word_item.id, word=word_item.english_text)
+
     result = schedule_memory_review(
         db=db,
         user_id=current_user.id,

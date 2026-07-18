@@ -13,6 +13,7 @@ from app.models.word_memory_state import WordMemoryState
 from app.models.word_review_task import WordReviewTask
 from app.services.memory_dashboard import calculate_word_priority
 from app.services.memory_scheduler import (
+    ASSISTED_REVIEW_MODES,
     FSRS_DECAY,
     FSRS_FACTOR,
     MIN_STABILITY_DAYS,
@@ -140,19 +141,82 @@ def sync_word_memory_from_review(
     # so chronic failures with a lucky history (e.g. 'early': 152 lapses,
     # 33% recent accuracy) used to display as "mastered". Computed lazily —
     # only when the word is anywhere near mastery territory.
+    # P16/P21: stats now come from REAL tests only (assisted phases excluded)
+    # and include the spaced-proof signals (distinct correct days, test count)
+    # that P21's graduation gate requires.
     recent_accuracy: float | None = None
-    if (word_state.memory_strength or 0) >= 0.6:
-        recent_accuracy = get_recent_word_accuracy(db, user_id, memory_state.learning_item_id)
-    word_state.status = derive_word_status(word_state, recent_accuracy)
+    recent_correct_days: int | None = None
+    recent_test_count: int | None = None
+    if (word_state.memory_strength or 0) >= 0.5:
+        stats = get_recent_word_test_stats(db, user_id, memory_state.learning_item_id)
+        if stats is not None:
+            recent_accuracy, recent_correct_days, recent_test_count = stats
+    word_state.status = derive_word_status(word_state, recent_accuracy, recent_correct_days, recent_test_count)
     db.add(word_state)
     return word_state
 
 
-# P8: mastery recency gates (window = last N word-mode reviews for the item)
+# P15/P16: ASSISTED_REVIEW_MODES (imported from memory_scheduler above) lists
+# the review modes that show the answer (or heavy hints) BEFORE the child
+# responds. They are *assisted* phases, not tests: they can never fail (100%
+# "correct") and used to make up 63% of all review_logs — feeding fake scores
+# to FSRS and polluting every accuracy metric. After P15 they are telemetry
+# only: no review_log, no FSRS mutation, no accuracy contribution.
+
+# P8: mastery recency gates (window = last N REAL-test reviews for the item)
 RECENT_ACCURACY_WINDOW = 10
-MASTERED_MIN_RECENT_ACCURACY = 0.75
-NEAR_MASTERED_MIN_RECENT_ACCURACY = 0.65
+# P21: graduation now requires PROOF, not just cumulative counters. Mastered =
+# enough real tests, decent accuracy, and correct on at least 2 distinct local
+# days (spaced proof — a same-day cram session no longer graduates a word).
+MASTERED_MIN_TEST_COUNT = 5
+MASTERED_MIN_RECENT_ACCURACY = 0.70
+MASTERED_MIN_CORRECT_DAYS = 2
+NEAR_MASTERED_MIN_TEST_COUNT = 3
+NEAR_MASTERED_MIN_RECENT_ACCURACY = 0.60
 DEMOTION_RECENT_ACCURACY = 0.60
+
+
+def _real_word_test_clause():
+    return (
+        ReviewLog.review_mode.like("word-%"),
+        ReviewLog.review_mode.notin_(sorted(ASSISTED_REVIEW_MODES)),
+    )
+
+
+def get_recent_word_test_stats(
+    db: Session,
+    user_id: UUID,
+    learning_item_id: UUID | None,
+    limit: int = RECENT_ACCURACY_WINDOW,
+) -> tuple[float, int, int] | None:
+    """P16: stats over the item's last `limit` REAL word tests (assisted modes
+    excluded): (accuracy, correct_days, test_count).
+
+    correct_days = number of DISTINCT local dates among the correct tests —
+    the P21 "spaced proof" signal. Returns None when there are no real tests
+    yet (callers fall back to cumulative-only behavior).
+    """
+    if learning_item_id is None:
+        return None
+    rows = db.execute(
+        select(ReviewLog.is_correct, ReviewLog.reviewed_at)
+        .where(
+            ReviewLog.user_id == user_id,
+            ReviewLog.learning_item_id == learning_item_id,
+            *_real_word_test_clause(),
+        )
+        .order_by(ReviewLog.reviewed_at.desc())
+        .limit(limit)
+    ).all()
+    if not rows:
+        return None
+    correct_dates = {
+        reviewed_at.astimezone(LOCAL_TIMEZONE).date()
+        for is_correct, reviewed_at in rows
+        if is_correct
+    }
+    accuracy = sum(1 for is_correct, _ in rows if is_correct) / len(rows)
+    return accuracy, len(correct_dates), len(rows)
 
 
 def get_recent_word_accuracy(
@@ -161,26 +225,13 @@ def get_recent_word_accuracy(
     learning_item_id: UUID | None,
     limit: int = RECENT_ACCURACY_WINDOW,
 ) -> float | None:
-    """Return the is_correct ratio over the item's last `limit` word-mode reviews.
+    """Return the is_correct ratio over the item's last `limit` REAL word tests.
 
     None when there is no data (new word) — callers treat that as "no recency
     evidence" and fall back to cumulative-only behavior.
     """
-    if learning_item_id is None:
-        return None
-    rows = db.scalars(
-        select(ReviewLog.is_correct)
-        .where(
-            ReviewLog.user_id == user_id,
-            ReviewLog.learning_item_id == learning_item_id,
-            ReviewLog.review_mode.like("word-%"),
-        )
-        .order_by(ReviewLog.reviewed_at.desc())
-        .limit(limit)
-    ).all()
-    if not rows:
-        return None
-    return sum(1 for row in rows if row) / len(rows)
+    stats = get_recent_word_test_stats(db, user_id, learning_item_id, limit)
+    return stats[0] if stats is not None else None
 
 
 def calculate_word_memory_priority(word_state: WordMemoryState, now: datetime) -> float:
@@ -199,7 +250,12 @@ def calculate_word_memory_priority(word_state: WordMemoryState, now: datetime) -
     return calculate_word_priority(stats, word_state.memory_strength, word_state.forget_risk, word_state.next_micro_review_at, now)
 
 
-def derive_word_status(word_state: WordMemoryState, recent_accuracy: float | None = None) -> str:
+def derive_word_status(
+    word_state: WordMemoryState,
+    recent_accuracy: float | None = None,
+    recent_correct_days: int | None = None,
+    recent_test_count: int | None = None,
+) -> str:
     # Mastered: cumulative recall evidence + spaced practice + (mostly) clean
     # recent error streak.
     #
@@ -211,38 +267,55 @@ def derive_word_status(word_state: WordMemoryState, recent_accuracy: float | Non
     #
     # Minimum fix: collapse the two buggy reset-based conditions into the
     # single non-reset equivalent `consecutive_error_count <= 1` (tolerate
-    # one natural slip). Cumulative thresholds (memory_strength,
-    # recall_correct_count, no_hint_correct_date_count) are unchanged.
-    # 0.75 matches the dashboard's summarize_word threshold. Previously
-    # 0.82 was too strict — 63 words with avg_strength 0.78, avg_rc 21.7,
-    # and avg_nd 7.8 met all conditions EXCEPT the strength check and
-    # were stuck in "near_mastered" despite being clearly mastered.
+    # one natural slip).
     #
-    # P8 recency gate: cumulative counters never decrease, so a word like
-    # 'early' (152 lapses but 33% accuracy over its last 10 reviews) still
-    # met every cumulative gate and showed as "mastered". recent_accuracy is
-    # the is_correct ratio over the last RECENT_ACCURACY_WINDOW word-mode
-    # reviews; None = no data → cumulative-only behavior (backwards
-    # compatible with existing tests/callers).
+    # P21: when real-test stats are available (recent_test_count is not None),
+    # graduation requires PROOF instead of cumulative counters:
+    #   mastered      = ≥5 real tests, ≥70% accuracy, correct on ≥2 distinct
+    #                   days (spaced proof), ≤1 consecutive error, strength≥0.6
+    #   near_mastered = ≥3 real tests, ≥60% accuracy, strength≥0.55
+    # Accuracy here is REAL-test only (P16: assisted 100%-correct phases are
+    # excluded), so these numbers reflect actual retrieval.
+    # When stats are absent (recent_test_count is None — e.g. legacy tests or
+    # a word with no real tests yet) the pre-P21 cumulative path below runs
+    # unchanged.
     recency_blocks_mastery = recent_accuracy is not None and recent_accuracy < DEMOTION_RECENT_ACCURACY
-    if (
-        not recency_blocks_mastery
-        and word_state.memory_strength >= 0.75
-        and word_state.recall_correct_count >= 3
-        and word_state.no_hint_correct_date_count >= 3
-        and word_state.consecutive_error_count <= 1
-        and (recent_accuracy is None or recent_accuracy >= MASTERED_MIN_RECENT_ACCURACY)
-    ):
-        return "mastered"
-    if (
-        not recency_blocks_mastery
-        and word_state.memory_strength >= 0.72
-        and word_state.recall_correct_count >= 2
-        and word_state.no_hint_correct_date_count >= 2
-        and word_state.consecutive_error_count == 0
-        and (recent_accuracy is None or recent_accuracy >= NEAR_MASTERED_MIN_RECENT_ACCURACY)
-    ):
-        return "near_mastered"
+    if recent_test_count is not None:
+        if (
+            not recency_blocks_mastery
+            and recent_test_count >= MASTERED_MIN_TEST_COUNT
+            and (recent_accuracy or 0) >= MASTERED_MIN_RECENT_ACCURACY
+            and (recent_correct_days or 0) >= MASTERED_MIN_CORRECT_DAYS
+            and word_state.consecutive_error_count <= 1
+            and word_state.memory_strength >= 0.6
+        ):
+            return "mastered"
+        if (
+            not recency_blocks_mastery
+            and recent_test_count >= NEAR_MASTERED_MIN_TEST_COUNT
+            and (recent_accuracy or 0) >= NEAR_MASTERED_MIN_RECENT_ACCURACY
+            and word_state.memory_strength >= 0.55
+        ):
+            return "near_mastered"
+    else:
+        if (
+            not recency_blocks_mastery
+            and word_state.memory_strength >= 0.75
+            and word_state.recall_correct_count >= 3
+            and word_state.no_hint_correct_date_count >= 3
+            and word_state.consecutive_error_count <= 1
+            and (recent_accuracy is None or recent_accuracy >= MASTERED_MIN_RECENT_ACCURACY)
+        ):
+            return "mastered"
+        if (
+            not recency_blocks_mastery
+            and word_state.memory_strength >= 0.72
+            and word_state.recall_correct_count >= 2
+            and word_state.no_hint_correct_date_count >= 2
+            and word_state.consecutive_error_count == 0
+            and (recent_accuracy is None or recent_accuracy >= NEAR_MASTERED_MIN_RECENT_ACCURACY)
+        ):
+            return "near_mastered"
     if word_state.consecutive_error_count >= 3 or word_state.priority_score >= 0.78:
         return "difficult"
     if word_state.preview_correct_count > word_state.recall_correct_count or word_state.last_answer_seen_at is not None:

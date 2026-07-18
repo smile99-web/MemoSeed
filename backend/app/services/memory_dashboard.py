@@ -19,7 +19,7 @@ from app.models.word_memory_state import WordMemoryState
 from app.models.word_review_task import WordReviewTask
 from app.schemas.memory import MemoryDashboardResponse, ReviewBucket, StudyTimeSummary, WordMasterySummary
 from app.services.fsrs_fitting import MIN_FSRS_TRAINING_REVIEWS
-from app.services.memory_scheduler import FSRS_WEIGHTS_SETTING_KEY, calculate_current_forget_risk
+from app.services.memory_scheduler import ASSISTED_REVIEW_MODES, FSRS_WEIGHTS_SETTING_KEY, calculate_current_forget_risk
 from app.utils import average, extract_mistake_words, parse_datetime_setting, tokenize_words
 
 
@@ -289,6 +289,17 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
                     stats.error_type_counts[error_type] = stats.error_type_counts.get(error_type, 0) + 2
 
     summaries = [summarize_word(stats, now) for stats in word_stats.values()]
+    # P21: per-word status labels in the weakest/strongest lists must come from
+    # WordMemoryState.status too. summarize_word's internal rule set still uses
+    # the pre-P21 cumulative thresholds and would show stale labels (e.g.
+    # "已掌握" for a word the P21 real-test gate keeps in consolidating) —
+    # the same class of divergence the 877d0bb fix eliminated from the cards.
+    status_by_word = {ws.word: ws.status for ws in word_state_rows if ws.status}
+    for summary in summaries:
+        canonical_status = status_by_word.get(summary.word)
+        if canonical_status and canonical_status != summary.status:
+            summary.status = canonical_status
+            summary.status_label = MASTERY_STATUS_LABELS.get(canonical_status, summary.status_label)
     # Status counts come straight from WordMemoryState.status — the SAME source
     # the effectiveness panel (/memory/effectiveness) and park_mastered_words use.
     # The old summarize_word recomputation used weaker thresholds (consecutive
@@ -305,7 +316,13 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
     current_forget_risks = [calculate_current_forget_risk(state, now) for state in memory_states]
     current_memory_strengths = [round(1 - risk, 2) for risk in current_forget_risks]
 
-    review_base = select(func.count(ReviewLog.id)).where(ReviewLog.user_id == user_id)
+    # P16: accuracy counts REAL tests only — assisted phases (answer shown
+    # before responding) were 100% "correct" by construction and made up 63%
+    # of logs, so the old all-mode accuracy was permanently inflated.
+    review_base = select(func.count(ReviewLog.id)).where(
+        ReviewLog.user_id == user_id,
+        ReviewLog.review_mode.notin_(sorted(ASSISTED_REVIEW_MODES)),
+    )
     mistake_base = select(func.count(MistakeLog.id)).where(MistakeLog.user_id == user_id)
     if course_id is not None:
         course_item_ids = list(db.scalars(select(LearningItem.id).where(LearningItem.user_id == user_id, LearningItem.course_id == course_id)).all())
@@ -1389,11 +1406,12 @@ def build_review_forecast(db: Session, user_id: UUID) -> dict[str, object]:
     avg_daily_seconds = round(total_study_seconds / 7)
     avg_daily_minutes = round(avg_daily_seconds / 60)
 
-    # Count reviews in the same period
+    # Count reviews in the same period (P16: REAL tests only — see above)
     total_recent = db.scalar(
         select(func.count(ReviewLog.id)).where(
             ReviewLog.user_id == user_id,
             ReviewLog.reviewed_at >= week_ago,
+            ReviewLog.review_mode.notin_(sorted(ASSISTED_REVIEW_MODES)),
         )
     ) or 0
     correct_recent = db.scalar(
@@ -1401,6 +1419,7 @@ def build_review_forecast(db: Session, user_id: UUID) -> dict[str, object]:
             ReviewLog.user_id == user_id,
             ReviewLog.reviewed_at >= week_ago,
             ReviewLog.is_correct.is_(True),
+            ReviewLog.review_mode.notin_(sorted(ASSISTED_REVIEW_MODES)),
         )
     ) or 0
     recent_accuracy = round(correct_recent / total_recent, 2) if total_recent else 0.0
