@@ -33,6 +33,8 @@ import {
   ReviewAdvice,
   getTodayPlan,
   getWordHistory,
+  getEffectivenessMetrics,
+  EffectivenessMetrics,
   MemoryDashboard,
   RetentionCurve,
   StudyStreak,
@@ -48,6 +50,106 @@ const statusLabels: Record<WordMasterySummary["status"], string> = {
   near_mastered: "接近掌握",
   mastered: "已掌握",
 };
+
+// P12: parent-facing effectiveness panel — tracks whether the scheduler
+// reform is working: success rate up toward 70-85%, mastered-word time
+// share down under 20%, intervals spreading beyond 1 day.
+function EffectivenessCard({ metrics }: { metrics: EffectivenessMetrics }) {
+  const weeks = metrics.weekly_accuracy;
+  const latest = weeks.length > 0 ? weeks[weeks.length - 1] : null;
+  const previous = weeks.length > 1 ? weeks[weeks.length - 2] : null;
+  const trend = latest && previous ? latest.accuracy - previous.accuracy : 0;
+  const sharePct = Math.round(metrics.mastered_time_share * 100);
+  const shareTargetPct = Math.round(metrics.mastered_time_share_target * 100);
+  const statusOrder: Array<WordMasterySummary["status"]> = ["mastered", "near_mastered", "consolidating", "teaching", "difficult"];
+  const statusColors: Record<string, string> = {
+    mastered: "bg-emerald-500",
+    near_mastered: "bg-emerald-300",
+    consolidating: "bg-sky-300",
+    teaching: "bg-amber-300",
+    difficult: "bg-rose-400",
+  };
+  const totalWords = Object.values(metrics.status_counts).reduce((sum, count) => sum + count, 0);
+
+  return (
+    <Card className="border-sky-200 bg-sky-50/30">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sky-800">学习效果指标</CardTitle>
+        <CardDescription>跟踪改革成效：正确率向 70-85% 甜区靠近，简单词耗时占比降到 {shareTargetPct}% 以下</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="rounded-lg bg-white/70 p-3">
+            <p className="text-xs text-muted-foreground">本周正确率</p>
+            <p className="text-xl font-semibold text-sky-900">
+              {latest ? `${Math.round(latest.accuracy * 100)}%` : "—"}
+              {trend !== 0 && (
+                <span className={`ml-1 text-sm ${trend > 0 ? "text-emerald-600" : "text-rose-500"}`}>
+                  {trend > 0 ? "▲" : "▼"}{Math.abs(Math.round(trend * 100))}%
+                </span>
+              )}
+            </p>
+          </div>
+          <div className="rounded-lg bg-white/70 p-3">
+            <p className="text-xs text-muted-foreground">简单词耗时占比</p>
+            <p className={`text-xl font-semibold ${sharePct <= shareTargetPct ? "text-emerald-700" : "text-amber-600"}`}>
+              {sharePct}%
+              <span className="ml-1 text-xs font-normal text-muted-foreground">目标&lt;{shareTargetPct}%</span>
+            </p>
+          </div>
+          <div className="rounded-lg bg-white/70 p-3">
+            <p className="text-xs text-muted-foreground">待复习 / 过期</p>
+            <p className="text-xl font-semibold text-sky-900">
+              {metrics.queue_health.due_now}
+              <span className="ml-1 text-sm font-normal text-muted-foreground">/ {metrics.queue_health.overdue_1d}</span>
+            </p>
+          </div>
+          <div className="rounded-lg bg-white/70 p-3">
+            <p className="text-xs text-muted-foreground">单词平均间隔</p>
+            <p className="text-xl font-semibold text-sky-900">{metrics.queue_health.avg_word_interval_days} 天</p>
+          </div>
+        </div>
+        {totalWords > 0 && (
+          <div>
+            <p className="mb-1 text-xs font-medium text-muted-foreground">单词掌握分布（共 {totalWords} 词）</p>
+            <div className="flex h-3 w-full overflow-hidden rounded-full bg-slate-100">
+              {statusOrder.map((status) => {
+                const count = metrics.status_counts[status] ?? 0;
+                if (count <= 0) return null;
+                return (
+                  <div
+                    key={status}
+                    className={`${statusColors[status]} h-full`}
+                    style={{ width: `${(count / totalWords) * 100}%` }}
+                    title={`${statusLabels[status]} ${count}`}
+                  />
+                );
+              })}
+            </div>
+            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+              {statusOrder.map((status) => (
+                <span key={status}>{statusLabels[status]} {metrics.status_counts[status] ?? 0}</span>
+              ))}
+            </div>
+          </div>
+        )}
+        {metrics.intervention_words.length > 0 && (
+          <div>
+            <p className="mb-1 text-xs font-medium text-muted-foreground">重点突破词（近 14 天正确率最低，已切换为辅助练习形式）</p>
+            <div className="flex flex-wrap gap-2">
+              {metrics.intervention_words.slice(0, 8).map((entry) => (
+                <span key={entry.word} className="rounded-full bg-rose-100 px-2 py-0.5 text-xs text-rose-700">
+                  {entry.word} {Math.round(entry.accuracy_14d * 100)}%
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 
 const replayDayLabels = ["Mon", "", "Wed", "", "Fri", "", ""]; // Monday-first grid: (getUTCDay() + 6) % 7
 const replayMonthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -465,6 +567,7 @@ export default function DashboardPage() {
   const [errorBreakdown, setErrorBreakdown] = useState<ErrorBreakdown | null>(null);
   const [studyStreak, setStudyStreak] = useState<StudyStreak | null>(null);
   const [learningHeatmap, setLearningHeatmap] = useState<Heatmap | null>(null);
+  const [effectiveness, setEffectiveness] = useState<EffectivenessMetrics | null>(null);
   const [selectedReplayDate, setSelectedReplayDate] = useState<string | null>(null);
   const [selectedReplayDayDetail, setSelectedReplayDayDetail] = useState<DayDetail | null>(null);
   const replayDateRequestRef = useRef<string>("");
@@ -509,18 +612,20 @@ export default function DashboardPage() {
 
         // Phase 2: secondary data (load after page renders, non-blocking)
         void (async () => {
-          const [forecastData, pointsData, progressData, heatmapData, adviceData] = await Promise.all([
+          const [forecastData, pointsData, progressData, heatmapData, adviceData, effectivenessData] = await Promise.all([
             getReviewForecast(accessToken).catch(warn("review-forecast")),
             getPointsSummary(accessToken).catch(warn("points-summary")),
             getTodayProgress(accessToken).catch(warn("today-progress")),
             getHeatmap(accessToken).catch(warn("heatmap")),
             getReviewAdvice(accessToken).catch(warn("review-advice")),
+            getEffectivenessMetrics(accessToken).catch(warn("effectiveness")),
           ]);
           setReviewForecast(forecastData);
           setPointsSummary(pointsData);
           setReviewAdvice(adviceData);
           setTodayProgress(progressData);
           setLearningHeatmap(heatmapData);
+          setEffectiveness(effectivenessData);
         })();
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "读取数据看板失败");
@@ -812,6 +917,8 @@ export default function DashboardPage() {
               dayDetail={selectedReplayDayDetail}
               onSelectDate={handleReplayDateSelect}
             />
+
+            {effectiveness ? <EffectivenessCard metrics={effectiveness} /> : null}
 
             {dailyReport ? (
               <Card className="border-emerald-200 bg-emerald-50/30">

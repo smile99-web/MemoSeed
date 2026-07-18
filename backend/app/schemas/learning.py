@@ -138,6 +138,10 @@ class WordMistakeLogRequest(BaseModel):
     expected_word: str = Field(min_length=1)
     actual_word: str = ""
     error_type: str = Field(default="spelling", max_length=32)
+    # P6a: client-measured elapsed seconds for this attempt. Previously the
+    # endpoint hardcoded duration_seconds=0, making per-failure timing data
+    # meaningless. Optional so older clients keep working.
+    duration_seconds: int = Field(default=0, ge=0)
 
 
 class WordMistakeLogResponse(BaseModel):

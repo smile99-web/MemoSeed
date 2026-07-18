@@ -1256,11 +1256,15 @@ def generate_ai_daily_report(db: Session, user_id: UUID, report_date: date | Non
 
 def check_and_generate_daily_report(db: Session, user_id: UUID) -> bool:
     now_local = datetime.now(LOCAL_TIMEZONE)
-    # Run daily report + AI review advice from 20:00 local time. The trigger
-    # only fires during a study session (study-time heartbeat) — the child
-    # finishes by ~21:00, so the previous 23:30 threshold effectively never
-    # fired and daily reports were never generated.
-    if now_local.hour < 20:
+    # Run daily report + AI review advice from 22:00 local time. The trigger
+    # only fires during a study session (study-time heartbeat). Production
+    # data shows the child's study peaks 19:00-22:00 (21:00 is the busiest
+    # hour), so the previous 20:00 threshold generated the report in the
+    # MIDDLE of the session — both peak hours were missing from "today's"
+    # report. 22:00 covers the peak; the trigger still fires reliably because
+    # the 22:00 hour has study activity most nights. (A 22:30 cutoff was
+    # considered but would never fire on nights ending before 22:30.)
+    if now_local.hour < 22:
         return False
 
     today = now_local.date()

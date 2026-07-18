@@ -3,7 +3,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, case, func, select, update
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -13,6 +13,7 @@ from app.models.course_completion_log import CourseCompletionLog
 from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
 from app.models.mistake_log import MistakeLog
+from app.models.review_log import ReviewLog
 from app.models.study_time_log import StudyTimeLog
 from app.models.user import User
 from app.models.user_points import PointsLog
@@ -118,6 +119,127 @@ def get_review_forecast(
     db: Annotated[Session, Depends(get_db)],
 ) -> ReviewForecastResponse:
     return build_review_forecast(db, current_user.id)
+
+
+@router.get("/effectiveness")
+def get_effectiveness_metrics(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """P12: effectiveness metrics for the parent dashboard.
+
+    Answers "is the reform working?" with five numbers that must trend the
+    right way:
+      1. weekly_accuracy   — session success rate, target 70-85% (was 52%)
+      2. mastered_time_share — % of word reviews spent on mastered words,
+         target < 20% (was 54% before the Phase-1 reform)
+      3. status_counts     — vocabulary status snapshot
+      4. queue_health      — due-now / overdue / avg interval (intervals
+         should spread beyond 1 day as P7 takes effect)
+      5. intervention_words — worst words by 14-day accuracy (the P1
+         breakthrough list) with their trend
+    """
+    now = datetime.now(UTC)
+    user_id = current_user.id
+
+    weekly_rows = db.execute(
+        select(
+            func.date_trunc("week", func.timezone("Asia/Shanghai", ReviewLog.reviewed_at)).label("week"),
+            func.count(ReviewLog.id),
+            func.avg(case((ReviewLog.is_correct, 1), else_=0)),
+        )
+        .where(ReviewLog.user_id == user_id, ReviewLog.reviewed_at >= now - timedelta(weeks=8))
+        .group_by("week")
+        .order_by("week")
+    ).all()
+    weekly_accuracy = [
+        {"week": str(week.date()), "reviews": int(count), "accuracy": round(float(acc or 0), 3)}
+        for week, count, acc in weekly_rows
+    ]
+
+    share_total, share_mastered = db.execute(
+        select(
+            func.count(ReviewLog.id),
+            func.coalesce(func.sum(case((WordMemoryState.status == "mastered", 1), else_=0)), 0),
+        )
+        .select_from(ReviewLog)
+        .join(LearningItem, and_(LearningItem.id == ReviewLog.learning_item_id, LearningItem.item_type == "word"))
+        .outerjoin(WordMemoryState, and_(
+            WordMemoryState.word == func.lower(LearningItem.english_text),
+            WordMemoryState.user_id == user_id,
+        ))
+        .where(ReviewLog.user_id == user_id, ReviewLog.reviewed_at >= now - timedelta(days=14))
+    ).one()
+    mastered_time_share = round(share_mastered / share_total, 3) if share_total else 0.0
+
+    status_counts = {
+        (status_value or "unknown"): int(count)
+        for status_value, count in db.execute(
+            select(WordMemoryState.status, func.count())
+            .where(WordMemoryState.user_id == user_id)
+            .group_by(WordMemoryState.status)
+        ).all()
+    }
+
+    due_now = int(db.scalar(
+        select(func.count(MemoryState.id))
+        .join(LearningItem, LearningItem.id == MemoryState.learning_item_id)
+        .where(LearningItem.user_id == user_id, MemoryState.next_review_at <= now)
+    ) or 0)
+    overdue_1d = int(db.scalar(
+        select(func.count(MemoryState.id))
+        .join(LearningItem, LearningItem.id == MemoryState.learning_item_id)
+        .where(LearningItem.user_id == user_id, MemoryState.next_review_at <= now - timedelta(days=1))
+    ) or 0)
+    avg_interval = float(db.scalar(
+        select(func.avg(MemoryState.interval_days))
+        .join(LearningItem, LearningItem.id == MemoryState.learning_item_id)
+        .where(LearningItem.user_id == user_id, LearningItem.item_type == "word")
+    ) or 0.0)
+
+    word_status_map = {
+        ws.word: (ws.status or "")
+        for ws in db.scalars(select(WordMemoryState).where(WordMemoryState.user_id == user_id)).all()
+    }
+    worst_rows = db.execute(
+        select(
+            LearningItem.english_text,
+            func.count(ReviewLog.id),
+            func.avg(case((ReviewLog.is_correct, 1), else_=0)),
+        )
+        .join(ReviewLog, ReviewLog.learning_item_id == LearningItem.id)
+        .where(
+            LearningItem.user_id == user_id,
+            LearningItem.item_type == "word",
+            ReviewLog.reviewed_at >= now - timedelta(days=14),
+        )
+        .group_by(LearningItem.english_text)
+        .having(func.count(ReviewLog.id) >= 8)
+        .order_by(func.avg(case((ReviewLog.is_correct, 1), else_=0)).asc())
+        .limit(10)
+    ).all()
+    intervention_words = [
+        {
+            "word": word,
+            "attempts_14d": int(attempts),
+            "accuracy_14d": round(float(acc or 0), 3),
+            "status": word_status_map.get(word.strip().lower(), ""),
+        }
+        for word, attempts, acc in worst_rows
+    ]
+
+    return {
+        "weekly_accuracy": weekly_accuracy,
+        "mastered_time_share": mastered_time_share,
+        "mastered_time_share_target": 0.2,
+        "status_counts": status_counts,
+        "queue_health": {
+            "due_now": due_now,
+            "overdue_1d": overdue_1d,
+            "avg_word_interval_days": round(avg_interval, 2),
+        },
+        "intervention_words": intervention_words,
+    }
 
 
 @router.post("/fsrs/fit", response_model=FsrsFitResponse)

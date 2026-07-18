@@ -496,6 +496,22 @@ export async function getPointsSummary(accessToken: string): Promise<PointsSumma
   return (await response.json()) as PointsSummary;
 }
 
+// P12: effectiveness metrics (parent-facing "is the reform working?" panel)
+export interface EffectivenessMetrics {
+  weekly_accuracy: Array<{ week: string; reviews: number; accuracy: number }>;
+  mastered_time_share: number;
+  mastered_time_share_target: number;
+  status_counts: Record<string, number>;
+  queue_health: { due_now: number; overdue_1d: number; avg_word_interval_days: number };
+  intervention_words: Array<{ word: string; attempts_14d: number; accuracy_14d: number; status: string }>;
+}
+
+export async function getEffectivenessMetrics(accessToken: string): Promise<EffectivenessMetrics> {
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/memory/effectiveness`, { cache: "no-store" }, accessToken);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return (await response.json()) as EffectivenessMetrics;
+}
+
 export async function awardPoints(accessToken: string, pointsChange: number, reason: string, detail?: string, learningItemId?: string): Promise<void> {
   await fetchWithAuth(`${getApiBaseUrl()}/memory/points/award`, {
     method: "POST",

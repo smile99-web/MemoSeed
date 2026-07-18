@@ -444,6 +444,7 @@ export async function logWordMistake(
   actualWord: string,
   accessToken: string,
   errorType = "spelling",
+  durationSeconds?: number,
 ): Promise<void> {
   const response = await fetchWithAuth(
     `${getApiBaseUrl()}/learning/word-mistakes`,
@@ -457,6 +458,9 @@ export async function logWordMistake(
         expected_word: expectedWord,
         actual_word: actualWord,
         error_type: errorType,
+        // P6a: real elapsed time for the failed attempt (was hardcoded 0
+        // server-side, making failure-timing data meaningless).
+        duration_seconds: Math.max(0, Math.round(durationSeconds ?? 0)),
       }),
     },
     accessToken,

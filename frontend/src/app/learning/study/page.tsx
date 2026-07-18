@@ -2674,7 +2674,7 @@ function StudyContent() {
       const accessToken = getAccessToken();
       const learningItemId = currentItem ? getSourceLearningItemId(currentItem) : null;
       if (accessToken && learningItemId) {
-        void logWordMistake(learningItemId, expectedWord, actualWord, accessToken, errorType).catch(() => undefined);
+        void logWordMistake(learningItemId, expectedWord, actualWord, accessToken, errorType, Math.round((Date.now() - startedAt) / 1000)).catch(() => undefined);
       }
       if (nextErrorCount === 3 || (errorType === "unknown" && nextErrorCount >= 2)) {
         const itemIdAtError = currentItemIdRef.current;
@@ -2907,7 +2907,7 @@ function StudyContent() {
       const accessToken = getAccessToken();
       const learningItemId = currentItem ? getSourceLearningItemId(currentItem) : null;
       if (accessToken && learningItemId) {
-        void logWordMistake(learningItemId, expectedWord, mistakePracticeAnswer, accessToken, errorType).catch(() => undefined);
+        void logWordMistake(learningItemId, expectedWord, mistakePracticeAnswer, accessToken, errorType, Math.round((Date.now() - startedAt) / 1000)).catch(() => undefined);
       }
       if (nextErrorCount === 3 || (errorType === "unknown" && nextErrorCount >= 2)) {
         await playChineseThenEnglish(currentMistakePracticeTranslation, expectedWord);

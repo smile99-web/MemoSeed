@@ -467,6 +467,22 @@ VALID_WORD_ERROR_TYPES: frozenset[str] = frozenset({
 })
 
 
+def spelling_similarity(expected: str, actual: str) -> float:
+    """Letter-level similarity between the expected word and the child's attempt.
+
+    P13: drives partial credit — a 9-letter word with 8 correct letters is a
+    different signal than a blank guess. Uses difflib ratio on lowercased,
+    stripped inputs; 0.0 when either side is empty.
+    """
+    from difflib import SequenceMatcher
+
+    expected_norm = expected.strip().lower()
+    actual_norm = actual.strip().lower()
+    if not expected_norm or not actual_norm:
+        return 0.0
+    return SequenceMatcher(None, expected_norm, actual_norm).ratio()
+
+
 def normalize_word_error_type(value: str | None) -> str:
     """Normalize and validate a per-word error_type.
 
@@ -1117,6 +1133,9 @@ def list_due_review_items(
                 intel["meaning_errors"] = sum(error_count_value(v) for k, v in error_counts.items() if k == "meaning")
                 intel["unknown_errors"] = sum(error_count_value(v) for k, v in error_counts.items() if k == "unknown")
                 intel["first_letter_errors"] = sum(error_count_value(v) for k, v in error_counts.items() if k == "first-letter")
+                # P13: error-type-driven hints (ending / missing-letter / middle)
+                intel["ending_errors"] = sum(error_count_value(v) for k, v in error_counts.items() if k == "ending")
+                intel["missing_letter_errors"] = sum(error_count_value(v) for k, v in error_counts.items() if k == "missing-letter")
                 intel["strength"] = max(intel.get("strength", 0), ws.memory_strength or 0)
                 intel["status"] = ws.status or ""
                 # P1: chronic-failure detection — lapse-heavy words that are
@@ -1208,8 +1227,16 @@ def list_due_review_items(
             for mode in word_modes:
                 review_prompt = None
                 if mode == "chinese_to_english":
+                    # P13: hint follows the child's dominant error type for
+                    # this word. First-letter hint wins (hardest blocker),
+                    # then ending anchor, then a plain letter count for
+                    # missing/extra-letter strugglers.
                     if first_letter_hint:
                         review_prompt = f"首字母:{first_letter_hint}"
+                    elif intel.get("ending_errors", 0) >= 2 and wlen >= 3:
+                        review_prompt = f"词尾:…{main_word[-2:]}"
+                    elif intel.get("missing_letter_errors", 0) >= 2:
+                        review_prompt = f"字母数:{wlen}"
                 focus_item = LearningItemRead(
                     id=uuid4(),
                     source_item_id=word_item.id,
@@ -1844,14 +1871,19 @@ def create_word_mistake_log(
 
     word_item = get_or_create_word_memory_item(db, current_user.id, payload.expected_word, learning_item)
     error_type = normalize_word_error_type(payload.error_type)
+    # P13: partial credit — near-miss spellings (>= 80% letter similarity)
+    # record score=2 instead of the flat score=1. Scheduling treats both as
+    # failures (rating Again), but the score preserves the difference for
+    # analytics and the effectiveness dashboard.
+    mistake_score = 2 if spelling_similarity(payload.expected_word, payload.actual_word) >= 0.8 else 1
     result = schedule_memory_review(
         db=db,
         user_id=current_user.id,
         learning_item_id=word_item.id,
-        score=1,
+        score=mistake_score,
         review_mode="word-spelling",
         response_text=payload.actual_word.strip(),
-        duration_seconds=0,
+        duration_seconds=max(int(payload.duration_seconds or 0), 0),
         error_type=error_type,
     )
     word_state = sync_word_memory_from_review(db, current_user.id, word_item.english_text, result.memory_state, "word-spelling", False, error_type)
