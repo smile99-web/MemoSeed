@@ -1073,8 +1073,8 @@ export default function DashboardPage() {
             ) : null}
 
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-              <StatCard label="已掌握单词" value={dashboard.mastered_words} hint={`共 ${dashboard.total_words} 个单词，已掌握 ${dashboard.mastered_words} 个`} />
-              <StatCard label="困难/教学中单词" value={dashboard.weak_words} hint={`${dashboard.learning_words} 个正在巩固或接近掌握`} />
+              <StatCard label="已掌握单词" value={dashboard.status_counts?.mastered ?? dashboard.mastered_words} hint={`共 ${dashboard.total_words} 个单词，接近掌握 ${dashboard.status_counts?.near_mastered ?? 0} 个`} />
+              <StatCard label="困难/教学中单词" value={dashboard.status_counts ? dashboard.status_counts.difficult + dashboard.status_counts.teaching : dashboard.weak_words} hint={`${dashboard.status_counts ? dashboard.status_counts.consolidating + dashboard.status_counts.near_mastered : dashboard.learning_words} 个正在巩固或接近掌握`} />
               <StatCard label="复习准确率" value={formatPercent(dashboard.accuracy_rate)} hint={`${dashboard.correct_reviews} / ${dashboard.total_reviews} 次复习正确`} />
               <StatCard label="下次复习" value={formatDateTime(dashboard.next_review_at)} hint={`${dashboard.due_now_count} 项已到期，${dashboard.overdue_count} 项超时`} />
             </div>

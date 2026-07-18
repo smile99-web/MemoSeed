@@ -289,9 +289,18 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
                     stats.error_type_counts[error_type] = stats.error_type_counts.get(error_type, 0) + 2
 
     summaries = [summarize_word(stats, now) for stats in word_stats.values()]
-    mastered_words = len([summary for summary in summaries if summary.status == "mastered"])
-    weak_words = len([summary for summary in summaries if summary.status in {"difficult", "teaching"}])
-    learning_words = max(len(summaries) - mastered_words - weak_words, 0)
+    # Status counts come straight from WordMemoryState.status — the SAME source
+    # the effectiveness panel (/memory/effectiveness) and park_mastered_words use.
+    # The old summarize_word recomputation used weaker thresholds (consecutive
+    # errors <= 1 instead of the P8 recent-accuracy gate), so it counted 97
+    # "mastered" words where the effectiveness card showed 51. One source of truth.
+    status_counts = {"mastered": 0, "near_mastered": 0, "consolidating": 0, "teaching": 0, "difficult": 0}
+    for word_state in word_state_rows:
+        state_status = word_state.status if word_state.status in status_counts else "teaching"
+        status_counts[state_status] += 1
+    mastered_words = status_counts["mastered"]
+    weak_words = status_counts["difficult"] + status_counts["teaching"]
+    learning_words = status_counts["consolidating"] + status_counts["near_mastered"]
 
     current_forget_risks = [calculate_current_forget_risk(state, now) for state in memory_states]
     current_memory_strengths = [round(1 - risk, 2) for risk in current_forget_risks]
@@ -326,6 +335,7 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
         mastered_words=mastered_words,
         learning_words=learning_words,
         weak_words=weak_words,
+        status_counts=status_counts,
         due_now_count=len([s for s in summaries if s.next_review_at is not None and s.next_review_at <= now]),
         overdue_count=len([s for s in summaries if s.next_review_at is not None and s.next_review_at < now - timedelta(hours=1)]),
         average_memory_strength=round(average(current_memory_strengths), 2),

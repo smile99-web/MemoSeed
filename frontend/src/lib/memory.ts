@@ -81,6 +81,7 @@ export interface MemoryDashboard {
   mastered_words: number;
   learning_words: number;
   weak_words: number;
+  status_counts?: Record<string, number>;
   due_now_count: number;
   overdue_count: number;
   average_memory_strength: number;

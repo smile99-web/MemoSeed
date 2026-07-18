@@ -265,9 +265,13 @@ def get_course_progress(
     ).all()
 
     total_words = len(word_items)
-    word_texts = [item.english_text.lower().strip() for item in word_items]
+    # Distinct words only — a word imported into several courses used to be
+    # counted once per course (e.g. "can" appearing in 3 courses inflated the
+    # course mastery buckets past total_words).
+    word_texts = list({item.english_text.lower().strip() for item in word_items if item.english_text.strip()})
 
     status_counts: dict[str, int] = {"mastered": 0, "near_mastered": 0, "consolidating": 0, "teaching": 0, "difficult": 0}
+    tracked_words = 0
     if word_texts:
         word_states = db.scalars(
             select(WordMemoryState).where(
@@ -275,12 +279,13 @@ def get_course_progress(
                 WordMemoryState.word.in_(word_texts),
             )
         ).all()
+        tracked_words = len(word_states)
         for ws in word_states:
             word_status = ws.status or "teaching"
             if word_status in status_counts:
                 status_counts[word_status] += 1
-        # Words without memory states are counted as "teaching"
-        uncounted = total_words - sum(status_counts.values())
+        # Distinct course words without a memory state are counted as "teaching"
+        uncounted = len(word_texts) - sum(status_counts.values())
         if uncounted > 0:
             status_counts["teaching"] += uncounted
 
@@ -293,6 +298,7 @@ def get_course_progress(
         consolidating=status_counts["consolidating"],
         teaching=status_counts["teaching"],
         difficult=status_counts["difficult"],
+        tracked_words=tracked_words,
     )
 
 

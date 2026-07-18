@@ -105,6 +105,7 @@ class MemoryDashboardResponse(BaseModel):
     mastered_words: int
     learning_words: int
     weak_words: int
+    status_counts: dict[str, int] = {}
     due_now_count: int
     overdue_count: int
     average_memory_strength: float

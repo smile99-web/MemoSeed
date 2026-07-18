@@ -75,6 +75,10 @@ class CourseProgressRead(BaseModel):
     consolidating: int
     teaching: int
     difficult: int
+    # Distinct words in this course that have a WordMemoryState — because
+    # learning_items can contain several rows for the same word (one per
+    # course), summing the per-word status buckets can exceed the item count.
+    tracked_words: int = 0
 
     model_config = {"from_attributes": True}
 
