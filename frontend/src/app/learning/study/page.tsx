@@ -636,6 +636,15 @@ function StudyContent() {
   const [encodingWord, setEncodingWord] = useState("");
   const [, setEncodingChineseText] = useState("");
 
+  // N4: sentence new-word warm-up cards. When a course sentence arrives with
+  // focus_words (backend marks its weak/unknown words), the child meets each
+  // new word on a small recognition card (word + Chinese + slow audio)
+  // BEFORE typing the sentence — instead of failing on it mid-sentence.
+  const [warmUpWords, setWarmUpWords] = useState<string[]>([]);
+  const [warmUpIndex, setWarmUpIndex] = useState(0);
+  const [warmUpMeanings, setWarmUpMeanings] = useState<Record<string, string>>({});
+  const warmUpItemIdRef = useRef<string>("");
+
   const [currentStreak, setCurrentStreak] = useState(0);
   const [correctWordCount, setCorrectWordCount] = useState(0);
   const [perfectSentenceCount, setPerfectSentenceCount] = useState(0);
@@ -1009,7 +1018,10 @@ function StudyContent() {
     const sequenceId = startVoiceSequence();
     let nextStage: EncodingStage | null = null;
     if (stage === "meaning_intro") { nextStage = "listen"; }
-    else if (stage === "listen") { nextStage = "chunk_trace"; }
+    // N5: adaptive chain — words of <= 4 letters skip the chunk-tracing
+    // stage (their grapheme map is trivial); the full 4-stage chain is
+    // reserved for longer words where chunking actually pays off.
+    else if (stage === "listen") { nextStage = word.length <= 4 ? "whole_recall" : "chunk_trace"; }
     else if (stage === "chunk_trace") { nextStage = "whole_recall"; }
     else if (stage === "whole_recall") { nextStage = null; }
 
@@ -1141,6 +1153,60 @@ function StudyContent() {
       void advanceEncodingStage("meaning_intro", word, chineseText);
     }, 1000);
   }, [advanceEncodingStage, clearEncodingTimeout, clearWordPreview, speakInVoiceSequence, startVoiceSequence, waitInVoiceSequence]);
+
+  function finishWarmup() {
+    setWarmUpWords([]);
+    setWarmUpIndex(0);
+    setWarmUpMeanings({});
+    window.setTimeout(function () { const ref = inputRefs.current[dynamicReviewWordIndexes[0] ?? 0]; if (ref) { ref.focus(); } }, 0);
+    if (currentItemRef.current) {
+      const seqId = startVoiceSequence();
+      void playCurrentItemIntro(currentItemRef.current, seqId);
+    }
+  }
+
+  function advanceWarmup() {
+    const nextIndex = warmUpIndex + 1;
+    if (nextIndex >= warmUpWords.length) {
+      finishWarmup();
+      return;
+    }
+    setWarmUpIndex(nextIndex);
+    const word = warmUpWords[nextIndex];
+    const meaning = warmUpMeanings[normalizeEnglishKey(word)] ?? "";
+    if (word && meaning) {
+      void playChineseThenEnglish(meaning, word);
+    }
+  }
+
+  function replayWarmupWord() {
+    const word = warmUpWords[warmUpIndex];
+    if (!word) return;
+    const settings = modelSettingsRef.current;
+    const seqId = startVoiceSequence();
+    const speechText = buildFocusedWordSpeechText(word);
+    if (speechText) {
+      void speakInVoiceSequence(seqId, speechText, settings.ttsEnglishVoice, "en-US", settings, SLOW_ENGLISH_TTS_OPTIONS);
+    }
+  }
+
+  // Keyboard: Enter advances the warm-up card, Space replays the audio —
+  // the same two keys the child already uses everywhere in the study flow.
+  useEffect(() => {
+    if (warmUpWords.length === 0) return;
+    function onWarmupKey(event: globalThis.KeyboardEvent) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        advanceWarmup();
+      } else if (event.key === " ") {
+        event.preventDefault();
+        replayWarmupWord();
+      }
+    }
+    window.addEventListener("keydown", onWarmupKey);
+    return () => window.removeEventListener("keydown", onWarmupKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [warmUpWords, warmUpIndex, warmUpMeanings]);
 
   useEffect(() => {
     return () => {
@@ -1310,6 +1376,31 @@ function StudyContent() {
     }
     await speakClearEnglish(sequenceId, englishText, settings, true);
   }, [speakClearEnglish, speakInVoiceSequence, startVoiceSequence, waitInVoiceSequence]);
+
+  // N4: sentence new-word warm-up — one recognition card per weak word
+  // before the sentence typing UI appears. (Placed after
+  // playChineseThenEnglish: the deps array is evaluated at render time, so
+  // the callback must be declared after everything it references.)
+  const startWarmupFn = useCallback(async function startWarmup(words: string[]) {
+    const itemIdAtStart = currentItemIdRef.current;
+    warmUpItemIdRef.current = itemIdAtStart;
+    setWarmUpWords(words);
+    setWarmUpIndex(0);
+    setWarmUpMeanings({});
+    const first = words[0];
+    if (!first) {
+      setWarmUpWords([]);
+      return;
+    }
+    const meanings = await fetchCachedWordTranslations(words.slice(0, 2));
+    // Item guard: the user may have advanced during the translation fetch.
+    if (currentItemIdRef.current !== itemIdAtStart) return;
+    setWarmUpMeanings(meanings);
+    const meaning = meanings[normalizeEnglishKey(first)] ?? "";
+    if (meaning) {
+      void playChineseThenEnglish(meaning, first);
+    }
+  }, [playChineseThenEnglish]);
 
   const playEnglishThenChinese = useCallback(async function playEnglishThenChinese(englishText: string, chineseText: string, sequenceId = startVoiceSequence()) {
     if (isDictationModeRef.current) {
@@ -1668,6 +1759,11 @@ function StudyContent() {
     // Reset the encoding-duration clock too — otherwise every later review in
     // the session reports encoding_duration_ms measured from the FIRST encoding.
     encodingStartTimeRef.current = 0;
+    // N4: reset any warm-up card left over from the previous item.
+    setWarmUpWords([]);
+    setWarmUpIndex(0);
+    setWarmUpMeanings({});
+    warmUpItemIdRef.current = "";
     // P1-2: Multi-modal encoding — trigger for new words AND weak review words.
     // Previously only triggered for non-review-task word items (almost never).
     // Now also triggers for word review items that are single-word and new/weak.
@@ -1685,7 +1781,20 @@ function StudyContent() {
       && !isChoiceReviewTask
       && currentItem.difficulty_level >= 4
     );
-    if (isNewWord || isSpellingReview) {
+    // N4: course sentences arrive with their weak/unknown words marked in
+    // focus_words (backend N2). In learn/mix mode the child warms up each
+    // new word on a recognition card FIRST — the first contact with a new
+    // word becomes "seeing and hearing it" instead of "failing to spell it
+    // mid-sentence". Review-mode sentences skip this (their focus words are
+    // already in the correction loop).
+    const sentenceWarmupWords = (
+      currentItem && currentItem.item_type === "sentence" && studyMode !== "review"
+        ? dynamicReviewWords.slice(0, 2)
+        : []
+    ).filter(Boolean);
+    if (sentenceWarmupWords.length > 0) {
+      void startWarmupFn(sentenceWarmupWords);
+    } else if (isNewWord || isSpellingReview) {
       const encWord = currentWords[0];
       const encChinese = currentItem.chinese_text;
       void startEncodingFn(encWord, encChinese);
@@ -1704,7 +1813,7 @@ function StudyContent() {
         }, 800);
       }
     }
-  }, [clearEncodingTimeout, clearMistakePracticePreview, clearWordPreview, currentItem, currentWords, dynamicReviewWordIndexes, playCurrentItemIntro, setPendingMistakePractice, showWordPreview, startVoiceSequence, updateAnswerState, startEncodingFn]);
+  }, [clearEncodingTimeout, clearMistakePracticePreview, clearWordPreview, currentItem, currentWords, dynamicReviewWordIndexes, dynamicReviewWords, playCurrentItemIntro, setPendingMistakePractice, showWordPreview, startVoiceSequence, startWarmupFn, studyMode, updateAnswerState, startEncodingFn]);
 
   useEffect(() => {
     if (answerState === "mistake-word-practice") {
@@ -2282,10 +2391,16 @@ function StudyContent() {
     const scheduleItemId = getSourceLearningItemId(currentItem);
     if (accessToken && scheduleItemId && !currentItem.review_task_id) {
       try {
+        // N2: cloze items only asked the child to type the blanked word(s),
+        // not the whole sentence — record a modest pass (3) instead of the
+        // whole-sentence score, under a distinct mode so analytics can tell.
+        const isClozeItem = currentItem.review_task_type === "cloze_sentence";
         await scheduleMemoryReview(accessToken, {
           learning_item_id: scheduleItemId,
-          score: calculateSentenceScore(uniqueMistakenWords.length),
-          review_mode: "sentence-spelling",
+          score: isClozeItem
+            ? (uniqueMistakenWords.length > 0 ? 1 : 3)
+            : calculateSentenceScore(uniqueMistakenWords.length),
+          review_mode: isClozeItem ? "sentence-cloze" : "sentence-spelling",
           response_text: uniqueMistakenWords.length > 0 ? `错词：${uniqueMistakenWords.join(", ")}` : "全部拼写正确",
           duration_seconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
         });
@@ -3610,7 +3725,20 @@ function StudyContent() {
                   {reviewTaskInstruction ? <p className="text-xl font-bold text-slate-700 ipad:text-2xl">{reviewTaskInstruction}</p> : null}
                 </div>
               ) : null}
-              {encodingStage && encodingStage !== "whole_recall" && answerState === "typing" ? null : isChoiceReviewTask ? (
+              {encodingStage && encodingStage !== "whole_recall" && answerState === "typing" ? null : warmUpWords.length > 0 ? (
+                <div className={isStudyFullscreen ? "mx-auto flex max-w-4xl flex-col items-center gap-6 ipad:gap-8" : "mx-auto flex max-w-xl flex-col items-center gap-4 rounded-lg border border-amber-200 bg-amber-50 px-5 py-6 ipad:max-w-xl ipad:gap-4 ipad:px-6 ipad:py-6 ipad-lg:max-w-2xl ipad-lg:gap-5 ipad-lg:px-7 ipad-lg:py-7"}>
+                  <p className="text-sm font-bold text-amber-700 ipad:text-base">🌱 新词预热 {warmUpIndex + 1} / {warmUpWords.length} — 先认识这个单词</p>
+                  <p className="text-5xl font-bold text-slate-900 ipad:text-6xl">{warmUpWords[warmUpIndex]}</p>
+                  {warmUpMeanings[normalizeEnglishKey(warmUpWords[warmUpIndex] ?? "")] ? (
+                    <p className="text-2xl font-bold text-emerald-700 ipad:text-3xl">{warmUpMeanings[normalizeEnglishKey(warmUpWords[warmUpIndex] ?? "")]}</p>
+                  ) : null}
+                  <div className="flex flex-wrap justify-center gap-3">
+                    <Button className={actionButtonClass} onClick={replayWarmupWord} onMouseDown={keepStudyInputFocus} type="button" variant="secondary">🔊 再听一遍</Button>
+                    <Button className={actionButtonClass} onClick={advanceWarmup} onMouseDown={keepStudyInputFocus} type="button">记住了，继续 →</Button>
+                  </div>
+                  <p className="text-xs text-slate-500 ipad:text-sm">回车 = 继续 · 空格 = 听发音</p>
+                </div>
+              ) : isChoiceReviewTask ? (
                 <div className={isStudyFullscreen ? "mx-auto flex max-w-4xl flex-col items-center gap-6 ipad:gap-8" : "mx-auto flex max-w-xl flex-col items-center gap-4 rounded-lg border bg-slate-50 px-5 py-5 ipad:max-w-xl ipad:gap-4 ipad:px-6 ipad:py-5 ipad-lg:max-w-2xl ipad-lg:gap-5 ipad-lg:px-7 ipad-lg:py-6"}>
                   <p className="text-4xl font-bold text-slate-900 ipad:text-5xl ipad-lg:text-6xl">{isListeningChoiceReviewTask ? "听读音，选中文" : currentWords[0]}</p>
                   <p className="text-sm font-medium text-slate-500 ipad:text-base">按数字键 1-6 选择，空格键确认</p>
@@ -3784,7 +3912,7 @@ function StudyContent() {
                     </>
                   ) : (
                     <>
-                      <Button className={actionButtonClass} disabled={answerState !== "typing" || isChoiceReviewTask} onClick={() => runStudyButtonAction(() => checkWord(activeWordIndex))} onMouseDown={keepStudyInputFocus} type="button">
+                      <Button className={actionButtonClass} disabled={answerState !== "typing" || isChoiceReviewTask || warmUpWords.length > 0} onClick={() => runStudyButtonAction(() => checkWord(activeWordIndex))} onMouseDown={keepStudyInputFocus} type="button">
                         {(isDynamicFillBlankItem && isSentenceCloze) ? "判定填空" : "判定单词"}
                       </Button>
                       <Button className={actionButtonClass} onClick={handleSpeakEnglish} onMouseDown={keepStudyInputFocus} type="button" variant="secondary">朗读英文</Button>

@@ -593,7 +593,7 @@ def list_learning_items(
     include_choices: bool = False,
 ) -> list[LearningItemRead]:
     statement = (
-        select(LearningItem)
+        select(LearningItem, MemoryState)
         .outerjoin(MemoryState, MemoryState.learning_item_id == LearningItem.id)
         .where(LearningItem.user_id == current_user.id)
     )
@@ -608,8 +608,64 @@ def list_learning_items(
     )
     if limit is not None and limit > 0:
         statement = statement.limit(limit)
-    items = db.scalars(statement).all()
-    result = [LearningItemRead.model_validate(item) for item in items]
+    item_rows = list(db.execute(statement).all())
+
+    cloze_by_item_id: dict[UUID, list[str]] = {}
+    if course_id is not None:
+        # N2/N3/N4: course sentences are the new-word teaching path. For each
+        # sentence find its WEAK words (no WordMemoryState at all, or status
+        # teaching/difficult): mark them as focus_words so the frontend warms
+        # them up before the sentence (N4) and blanks only them for typing
+        # (N2 cloze, ~15s instead of ~80s whole-sentence typing); and serve
+        # never-studied sentences easiest-first so each new sentence
+        # introduces as few unknown words as possible (N3, i+1 input).
+        sentence_words: set[str] = set()
+        for item, _ms in item_rows:
+            if item.item_type == "sentence":
+                sentence_words.update(w.strip().lower() for w in tokenize_words(item.english_text or "") if w.strip())
+        weak_status_by_word: dict[str, tuple[float, str]] = {}
+        if sentence_words:
+            course_word_states = db.scalars(
+                select(WordMemoryState).where(
+                    WordMemoryState.user_id == current_user.id,
+                    WordMemoryState.word.in_(list(sentence_words)),
+                )
+            ).all()
+            status_by_word = {ws.word: (ws.memory_strength or 0.0, ws.status or "") for ws in course_word_states}
+            weak_status_by_word = {
+                w: v for w, v in ((w, status_by_word.get(w, (0.0, ""))) for w in sentence_words)
+                if v[1] in ("teaching", "difficult", "")
+            }
+        for item, _ms in item_rows:
+            if item.item_type != "sentence":
+                continue
+            weak = [w for w in (w.strip().lower() for w in tokenize_words(item.english_text or "")) if w in weak_status_by_word]
+            if weak:
+                weak.sort(key=lambda w: weak_status_by_word[w][0])
+                cloze_by_item_id[item.id] = weak[:2]
+
+        # N3: i+1 ordering — never-studied sentences sorted by weak-word
+        # count (fewest unknown words first), then import order. Studied
+        # items keep their FSRS order at the front.
+        new_sentence_ids = {
+            item.id for item, ms in item_rows
+            if ms is None and item.item_type == "sentence"
+        }
+        if new_sentence_ids:
+            studied_rows = [(item, ms) for item, ms in item_rows if item.id not in new_sentence_ids]
+            new_rows = [(item, ms) for item, ms in item_rows if item.id in new_sentence_ids]
+            new_rows.sort(key=lambda row: (len(cloze_by_item_id.get(row[0].id, [])), row[0].sort_order or 0))
+            item_rows = studied_rows + new_rows
+
+    items = [row[0] for row in item_rows]
+
+    def _apply_course_cloze(item_read: LearningItemRead) -> LearningItemRead:
+        weak = cloze_by_item_id.get(item_read.id)
+        if weak:
+            return item_read.model_copy(update={"focus_words": weak, "review_task_type": "cloze_sentence"})
+        return item_read
+
+    result = [_apply_course_cloze(LearningItemRead.model_validate(item)) for item in items]
 
     if include_choices:
         # For each word-type item, prepend an english_to_chinese
@@ -624,11 +680,11 @@ def list_learning_items(
         seen_words: set[str] = set()
         for item in items:
             if item.item_type != "word":
-                enriched.append(LearningItemRead.model_validate(item))
+                enriched.append(_apply_course_cloze(LearningItemRead.model_validate(item)))
                 continue
             normalized = normalize_word(item.english_text or "")
             if not normalized or normalized in seen_words:
-                enriched.append(LearningItemRead.model_validate(item))
+                enriched.append(_apply_course_cloze(LearningItemRead.model_validate(item)))
                 continue
             seen_words.add(normalized)
 
@@ -638,7 +694,7 @@ def list_learning_items(
             )
             # Skip if no Chinese translation could be found
             if not choices or not correct_answer:
-                enriched.append(LearningItemRead.model_validate(item))
+                enriched.append(_apply_course_cloze(LearningItemRead.model_validate(item)))
                 continue
             choice_item = LearningItemRead(
                 id=uuid4(),
@@ -662,7 +718,7 @@ def list_learning_items(
                 updated_at=item.updated_at,
             )
             enriched.append(choice_item)
-            enriched.append(LearningItemRead.model_validate(item))
+            enriched.append(_apply_course_cloze(LearningItemRead.model_validate(item)))
 
         # Prune to limit if needed
         if limit is not None and limit > 0:
@@ -1159,6 +1215,9 @@ def list_due_review_items(
             "english_to_chinese",       # 看英文选中文
             "chinese_to_english",       # 看中文拼英文
         ]
+        # N1: the new-word bootstrap chain — recognition first, scaffolded
+        # spelling last. Stage index = number of REAL tests so far.
+        N1_BOOTSTRAP_MODES = ["listen_choose_chinese", "english_to_chinese", "missing_letter"]
 
         # Build per-word intelligence from WordMemoryState to drive
         # dynamic question selection (Phase 1 optimization).
@@ -1177,11 +1236,21 @@ def list_due_review_items(
             mapping with recognition and scaffolded spelling first.
             """
             intel = word_intel.get(word, {})
-            status_value = intel.get("status", "")
-            strength = intel.get("strength", 0)
 
             if intel.get("intervention"):
                 return ["listen_choose_chinese", "missing_letter", "hidden_recall"]
+            # N1: new-word bootstrap. Words with < 3 REAL tests get a fixed
+            # recognition-first chain — one stage per queue fetch — instead of
+            # being thrown straight into spelling production. Data behind
+            # this: 165 of 217 recent new words had their FIRST real test be
+            # a spelling failure (0% pass), and none ever saw a recognition
+            # test first. Failing a new word on first contact is the most
+            # demotivating possible introduction.
+            real_tests = intel.get("real_tests", 0)
+            if real_tests < len(N1_BOOTSTRAP_MODES):
+                return [N1_BOOTSTRAP_MODES[real_tests]]
+            status_value = intel.get("status", "")
+            strength = intel.get("strength", 0)
             # T4-T5: near/mastery — straight to production, no scaffold.
             if status_value in ("mastered", "near_mastered") or strength >= 0.90:
                 return ["chinese_to_english"]
@@ -1211,6 +1280,10 @@ def list_due_review_items(
                             "strength": round(mem_state.memory_strength or 0, 2),
                             "lapse_count": mem_state.lapse_count or 0,
                             "consecutive_errors": mem_state.consecutive_error_count or 0,
+                            # N1: approximate REAL-test count from FSRS counters
+                            # so established words without a WordMemoryState row
+                            # don't fall into the new-word bootstrap chain.
+                            "real_tests": (mem_state.repetition_count or 0) + (mem_state.lapse_count or 0),
                         }
             word_state_rows = db.scalars(
                 select(WordMemoryState).where(
@@ -1237,6 +1310,31 @@ def list_due_review_items(
                 intel["intervention"] = bool(
                     (intel.get("lapse_count", 0) >= 8 and intel["strength"] < 0.5)
                     or ws.status == "difficult"
+                )
+
+            # N1: count REAL tests per top word (drives the bootstrap chain).
+            # Exact count from review_logs when the word-state links to a
+            # word-level item; recall_correct_count as floor for rows whose
+            # learning_item_id link is missing (they clearly passed bootstrap).
+            intel_item_ids = [ws.learning_item_id for ws in word_state_rows if ws.learning_item_id is not None]
+            real_counts_by_item: dict[UUID, int] = {}
+            if intel_item_ids:
+                real_counts_by_item = dict(
+                    db.execute(
+                        select(ReviewLog.learning_item_id, func.count(ReviewLog.id))
+                        .where(
+                            ReviewLog.user_id == current_user.id,
+                            ReviewLog.learning_item_id.in_(intel_item_ids),
+                            ReviewLog.review_mode.notin_(sorted(ASSISTED_REVIEW_MODES)),
+                        )
+                        .group_by(ReviewLog.learning_item_id)
+                    ).all()
+                )
+            for ws in word_state_rows:
+                intel = word_intel[ws.word]
+                intel["real_tests"] = max(
+                    real_counts_by_item.get(ws.learning_item_id, 0),
+                    ws.recall_correct_count or 0,
                 )
 
         # P1-1: Phonics grouping — bring in pattern-siblings
@@ -1376,6 +1474,37 @@ def list_due_review_items(
             if len(sentence_candidates) >= 4:
                 break
         sentences_for_session = sentence_candidates[:2]
+
+        # N2: whole-sentence typing costs ~80s per attempt, most of it typing
+        # words the child already knows. When a session sentence contains a
+        # weak word (teaching / difficult / consolidating, or no word-state
+        # at all), serve it as a CLOZE — blank only the weakest word and type
+        # just that word in context (~15s, same contextual benefit). The
+        # frontend blanks item.focus_words when review_task_type is
+        # "cloze_sentence". Sentences whose words are all strong stay whole.
+        cloze_scope_words: set[str] = set()
+        for s in sentences_for_session:
+            cloze_scope_words.update(w.strip().lower() for w in tokenize_words(s.english_text))
+        if cloze_scope_words:
+            cloze_state_rows = db.scalars(
+                select(WordMemoryState).where(
+                    WordMemoryState.user_id == current_user.id,
+                    WordMemoryState.word.in_(list(cloze_scope_words)),
+                )
+            ).all()
+            strength_status_by_word = {ws.word: (ws.memory_strength or 0.0, ws.status or "") for ws in cloze_state_rows}
+            cloze_marked: list[LearningItemRead] = []
+            for s in sentences_for_session:
+                s_words = [w.strip().lower() for w in tokenize_words(s.english_text)]
+                weak_words = [
+                    w for w in s_words
+                    if w and strength_status_by_word.get(w, (0.0, ""))[1] in ("teaching", "difficult", "consolidating", "")
+                ]
+                if weak_words:
+                    target = min(weak_words, key=lambda w: strength_status_by_word.get(w, (0.0, ""))[0])
+                    s = s.model_copy(update={"focus_words": [target], "review_task_type": "cloze_sentence"})
+                cloze_marked.append(s)
+            sentences_for_session = cloze_marked
 
         # Build the final queue: multi-mode focus items first, then
         # any remaining items from the due queue. Previously this
