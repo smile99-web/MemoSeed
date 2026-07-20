@@ -19,6 +19,7 @@ from app.models.word_memory_state import WordMemoryState
 from app.models.word_review_task import WordReviewTask
 from app.schemas.memory import MemoryDashboardResponse, ReviewBucket, StudyTimeSummary, WordMasterySummary
 from app.services.fsrs_fitting import MIN_FSRS_TRAINING_REVIEWS
+from app.services.learning_replay import _active_study_seconds
 from app.services.memory_scheduler import ASSISTED_REVIEW_MODES, FSRS_WEIGHTS_SETTING_KEY, calculate_current_forget_risk
 from app.utils import average, extract_mistake_words, parse_datetime_setting, tokenize_words
 
@@ -378,23 +379,24 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
 
 def build_study_time_summary(db: Session, user_id: UUID) -> StudyTimeSummary:
     now_local = datetime.now(LOCAL_TIMEZONE)
+    now_utc = now_local.astimezone(UTC)
     today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = today_start - timedelta(days=today_start.weekday())
     month_start = today_start.replace(day=1)
     year_start = today_start.replace(month=1, day=1)
 
-    def sum_since(start: datetime | None = None) -> int:
-        statement = select(func.coalesce(func.sum(StudyTimeLog.duration_seconds), 0)).where(StudyTimeLog.user_id == user_id)
-        if start is not None:
-            statement = statement.where(StudyTimeLog.recorded_at >= start.astimezone(UTC))
-        return int(db.scalar(statement) or 0)
+    # Study time only counts hours that have at least one answered event
+    # ("没做题就不记录时间"). See _active_study_seconds in learning_replay.
+    def active_since(start_local: datetime | None) -> int:
+        start_utc = start_local.astimezone(UTC) if start_local is not None else datetime(2000, 1, 1, tzinfo=UTC)
+        return _active_study_seconds(db, user_id, start_utc, now_utc)
 
     return StudyTimeSummary(
-        today_seconds=sum_since(today_start),
-        week_seconds=sum_since(week_start),
-        month_seconds=sum_since(month_start),
-        year_seconds=sum_since(year_start),
-        total_seconds=sum_since(),
+        today_seconds=active_since(today_start),
+        week_seconds=active_since(week_start),
+        month_seconds=active_since(month_start),
+        year_seconds=active_since(year_start),
+        total_seconds=active_since(None),
     )
 
 

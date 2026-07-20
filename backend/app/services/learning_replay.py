@@ -304,6 +304,51 @@ def _study_seconds_grid(db: Session, user_id: UUID, day: date) -> dict[tuple[int
     return {(int(h), int(m)): float(s or 0) for h, m, s in rows}
 
 
+def _active_study_seconds(db: Session, user_id: UUID, start_utc: datetime, end_utc: datetime) -> int:
+    """StudyTimeLog seconds in [start_utc, end_utc), but ONLY for (date, hour)
+    pairs that have at least one learning event (a learning_minute_stats row
+    with total_events > 0).
+
+    This is the product decision "没做题就不记录时间": a hour where the child was
+    online (heartbeat sent) but answered nothing does not count as study time.
+    Used by build_day_detail (implicitly, via hours_map), build_heatmap and
+    build_study_time_summary so every "study time" number across the dashboard
+    shares one definition.
+    """
+    if end_utc <= start_utc:
+        return 0
+    start_local = start_utc.astimezone(LOCAL_TIMEZONE)
+    end_local = end_utc.astimezone(LOCAL_TIMEZONE)
+    # (date, hour) keys that have at least one answered event.
+    event_hour_rows = db.execute(
+        select(LearningMinuteStat.stat_date, LearningMinuteStat.stat_hour)
+        .where(
+            LearningMinuteStat.user_id == user_id,
+            LearningMinuteStat.total_events > 0,
+            LearningMinuteStat.stat_date >= start_local.date(),
+            LearningMinuteStat.stat_date < end_local.date() + timedelta(days=1),
+        )
+        .distinct()
+    ).all()
+    event_hours = {(d, int(h)) for d, h in event_hour_rows}
+    if not event_hours:
+        return 0
+    rows = db.execute(
+        select(
+            func.date(func.timezone("Asia/Shanghai", StudyTimeLog.recorded_at)).label("d"),
+            func.extract("hour", func.timezone("Asia/Shanghai", StudyTimeLog.recorded_at)).label("h"),
+            func.sum(StudyTimeLog.duration_seconds).label("s"),
+        )
+        .where(
+            StudyTimeLog.user_id == user_id,
+            StudyTimeLog.recorded_at >= start_utc,
+            StudyTimeLog.recorded_at < end_utc,
+        )
+        .group_by("d", "h")
+    ).all()
+    return int(sum(s for d, h, s in rows if (d, int(h)) in event_hours) or 0)
+
+
 def build_heatmap(db: Session, user_id: UUID, year: int | None = None) -> dict:
     """Return year-view heatmap: minutes studied per day for the given year."""
     target_year = year or datetime.now(LOCAL_TIMEZONE).year
@@ -327,10 +372,26 @@ def build_heatmap(db: Session, user_id: UUID, year: int | None = None) -> dict:
     # Also get StudyTimeLog data for accurate daily study minutes.
     # Bucket by Asia/Shanghai (same as LearningMinuteStat.stat_date) —
     # func.date() alone uses UTC and pushes evening sessions to the wrong day.
+    # Only count (date, hour) pairs that have at least one answered event -
+    # "没做题就不记录时间" (see _active_study_seconds).
+    event_hour_rows = db.execute(
+        select(LearningMinuteStat.stat_date, LearningMinuteStat.stat_hour)
+        .where(
+            LearningMinuteStat.user_id == user_id,
+            LearningMinuteStat.total_events > 0,
+            LearningMinuteStat.stat_date >= start,
+            LearningMinuteStat.stat_date <= end,
+        )
+        .distinct()
+    ).all()
+    event_hours = {(d, int(h)) for d, h in event_hour_rows}
+
     local_date_expr = func.date(func.timezone("Asia/Shanghai", StudyTimeLog.recorded_at))
+    local_hour_expr = func.extract("hour", func.timezone("Asia/Shanghai", StudyTimeLog.recorded_at))
     study_rows = db.execute(
         select(
             local_date_expr.label("d"),
+            local_hour_expr.label("h"),
             func.sum(StudyTimeLog.duration_seconds).label("secs"),
         )
         .where(
@@ -338,9 +399,12 @@ def build_heatmap(db: Session, user_id: UUID, year: int | None = None) -> dict:
             local_date_expr >= start,
             local_date_expr <= end,
         )
-        .group_by(local_date_expr)
+        .group_by("d", "h")
     ).all()
-    study_by_date: dict[str, float] = {str(d): float(s or 0) for d, s in study_rows}
+    study_by_date: dict[str, float] = {}
+    for d, h, secs in study_rows:
+        if (d, int(h)) in event_hours:
+            study_by_date[str(d)] = study_by_date.get(str(d), 0) + float(secs or 0)
 
     event_by_date: dict[str, tuple[float, int]] = {}
     for d, ms, events in rows:
@@ -386,8 +450,6 @@ def build_day_detail(db: Session, user_id: UUID, day: date) -> dict:
     study_grid = _study_seconds_grid(db, user_id, day)
     total_events = sum(r.total_events for r in rows)
     total_correct = sum(r.correct_events for r in rows)
-    total_study_secs = sum(study_grid.values())
-    total_minutes = round(total_study_secs / 60, 1)
     accuracy = round((total_correct / total_events) * 100, 1) if total_events else 0.0
     mistake_count = db.scalar(
         select(func.count(MistakeLog.id)).where(
@@ -415,17 +477,19 @@ def build_day_detail(db: Session, user_id: UUID, day: date) -> dict:
             "study_seconds": round(study_grid.get((r.stat_hour, r.stat_minute), 0), 1),
         })
 
-    # Aggregate heartbeat seconds per hour directly from the grid, so a hour's
-    # study time includes minutes where the child was active (heartbeat sent)
-    # but not answering (no learning_minute_stats row) - thinking gaps between
-    # reviews. Summing only hours_map minutes undercounted 23.3min -> 3.1min.
+    # Study time only counts hours that have at least one learning event.
+    # Hours where the child was online (heartbeat) but answered nothing are
+    # excluded per product decision ("没做题就不记录时间"): the child may have
+    # left the tab open or been browsing without answering, and that idle
+    # presence should not inflate study time.
     study_secs_by_hour: dict[int, float] = {}
     for (h, _m), secs in study_grid.items():
-        study_secs_by_hour[h] = study_secs_by_hour.get(h, 0) + secs
+        if h in hours_map:
+            study_secs_by_hour[h] = study_secs_by_hour.get(h, 0) + secs
+    total_minutes = round(sum(study_secs_by_hour.values()) / 60, 1)
 
     hours = []
-    all_hours = sorted(set(hours_map.keys()) | set(study_secs_by_hour.keys()))
-    for h in all_hours:
+    for h in sorted(hours_map.keys()):
         minutes = hours_map.get(h, [])
         total_ev = sum(m["total"] for m in minutes)
         correct_ev = sum(m["correct"] for m in minutes)
