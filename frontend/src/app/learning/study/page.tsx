@@ -61,6 +61,13 @@ const itemTypeLabels: Record<LearningItem["item_type"], string> = {
 
 const STUDY_IDLE_TIMEOUT_MS = 10_000;
 const STUDY_TIME_FLUSH_SECONDS = 10;
+// Cap per-review wall-clock duration. startedAt is set when an item appears
+// and is NOT paused on visibilitychange (unlike the study-time heartbeat),
+// so a child who switches tabs for 5 minutes and returns logs duration_seconds
+// = 300. That fed learning_event.duration_ms = 300000 which used to inflate
+// per-minute study time. The heartbeat is now the study-time source, but cap
+// the value here too so review_log.duration_seconds stays a realistic ceiling.
+const MAX_REVIEW_DURATION_SECONDS = 120;
 const WORD_PREVIEW_MS = 3000;
 const WORD_MEANING_REVIEW_MS = 2000;
 const WORD_TRANSLATION_TIMEOUT_MS = 2500;
@@ -603,6 +610,13 @@ function StudyContent() {
   const pendingStudyMsRef = useRef(0);
   const courseRunStartedActiveMsRef = useRef(0);
   const courseRunCorrectWordKeysRef = useRef<Set<string>>(new Set());
+  // Guard against duplicate FSRS submissions: when the child double-taps Enter
+  // (or hits Enter then Space) on a spelling attempt, wordStatuses state has
+  // not yet flipped to "incorrect"/"correct" by the second keydown, so the
+  // "already judged" guards in checkWord missed it and logWordMistake ran
+  // twice in the same second (two review_logs for "am" at 16:30:34). This ref
+  // is set synchronously inside checkWord before the async setState resolves.
+  const wordJudgedRef = useRef<Set<number>>(new Set());
   const lastStudyTickAtRef = useRef(Date.now());
   const lastStudyActivityAtRef = useRef(Date.now());
   const isStudyPausedRef = useRef(false);
@@ -1715,6 +1729,7 @@ function StudyContent() {
       ? (currentItem?.review_prompt || "").slice(4)
       : "";
     setWordAnswers(currentWords.map((_w, i) => (i === 0 && hintLetter) ? hintLetter : ""));
+    wordJudgedRef.current.clear();
     setWordStatuses(currentWords.map(() => "idle"));
     setWordErrorCounts(currentWords.map(() => 0));
     setWordConsecutiveCorrect(currentWords.map(() => 0));
@@ -2111,6 +2126,7 @@ function StudyContent() {
 
   function resetAnswer() {
     setWordAnswers(currentWords.map(() => ""));
+    wordJudgedRef.current.clear();
     setWordStatuses(currentWords.map(() => "idle"));
     setWordErrorCounts(currentWords.map(() => 0));
     clearWordMeaningReview();
@@ -2326,8 +2342,8 @@ function StudyContent() {
         error_type: errorType,
         // Real elapsed time, not 0. The backend uses this for the study-time
         // summary; sending 0 here made the dashboard's "累计学习时长" (total
-        // study time) underreport dramatically.
-        duration_seconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
+        // study time) underreport dramatically. Capped - see MAX_REVIEW_DURATION_SECONDS.
+        duration_seconds: Math.min(MAX_REVIEW_DURATION_SECONDS, Math.max(1, Math.round((Date.now() - startedAt) / 1000))),
         encoding_stage: currentEncodingStage ?? undefined,
         encoding_duration_ms: encodingDurationMs,
       },
@@ -2402,7 +2418,7 @@ function StudyContent() {
             : calculateSentenceScore(uniqueMistakenWords.length),
           review_mode: isClozeItem ? "sentence-cloze" : "sentence-spelling",
           response_text: uniqueMistakenWords.length > 0 ? `错词：${uniqueMistakenWords.join(", ")}` : "全部拼写正确",
-          duration_seconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
+          duration_seconds: Math.min(MAX_REVIEW_DURATION_SECONDS, Math.max(1, Math.round((Date.now() - startedAt) / 1000))),
         });
       } catch {
         // Learning flow should not stop when telemetry fails.
@@ -2663,6 +2679,7 @@ function StudyContent() {
     if (previewWordIndex === index) {
       clearWordPreview();
     }
+    wordJudgedRef.current.delete(index);
     setWordAnswers((current) => {
       const nextAnswers = [...current];
       nextAnswers[index] = "";
@@ -2718,6 +2735,13 @@ function StudyContent() {
     if (answerStateRef.current !== "typing" || isCompletingSentenceRef.current) {
       return;
     }
+    // Synchronous re-entry guard. wordStatuses state is async; a fast second
+    // Enter arrives before it flips, so the "correct"/"incorrect" checks below
+    // would otherwise pass and submit a duplicate review_log. Cleared on
+    // resetIncorrectWord and on item change.
+    if (wordJudgedRef.current.has(index)) {
+      return;
+    }
     // Already-judged-correct words must not be re-judged: re-running the
     // correct branch would inflate streak/milestone counts and submit
     // duplicate FSRS review logs every time.
@@ -2755,6 +2779,8 @@ function StudyContent() {
     const isCorrect = typedValue === normalizeTypedWord(expectedWord);
     const nextStatusesForAttempt = [...wordStatuses];
     nextStatusesForAttempt[index] = isCorrect ? "correct" : "incorrect";
+    // Mark synchronously before setState so a fast second Enter is blocked.
+    wordJudgedRef.current.add(index);
     setWordStatuses(nextStatusesForAttempt);
 
     if (!isCorrect) {
@@ -2792,7 +2818,7 @@ function StudyContent() {
       const accessToken = getAccessToken();
       const learningItemId = currentItem ? getSourceLearningItemId(currentItem) : null;
       if (accessToken && learningItemId) {
-        void logWordMistake(learningItemId, expectedWord, actualWord, accessToken, errorType, Math.round((Date.now() - startedAt) / 1000)).catch(() => undefined);
+        void logWordMistake(learningItemId, expectedWord, actualWord, accessToken, errorType, Math.min(MAX_REVIEW_DURATION_SECONDS, Math.max(1, Math.round((Date.now() - startedAt) / 1000)))).catch(() => undefined);
       }
       if (nextErrorCount === 3 || (errorType === "unknown" && nextErrorCount >= 2)) {
         const itemIdAtError = currentItemIdRef.current;
@@ -3025,7 +3051,7 @@ function StudyContent() {
       const accessToken = getAccessToken();
       const learningItemId = currentItem ? getSourceLearningItemId(currentItem) : null;
       if (accessToken && learningItemId) {
-        void logWordMistake(learningItemId, expectedWord, mistakePracticeAnswer, accessToken, errorType, Math.round((Date.now() - startedAt) / 1000)).catch(() => undefined);
+        void logWordMistake(learningItemId, expectedWord, mistakePracticeAnswer, accessToken, errorType, Math.min(MAX_REVIEW_DURATION_SECONDS, Math.max(1, Math.round((Date.now() - startedAt) / 1000)))).catch(() => undefined);
       }
       if (nextErrorCount === 3 || (errorType === "unknown" && nextErrorCount >= 2)) {
         await playChineseThenEnglish(currentMistakePracticeTranslation, expectedWord);
@@ -3139,6 +3165,7 @@ function StudyContent() {
     setWordAnswers(currentWords.map((word, idx) =>
       respellIndexes.includes(idx) ? "" : word
     ));
+    wordJudgedRef.current.clear();
     setWordStatuses(currentWords.map(() => "idle"));
     setWordErrorCounts(currentWords.map(() => 0));
     setWordConsecutiveCorrect(currentWords.map(() => 0));
@@ -3241,7 +3268,7 @@ function StudyContent() {
               error_type: isCorrect ? undefined : "meaning",
               // Real elapsed time, not 0. See the comment in
               // recordWordMemoryReview above.
-              duration_seconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
+              duration_seconds: Math.min(MAX_REVIEW_DURATION_SECONDS, Math.max(1, Math.round((Date.now() - startedAt) / 1000))),
             },
             accessToken,
           ),

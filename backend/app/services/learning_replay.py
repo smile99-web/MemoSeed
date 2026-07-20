@@ -265,8 +265,43 @@ def _increment_minute_stat(db: Session, event: LearningEvent) -> None:
         stat.correct_events = (stat.correct_events or 0) + 1
     else:
         stat.incorrect_events = (stat.incorrect_events or 0) + 1
-    stat.study_duration_ms = (stat.study_duration_ms or 0) + event.duration_ms
+    # NOTE: do NOT accumulate event.duration_ms into study_duration_ms.
+    # event.duration_ms is a wall-clock span (Date.now() - startedAt on the
+    # frontend) that includes time the tab was hidden - a single cloze event
+    # carried 48 minutes. Summing those across events in one minute produced
+    # per-minute study_duration_ms of 113 minutes. Study time is sourced from
+    # StudyTimeLog heartbeats (see _study_seconds_grid); study_duration_ms is
+    # kept on the row for schema compatibility but is no longer trusted.
     stat.updated_at = datetime.now(UTC)
+
+
+def _study_seconds_grid(db: Session, user_id: UUID, day: date) -> dict[tuple[int, int], float]:
+    """Sum StudyTimeLog duration_seconds per (local hour, minute) for a day.
+
+    StudyTimeLog is the authoritative source for study time: the frontend
+    heartbeat pauses after 10s of inactivity and flushes on visibilitychange,
+    so it reflects real active learning. Event-level duration_ms is a wall-clock
+    span (Date.now() - startedAt) that includes time the tab was hidden - one
+    cloze event logged 48 minutes - and summing it across events in the same
+    minute produced per-minute study_duration_ms of 113 minutes. Replay hour /
+    minute study time must come from here, not from learning_minute_stats.
+    """
+    day_start = datetime.combine(day, datetime.min.time(), tzinfo=LOCAL_TIMEZONE)
+    day_end = day_start + timedelta(days=1)
+    rows = db.execute(
+        select(
+            func.extract("hour", func.timezone("Asia/Shanghai", StudyTimeLog.recorded_at)).label("h"),
+            func.extract("minute", func.timezone("Asia/Shanghai", StudyTimeLog.recorded_at)).label("m"),
+            func.sum(StudyTimeLog.duration_seconds).label("secs"),
+        )
+        .where(
+            StudyTimeLog.user_id == user_id,
+            StudyTimeLog.recorded_at >= day_start,
+            StudyTimeLog.recorded_at < day_end,
+        )
+        .group_by("h", "m")
+    ).all()
+    return {(int(h), int(m)): float(s or 0) for h, m, s in rows}
 
 
 def build_heatmap(db: Session, user_id: UUID, year: int | None = None) -> dict:
@@ -348,10 +383,11 @@ def build_day_detail(db: Session, user_id: UUID, day: date) -> dict:
         )
         .order_by(LearningMinuteStat.stat_hour.asc(), LearningMinuteStat.stat_minute.asc())
     ).scalars().all()
+    study_grid = _study_seconds_grid(db, user_id, day)
     total_events = sum(r.total_events for r in rows)
     total_correct = sum(r.correct_events for r in rows)
-    total_ms = sum(r.study_duration_ms for r in rows)
-    total_minutes = round(total_ms / 60000, 1)
+    total_study_secs = sum(study_grid.values())
+    total_minutes = round(total_study_secs / 60, 1)
     accuracy = round((total_correct / total_events) * 100, 1) if total_events else 0.0
     mistake_count = db.scalar(
         select(func.count(MistakeLog.id)).where(
@@ -374,21 +410,32 @@ def build_day_detail(db: Session, user_id: UUID, day: date) -> dict:
             "correct": r.correct_events,
             "incorrect": r.incorrect_events,
             "accuracy": round((r.correct_events / r.total_events) * 100, 1) if r.total_events else 0.0,
-            # Required by the hour-level study_minutes aggregation below
-            "study_seconds": round((r.study_duration_ms or 0) / 1000, 1),
+            # Study time comes from StudyTimeLog heartbeats (see _study_seconds_grid),
+            # not from event duration_ms which is a wall-clock span.
+            "study_seconds": round(study_grid.get((r.stat_hour, r.stat_minute), 0), 1),
         })
 
+    # Aggregate heartbeat seconds per hour directly from the grid, so a hour's
+    # study time includes minutes where the child was active (heartbeat sent)
+    # but not answering (no learning_minute_stats row) - thinking gaps between
+    # reviews. Summing only hours_map minutes undercounted 23.3min -> 3.1min.
+    study_secs_by_hour: dict[int, float] = {}
+    for (h, _m), secs in study_grid.items():
+        study_secs_by_hour[h] = study_secs_by_hour.get(h, 0) + secs
+
     hours = []
-    for h, minutes in sorted(hours_map.items()):
+    all_hours = sorted(set(hours_map.keys()) | set(study_secs_by_hour.keys()))
+    for h in all_hours:
+        minutes = hours_map.get(h, [])
         total_ev = sum(m["total"] for m in minutes)
         correct_ev = sum(m["correct"] for m in minutes)
         hour_accuracy = round((correct_ev / total_ev) * 100, 1) if total_ev else 0.0
-        hour_study_sec = sum(m.get("study_seconds", 0) for m in minutes)
+        hour_study_sec = study_secs_by_hour.get(h, 0)
         hours.append({
             "hour": h,
             "label": f"{h:02d}:00-{h+1:02d}:00",
             "minutes": minutes,
-            "modes": _build_mode_breakdown_for_hour(db, user_id, day, h),
+            "modes": _build_mode_breakdown_for_hour(db, user_id, day, h) if minutes else [],
             "total_events": total_ev,
             "accuracy": hour_accuracy,
             "study_minutes": round(hour_study_sec / 60, 1),
@@ -491,6 +538,7 @@ def build_hour_detail(db: Session, user_id: UUID, day: date, hour: int) -> dict:
         )
         .order_by(LearningMinuteStat.stat_minute.asc())
     ).scalars().all()
+    study_grid = _study_seconds_grid(db, user_id, day)
     return {
         "date": day.isoformat(),
         "hour": hour,
@@ -506,7 +554,7 @@ def build_hour_detail(db: Session, user_id: UUID, day: date, hour: int) -> dict:
                 "correct": r.correct_events,
                 "incorrect": r.incorrect_events,
                 "accuracy": round((r.correct_events / r.total_events) * 100, 1) if r.total_events else 0.0,
-                "study_seconds": round(r.study_duration_ms / 1000, 1),
+                "study_seconds": round(study_grid.get((hour, r.stat_minute), 0), 1),
             }
             for r in rows
         ],
@@ -625,6 +673,6 @@ def _repair_existing_event_minute_stat(db: Session, event: LearningEvent, delta_
         return True
     if delta_ms <= 0:
         return False
-    stat.study_duration_ms = (stat.study_duration_ms or 0) + delta_ms
+    # study_duration_ms is no longer trusted (see _increment_minute_stat).
     stat.updated_at = datetime.now(UTC)
     return True
