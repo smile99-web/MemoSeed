@@ -61,6 +61,7 @@ from app.services.memory_scheduler import (
     calculate_current_forget_risk,
     calculate_review_priority,
     exceeded_daily_review_filter_clause,
+    park_chronic_failure_words,
     park_cliff_words,
     park_mastered_words,
     park_stuck_words,
@@ -869,6 +870,7 @@ def list_due_review_items(
     park_mastered_words(db, current_user.id, now)
     park_stuck_words(db, current_user.id, now)
     park_cliff_words(db, current_user.id, now)
+    park_chronic_failure_words(db, current_user.id, now)
     # P2: spread any oversized overdue backlog across the next few days, then
     # apply the daily review budget (distinct items already served today).
     # Without this, 280+ due items made "priority order" meaningless and the
@@ -1236,6 +1238,15 @@ def list_due_review_items(
             mapping with recognition and scaffolded spelling first.
             """
             intel = word_intel.get(word, {})
+            lapse = intel.get("lapse_count", 0)
+            real_tests = intel.get("real_tests", 0)
+            unknown_errs = intel.get("unknown_errors", 0)
+
+            # 改进2: lapse > 20 反复拼写失败 -> 只识别。数据: us lapse=138、
+            # let=132、start=122 仍 teaching 考拼写，同样模式失败100+次无学习
+            # 价值。降级到只识别重建 sound<->meaning，停止无效拼写空考。
+            if lapse > 20:
+                return ["listen_choose_chinese", "english_to_chinese"]
 
             if intel.get("intervention"):
                 return ["listen_choose_chinese", "missing_letter", "hidden_recall"]
@@ -1246,9 +1257,17 @@ def list_due_review_items(
             # a spelling failure (0% pass), and none ever saw a recognition
             # test first. Failing a new word on first contact is the most
             # demotivating possible introduction.
-            real_tests = intel.get("real_tests", 0)
             if real_tests < len(N1_BOOTSTRAP_MODES):
                 return [N1_BOOTSTRAP_MODES[real_tests]]
+
+            # 改进3+4: 拼写失败率高或 unknown 多 -> 回识别，不出纯拼写。
+            # 改进3: 真测试正确率 <50%（lapse/real_tests>0.5 且 real_tests>=5）
+            # 说明词没学会，考拼写只是反复失败（真测试整体正确率仅36%）。
+            # 改进4: unknown_errors>=3 完全不会拼（unknown 错误2062次最多）。
+            fail_rate = lapse / max(real_tests, 1)
+            if (fail_rate > 0.5 and real_tests >= 5) or unknown_errs >= 3:
+                return ["listen_choose_chinese", "english_to_chinese", "missing_letter"]
+
             status_value = intel.get("status", "")
             strength = intel.get("strength", 0)
             # T4-T5: near/mastery — straight to production, no scaffold.

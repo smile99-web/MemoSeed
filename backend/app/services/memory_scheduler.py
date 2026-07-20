@@ -596,6 +596,51 @@ def park_stuck_words(db: Session, user_id: UUID, now: datetime | None = None) ->
     return int(result.rowcount or 0)
 
 
+# 改进2: chronic-failure parking. Words with lapse_count >= 40 that are STILL
+# failing recently (consecutive_error_count >= 3) get parked 7 days. Data:
+# us lapse=138, let=132, start=122 - these have failed 100+ times historically.
+# modes_for_word already demotes lapse>20 to recognition-only (no spelling);
+# this parks the worst offenders completely for a week so the child gets a
+# break from relentless re-exposure. The consecutive_error>=3 gate avoids
+# parking words that have HIGH lapse but are currently recovering (us had
+# strength 0.80 - it is recovering, not stuck).
+CHRONIC_FAILURE_LAPSE_THRESHOLD = 40
+CHRONIC_FAILURE_CONSECUTIVE_ERROR_GATE = 3
+
+
+def park_chronic_failure_words(db: Session, user_id: UUID, now: datetime | None = None) -> int:
+    """Park lapse>=40 AND consecutive_error>=3 words 7 days forward."""
+    from app.models.word_memory_state import WordMemoryState
+    now = now or datetime.now(UTC)
+    target_due = now + timedelta(days=STUCK_WORD_RESCHEDULE_DAYS)
+    chronic_ids = (
+        select(LearningItem.id)
+        .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
+        .where(
+            LearningItem.user_id == user_id,
+            LearningItem.item_type == "word",
+            MemoryState.lapse_count >= CHRONIC_FAILURE_LAPSE_THRESHOLD,
+            MemoryState.consecutive_error_count >= CHRONIC_FAILURE_CONSECUTIVE_ERROR_GATE,
+            MemoryState.next_review_at <= now,
+        )
+    )
+    result = db.execute(
+        update(MemoryState)
+        .where(MemoryState.learning_item_id.in_(chronic_ids))
+        .values(next_review_at=target_due)
+    )
+    db.execute(
+        update(WordMemoryState)
+        .where(
+            WordMemoryState.user_id == user_id,
+            WordMemoryState.learning_item_id.in_(chronic_ids),
+        )
+        .values(next_micro_review_at=target_due)
+    )
+    db.commit()
+    return int(result.rowcount or 0)
+
+
 # --- R1: Learning-curve cliff detection --------------------------------------
 # The data shows a hard plateau: from 30 to 100 reviews, memory_strength
 # only improves from 0.68 to 0.70 — a 0.02 gain over 70 additional reviews.
@@ -1396,6 +1441,22 @@ def schedule_memory_review(
             overnight_delay = tomorrow_morning_local - local_now
             if overnight_delay > review_delay:
                 review_delay = overnight_delay
+    # 改进1: 高掌握度词间隔下限。数据: the 近14天考158次(每天11次)、
+    # it 183次，30个 mastered 词 interval 只有1-2天。mastered/高强度词
+    # 应间隔 14+ 天；失败也不崩到 <7 天（P7 失败软化对高掌握度词不够，
+    # mastered 词失败一次 interval 崩到 1 天 -> 第二天又考 -> 每天考10+次）。
+    # 用 review 前 memory_strength 判断（>=0.85 覆盖 mastered + 高强度 near）。
+    from app.models.word_memory_state import WordMemoryState
+    pre_word_state = db.scalar(
+        select(WordMemoryState).where(
+            WordMemoryState.user_id == user_id,
+            WordMemoryState.learning_item_id == learning_item_id,
+        )
+    )
+    if pre_word_state is not None and pre_word_state.status == "mastered":
+        min_days = 14 if is_correct else 7
+        if review_delay < timedelta(days=min_days):
+            review_delay = timedelta(days=min_days)
     memory_state.interval_days = calculate_interval_days(review_delay)
     if is_correct:
         next_retrievability_at_due = calculate_fsrs_retrievability(review_delay.total_seconds() / 86400, next_stability_days)
