@@ -152,7 +152,20 @@ export default function DayReplayPage() {
                     setSelectedMinute(null); // minute selection belongs to the previously open hour
                   }}
                 >
-                  ⏰ {h.label} · {h.total_events || h.minutes.reduce((s, m) => s + m.total, 0)} 题 · 正确率 {h.accuracy || 0}%{(h.study_minutes || 0) > 0 ? ` · ${h.study_minutes}分钟` : ''}
+                  {(() => {
+                    const evCount = h.total_events || h.minutes.reduce((s, m) => s + m.total, 0);
+                    const mins = h.study_minutes || 0;
+                    // Zero-event hours with heartbeat time are "online but no
+                    // answers submitted" (browsing courses, listening to audio,
+                    // reading previews). Show that explicitly so the per-hour
+                    // times add up to the day total without confusing "0 题 · 23分钟".
+                    if (evCount === 0) {
+                      return mins > 0
+                        ? `⏰ ${h.label} · 在线 ${mins} 分钟（未答题）`
+                        : `⏰ ${h.label} · 无记录`;
+                    }
+                    return `⏰ ${h.label} · ${evCount} 题 · 正确率 ${h.accuracy || 0}%${mins > 0 ? ` · ${mins}分钟` : ''}`;
+                  })()}
                 </button>
                 {h.modes && h.modes.length > 0 ? (
                   <div className="mb-2 flex flex-wrap gap-1 text-xs">
