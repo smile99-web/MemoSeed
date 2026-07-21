@@ -69,7 +69,9 @@ const STUDY_TIME_FLUSH_SECONDS = 10;
 // the value here too so review_log.duration_seconds stays a realistic ceiling.
 const MAX_REVIEW_DURATION_SECONDS = 120;
 const WORD_PREVIEW_MS = 3000;
-const WORD_MEANING_REVIEW_MS = 2000;
+// Last-correct -> "下一句" must never exceed ~3s. The completion transition
+// itself is instant (slow work is backgrounded), so this timer IS the wait.
+const WORD_MEANING_REVIEW_MS = 2500;
 const WORD_TRANSLATION_TIMEOUT_MS = 2500;
 const DIFFICULT_WORD_CONFIRMATION_COUNT = 3;
 const INITIAL_REVIEW_QUEUE_LIMIT = 200;
@@ -2558,14 +2560,11 @@ function StudyContent() {
     setChildHint(null);
     setSentenceWordMeanings(loadingMeanings);
     updateAnswerState("word-meaning-review");
-    setFeedback("拼写完成！看一看每个单词的中文意思，3 秒后继续。");
+    setFeedback(`拼写完成！看一看每个单词的中文意思，${Math.round(WORD_MEANING_REVIEW_MS / 1000)} 秒后继续。`);
 
-    const meanings = await buildSentenceWordMeaningMap(words);
-    if (currentItemRef.current?.id !== itemId || (answerStateRef.current as AnswerState) !== "word-meaning-review") {
-      return;
-    }
-
-    setSentenceWordMeanings(meanings);
+    // Start the advance timer IMMEDIATELY. Translations fill in below when
+    // they arrive (2.5s-capped), but the promised wait must never stretch —
+    // previously the timer started only after the translation fetch returned.
     if (wordMeaningReviewTimeoutRef.current !== null) {
       window.clearTimeout(wordMeaningReviewTimeoutRef.current);
     }
@@ -2574,75 +2573,82 @@ function StudyContent() {
       setSentenceWordMeanings({});
       void completeCurrentSentence({ fromWordMeaningReview: true });
     }, WORD_MEANING_REVIEW_MS);
+
+    const meanings = await buildSentenceWordMeaningMap(words);
+    if (currentItemRef.current?.id !== itemId || (answerStateRef.current as AnswerState) !== "word-meaning-review") {
+      return;
+    }
+
+    setSentenceWordMeanings(meanings);
   }
 
   async function completeCurrentSentence(options: { fromWordMeaningReview?: boolean } = {}) {
-    if (!currentItem || isCompletingSentenceRef.current || (answerStateRef.current !== "typing" && !options.fromWordMeaningReview)) {
+    // Double-completion guard: the meaning-review timer and the space/enter
+    // skip can fire together; the transition below is synchronous, so the
+    // state check reliably rejects the second call.
+    const stateAtEntry = answerStateRef.current;
+    if (!currentItem || isCompletingSentenceRef.current || (options.fromWordMeaningReview ? stateAtEntry !== "word-meaning-review" : stateAtEntry !== "typing")) {
       return;
     }
 
     isCompletingSentenceRef.current = true;
     const completingItemId = currentItem.id;
-    // Item guard: this function awaits network calls. If the user skips to the
-    // next item mid-flight, the stale continuation must not mark the NEW item
-    // as complete or inject the OLD item's mistake practice.
+    // Item guard for the background block below: if the user skips to the next
+    // item mid-flight, the stale continuation must not inject the OLD item's
+    // dynamic sentence.
     const isStaleCompletion = () => currentItemIdRef.current !== completingItemId;
     const uniqueMistakenWords = getUniqueMistakenWords();
-    inputRefs.current.forEach((input) => input?.blur());
-    await finalizeCurrentSentenceReview();
-    if (isStaleCompletion()) {
-      isCompletingSentenceRef.current = false;
-      return;
-    }
-
-    let dynamicSentenceFeedback: string | null = null;
-    if (deferredDynamicWords.length > 0) {
-      const didInsertDynamicSentence = await insertDynamicSentenceAfterCurrent(deferredDynamicWords);
-      if (isStaleCompletion()) {
-        isCompletingSentenceRef.current = false;
-        return;
-      }
+    // Read + clear synchronously. The LLM dynamic-sentence generation takes
+    // 10-30s and previously stalled the completion screen (the reported "等了
+    // 30 秒才进入下一句"); it now runs in the background, so the deferred words
+    // must be captured and cleared before any await.
+    const deferredWords = [...deferredDynamicWords];
+    if (deferredWords.length > 0) {
       setDeferredDynamicWords([]);
-      dynamicSentenceFeedback = didInsertDynamicSentence
-        ? "上一轮错词复习句已生成，稍后会进入新的 5 到 7 个单词复习句。"
-        : "上一轮错词复习句生成失败，请稍后再试。";
     }
+    inputRefs.current.forEach((input) => input?.blur());
 
+    // Transition to sentence-complete IMMEDIATELY so the child can advance
+    // right away; review logging, dynamic-sentence generation and completion
+    // audio all continue in the background block below.
     if (uniqueMistakenWords.length > 0) {
       if (respellWordIndexesRef.current.length > 0) {
         respellWordIndexesRef.current = [];
         updateAnswerState("sentence-complete");
-        isCompletingSentenceRef.current = false;
         setFeedback("错词重拼完成。点击「下一句」按钮继续。", "success");
-        await playCurrentReviewCompletionAudio();
-        return;
+      } else {
+        setPendingMistakePractice(uniqueMistakenWords, {});
+        updateAnswerState("sentence-complete");
+        setFeedback("本句有错词，点击「进入错词复习」按钮。", "error");
       }
-      setPendingMistakePractice(uniqueMistakenWords, {});
-      updateAnswerState("sentence-complete");
-      isCompletingSentenceRef.current = false;
-      setFeedback(
-        dynamicSentenceFeedback
-          ? `${dynamicSentenceFeedback} 本句有错词，点击「进入错词复习」按钮。`
-          : "本句有错词，点击「进入错词复习」按钮。",
-        "error",
-      );
-      await playCurrentReviewCompletionAudio();
-      return;
-    }
-
-    updateAnswerState("sentence-complete");
-    isCompletingSentenceRef.current = false;
-    if (respellWordIndexesRef.current.length === 0) {
-      setPerfectSentenceCount((c) => c + 1);
-      setStarAnimKey((k) => k + 1);
-    }
-    if (respellWordIndexesRef.current.length > 0) {
-      respellWordIndexesRef.current = [];
-      setFeedback("错词重拼完全正确。点击「下一句」按钮继续。", "success");
     } else {
-      setFeedback(dynamicSentenceFeedback ? `${dynamicSentenceFeedback} 点击「下一句」按钮继续。` : "整句拼写正确。点击「下一句」按钮继续。", "success");
+      const wasRespellRound = respellWordIndexesRef.current.length > 0;
+      if (wasRespellRound) {
+        respellWordIndexesRef.current = [];
+      } else {
+        setPerfectSentenceCount((c) => c + 1);
+        setStarAnimKey((k) => k + 1);
+      }
+      updateAnswerState("sentence-complete");
+      setFeedback(wasRespellRound ? "错词重拼完全正确。点击「下一句」按钮继续。" : "整句拼写正确。点击「下一句」按钮继续。", "success");
     }
-    await playCurrentReviewCompletionAudio();
+    isCompletingSentenceRef.current = false;
+
+    // Background: completion audio (the child's instant confirmation — never
+    // make it wait for the network), review logging, dynamic-sentence
+    // generation. None of these may block the advance.
+    void (async () => {
+      const audioPromise = playCurrentReviewCompletionAudio().catch(() => undefined);
+      try {
+        await finalizeCurrentSentenceReview();
+        if (deferredWords.length > 0 && !isStaleCompletion()) {
+          await insertDynamicSentenceAfterCurrent(deferredWords);
+        }
+      } catch {
+        // Background completion work must never break the learning flow.
+      }
+      await audioPromise;
+    })();
   }
 
   async function playCurrentReviewCompletionAudio() {
@@ -3308,13 +3314,10 @@ function StudyContent() {
       return;
     }
     const correctMeaning = (hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "") || (hasChineseText(currentItem.chinese_text) ? currentItem.chinese_text : "") || (hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "") || choice;
-    // Play Chinese meaning audio FIRST, then advance
+    // Audio plays in the background — never block the advance on TTS
+    // (previously the child waited up to 8s before 下一句 appeared).
     if (word && correctMeaning) {
-      // Timeout guard: a hung TTS call must not freeze the flow on green
-      await Promise.race([
-        playEnglishThenChinese(word, correctMeaning),
-        new Promise((resolve) => window.setTimeout(resolve, 8000)),
-      ]);
+      void playEnglishThenChinese(word, correctMeaning).catch(() => undefined);
     }
     setFeedback("选择正确！", "success");
     // Brief pause so user can see the green highlight, then advance
@@ -3400,6 +3403,16 @@ function StudyContent() {
   const completeCurrentSentenceRef = useRef(completeCurrentSentence);
   completeCurrentSentenceRef.current = completeCurrentSentence;
 
+  // handleMistakeMeaningChoice compares the selection against
+  // mistakeMeaningQuizCorrect, which changes for EVERY quiz word without
+  // re-registering the keydown effect below (its deps don't change during
+  // mistake practice). The captured closure compared against a stale (empty
+  // or previous word's) answer, so a correct DIGIT pick was judged wrong
+  // while clicking the same option (fresh render closure) was judged right.
+  // Route through an always-fresh ref, same as judgeActiveWordRef.
+  const handleMistakeMeaningChoiceRef = useRef(handleMistakeMeaningChoice);
+  handleMistakeMeaningChoiceRef.current = handleMistakeMeaningChoice;
+
   useEffect(() => {
 	    function handleWindowKeyDown(event: globalThis.KeyboardEvent) {
 	      const isSpace = event.key === " ";
@@ -3440,7 +3453,7 @@ function StudyContent() {
 		        event.preventDefault();
 		        // digitIdx computed from event.code above
 		        if (digitIdx >= 0 && digitIdx < mistakeMeaningQuizOptionsRef.current.length && mistakeMeaningQuizSelectedRef.current === null) {
-		          handleMistakeMeaningChoice(mistakeMeaningQuizOptionsRef.current[digitIdx]);
+		          handleMistakeMeaningChoiceRef.current(mistakeMeaningQuizOptionsRef.current[digitIdx]);
 		        }
 		        return;
 		      }
