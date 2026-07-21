@@ -43,6 +43,12 @@ const config: Config = {
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
       },
+      boxShadow: {
+        soft: "0 8px 30px -12px rgb(15 23 42 / 0.18)",
+        "glow-cyan": "0 8px 28px -8px rgb(8 145 178 / 0.5)",
+        "glow-emerald": "0 8px 28px -8px rgb(5 150 105 / 0.5)",
+        "glow-violet": "0 8px 28px -8px rgb(124 58 237 / 0.5)",
+      },
     },
   },
   plugins: [require("tailwindcss-animate")],

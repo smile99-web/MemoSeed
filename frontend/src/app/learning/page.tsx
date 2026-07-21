@@ -234,7 +234,9 @@ export default function LearningStartPage() {
             <Link className="text-sm font-medium text-primary hover:underline ipad:text-base" href="/">
               返回首页
             </Link>
-            <h1 className="mt-4 text-3xl font-bold tracking-tight ipad:text-4xl">开始学习</h1>
+            <h1 className="mt-4 text-3xl font-bold tracking-tight ipad:text-4xl">
+              <span className="text-gradient">开始学习</span>
+            </h1>
             <p className="mt-2 text-muted-foreground ipad:text-lg">先选择课程包，再选择课程进入拼写学习。</p>
           </div>
           <Button asChild variant="secondary" className="ipad:text-lg ipad:px-6 ipad:py-3">
@@ -244,10 +246,10 @@ export default function LearningStartPage() {
 
         <div className="grid gap-3 md:grid-cols-2">
           <Link
-            className={`flex items-center justify-between gap-3 rounded-xl border px-5 py-4 shadow-sm transition-colors ipad:px-6 ipad:py-5 ${
+            className={`hover-lift flex items-center justify-between gap-3 rounded-2xl border px-5 py-4 shadow-soft backdrop-blur-xl transition-colors ipad:px-6 ipad:py-5 ${
               globalDueReviewCount > 0
-                ? "border-violet-300 bg-violet-50 hover:border-violet-500"
-                : "border-slate-200 bg-white hover:border-primary"
+                ? "border-violet-300/70 bg-violet-50/70 hover:border-violet-400"
+                : "border-white/70 bg-white/70 hover:border-cyan-300"
             }`}
             href="/learning/study?mode=review"
           >
@@ -268,7 +270,7 @@ export default function LearningStartPage() {
             </span>
           </Link>
 
-          <div className="flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-5 py-4 ipad:px-6 ipad:py-5">
+          <div className="flex items-center gap-3 rounded-2xl border border-amber-200/70 bg-amber-50/70 px-5 py-4 shadow-soft backdrop-blur-xl ipad:px-6 ipad:py-5">
             <div>
               <p className="text-base font-bold text-amber-700 ipad:text-lg">📝 新句子学</p>
               <p className="mt-1 text-xs text-slate-600 ipad:text-sm">
@@ -303,8 +305,8 @@ export default function LearningStartPage() {
                   const stats = packageCompletionStats[coursePackage.id];
                   return (
                     <button
-                      className={`rounded-lg border bg-card p-4 text-left shadow-sm transition-colors hover:border-primary ipad:p-5 ${
-                        isSelected ? "border-primary ring-2 ring-primary/20" : ""
+                      className={`hover-lift rounded-2xl border border-white/70 bg-white/75 p-4 text-left shadow-soft backdrop-blur-xl transition-colors hover:border-cyan-300 ipad:p-5 ${
+                        isSelected ? "border-cyan-400 ring-2 ring-cyan-400/30 shadow-glow-cyan" : ""
                       }`}
                       key={coursePackage.id}
                       type="button"
@@ -312,7 +314,7 @@ export default function LearningStartPage() {
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex min-w-0 gap-3">
-                          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary ipad:h-12 ipad:w-12">
+                          <span className="icon-chip h-10 w-10 shrink-0 ipad:h-12 ipad:w-12">
                             <FolderOpen className="h-5 w-5 ipad:h-6 ipad:w-6" />
                           </span>
                           <div className="min-w-0">
@@ -381,7 +383,7 @@ export default function LearningStartPage() {
                     : "#";
                   return (
                   <div
-                    className={`rounded-lg border bg-card p-5 shadow-sm transition-colors hover:border-primary ipad:p-6 ${
+                    className={`hover-lift rounded-2xl border border-white/70 bg-white/75 p-5 shadow-soft backdrop-blur-xl transition-colors hover:border-cyan-300 ipad:p-6 ${
                       itemCount === 0 ? "pointer-events-none opacity-60" : ""
                     }`}
                     key={course.id}
@@ -394,7 +396,7 @@ export default function LearningStartPage() {
                           {course.description || "暂无课程说明"}
                         </p>
                       </div>
-                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary ipad:h-12 ipad:w-12">
+                      <span className="icon-chip-emerald icon-chip h-10 w-10 shrink-0 ipad:h-12 ipad:w-12">
                         <BookOpen className="h-5 w-5 ipad:h-6 ipad:w-6" />
                       </span>
                     </div>

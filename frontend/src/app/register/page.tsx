@@ -69,9 +69,10 @@ export default function RegisterPage() {
 
   return (
     <main className="flex min-h-screen items-center justify-center px-6 py-10 ipad:px-8">
-      <Card className="w-full max-w-md ipad:max-w-lg">
+      <Card className="animate-pop-in w-full max-w-md ipad:max-w-lg">
         <CardHeader>
-          <CardTitle className="ipad:text-2xl">注册 MemoSeed</CardTitle>
+          <div className="icon-chip mb-4 h-12 w-12 animate-float rounded-2xl text-2xl">🚀</div>
+          <CardTitle className="ipad:text-2xl">注册 <span className="text-gradient">MemoSeed</span></CardTitle>
           <CardDescription className="ipad:text-lg">创建账号，开始建立英语长期记忆。</CardDescription>
         </CardHeader>
         <CardContent>
@@ -84,7 +85,7 @@ export default function RegisterPage() {
                 id="email"
                 type="email"
                 autoComplete="email"
-                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring ipad:h-12 ipad:px-4 ipad:text-base"
+                className="input-tech h-10 w-full rounded-xl border border-input bg-white/70 px-3 text-sm outline-none focus:border-cyan-400 ipad:h-12 ipad:px-4 ipad:text-base"
                 value={form.email}
                 onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))}
               />
@@ -99,7 +100,7 @@ export default function RegisterPage() {
                 id="username"
                 type="text"
                 autoComplete="username"
-                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring ipad:h-12 ipad:px-4 ipad:text-base"
+                className="input-tech h-10 w-full rounded-xl border border-input bg-white/70 px-3 text-sm outline-none focus:border-cyan-400 ipad:h-12 ipad:px-4 ipad:text-base"
                 value={form.username}
                 onChange={(event) => setForm((current) => ({ ...current, username: event.target.value }))}
               />
@@ -114,7 +115,7 @@ export default function RegisterPage() {
                 id="password"
                 type="password"
                 autoComplete="new-password"
-                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring ipad:h-12 ipad:px-4 ipad:text-base"
+                className="input-tech h-10 w-full rounded-xl border border-input bg-white/70 px-3 text-sm outline-none focus:border-cyan-400 ipad:h-12 ipad:px-4 ipad:text-base"
                 value={form.password}
                 onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
               />
@@ -129,7 +130,7 @@ export default function RegisterPage() {
                 id="confirm-password"
                 type="password"
                 autoComplete="new-password"
-                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring ipad:h-12 ipad:px-4 ipad:text-base"
+                className="input-tech h-10 w-full rounded-xl border border-input bg-white/70 px-3 text-sm outline-none focus:border-cyan-400 ipad:h-12 ipad:px-4 ipad:text-base"
                 value={form.confirmPassword}
                 onChange={(event) => setForm((current) => ({ ...current, confirmPassword: event.target.value }))}
               />

@@ -100,7 +100,7 @@ export default function LearningReplayPage() {
     <main className="mx-auto max-w-7xl p-4 md:p-6 space-y-6">
       <header className="flex flex-wrap items-end justify-between gap-2">
         <div>
-          <h1 className="text-2xl font-bold md:text-3xl">学习回放</h1>
+          <h1 className="text-2xl font-bold md:text-3xl"><span className="text-gradient">学习回放</span></h1>
           <p className="text-sm text-muted-foreground">
             {heatmap.year} 年 · 累计学习 {heatmap.total_minutes} 分钟 · 活跃 {heatmap.active_days} 天
           </p>

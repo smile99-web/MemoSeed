@@ -78,7 +78,7 @@ const WordInput = memo(function WordInput({
           autoCapitalize="none"
           autoCorrect="off"
           spellCheck={false}
-          className={`${wordInputSizeClass} shrink-0 border-0 border-b-4 bg-transparent px-1 text-center font-semibold leading-none outline-none transition ${
+          className={`${wordInputSizeClass} input-tech shrink-0 border-0 border-b-4 bg-transparent px-1 text-center font-semibold leading-none outline-none transition ${
             status === "correct" ? "border-emerald-500 text-emerald-700" : ""
           } ${
             status === "incorrect" ? "border-red-500 text-red-700" : ""
@@ -87,7 +87,7 @@ const WordInput = memo(function WordInput({
           } ${
             status === "idle" ? annotationColors[index % annotationColors.length] : ""
           } ${
-            isActive ? "bg-emerald-50" : ""
+            isActive ? "rounded-t-2xl bg-cyan-50/90 shadow-[0_22px_36px_-20px_rgb(8_145_178/0.55)]" : ""
           }`}
           disabled={!isAnswerTyping || status === "skipped" || isPreview}
           placeholder={

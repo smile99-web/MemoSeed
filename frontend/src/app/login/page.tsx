@@ -54,9 +54,12 @@ export default function LoginPage() {
 
   return (
     <main className="flex min-h-screen items-center justify-center px-6 py-10 ipad:px-8">
-      <Card className="w-full max-w-md ipad:max-w-lg">
+      <Card className="animate-pop-in w-full max-w-md ipad:max-w-lg">
         <CardHeader>
-          <CardTitle className="ipad:text-2xl">登录 MemoSeed</CardTitle>
+          <div className="icon-chip mb-4 h-12 w-12 animate-float rounded-2xl text-2xl">🌱</div>
+          <CardTitle className="ipad:text-2xl">
+            登录 <span className="text-gradient">MemoSeed</span>
+          </CardTitle>
           <CardDescription className="ipad:text-lg">进入你的英语长期记忆学习系统。</CardDescription>
         </CardHeader>
         <CardContent>
@@ -69,7 +72,7 @@ export default function LoginPage() {
                 id="email"
                 type="email"
                 autoComplete="email"
-                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring ipad:h-12 ipad:px-4 ipad:text-base"
+                className="input-tech h-10 w-full rounded-xl border border-input bg-white/70 px-3 text-sm outline-none focus:border-cyan-400 ipad:h-12 ipad:px-4 ipad:text-base"
                 value={form.email}
                 onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))}
               />
@@ -84,7 +87,7 @@ export default function LoginPage() {
                 id="password"
                 type="password"
                 autoComplete="current-password"
-                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring ipad:h-12 ipad:px-4 ipad:text-base"
+                className="input-tech h-10 w-full rounded-xl border border-input bg-white/70 px-3 text-sm outline-none focus:border-cyan-400 ipad:h-12 ipad:px-4 ipad:text-base"
                 value={form.password}
                 onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
               />
@@ -94,7 +97,7 @@ export default function LoginPage() {
             {errors.form ? <p className="text-sm text-red-600">{errors.form}</p> : null}
 
             <Button className="w-full ipad:h-12 ipad:text-lg" disabled={isSubmitting} type="submit">
-              {isSubmitting ? "登录中..." : "登录"}
+              {isSubmitting ? "登录中..." : "🚀 登录，开始学习"}
             </Button>
           </form>
 

@@ -232,7 +232,7 @@ export default function GrammarPage() {
       <header className="flex items-center justify-between gap-4">
         <div>
           <p className="text-sm font-semibold uppercase tracking-[0.3em] text-primary">Grammar</p>
-          <h1 className="mt-1 text-2xl font-bold ipad:text-3xl">英语语法练习</h1>
+          <h1 className="mt-1 text-2xl font-bold ipad:text-3xl"><span className="text-gradient">英语语法练习</span></h1>
           <p className="mt-1 text-sm text-muted-foreground ipad:text-base">
             选择难度(1-10),AI 老师为你出 10 道题,从易到难逐步挑战。
           </p>
@@ -608,7 +608,7 @@ function FillInput({
           onChange={(e) => onChange(e.target.value)}
           disabled={disabled}
           placeholder="在此输入答案..."
-          className="w-full rounded-lg border-2 border-slate-200 bg-white px-4 py-3 text-base focus:border-primary focus:outline-none disabled:bg-slate-50 disabled:text-slate-500 ipad:px-5 ipad:py-4 ipad:text-lg"
+          className="input-tech w-full rounded-xl border-2 border-slate-200 bg-white/80 px-4 py-3 text-base focus:border-cyan-400 focus:outline-none disabled:bg-slate-50 disabled:text-slate-500 ipad:px-5 ipad:py-4 ipad:text-lg"
           autoComplete="off"
           autoCapitalize="off"
           spellCheck={false}

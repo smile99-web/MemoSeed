@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { headers } from "next/headers";
 import { detectDeviceFromUA, defaultDeviceInfo } from "@/lib/device";
 import { AppShell } from "@/components/app-shell";
+import { TechBackground } from "@/components/tech-background";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -34,13 +35,17 @@ export default async function RootLayout({
     <html lang="zh-CN">
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+        <meta name="theme-color" content="#f0f6ff" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-title" content="MemoSeed" />
         <meta name="apple-mobile-web-app-status-bar-style" content="default" />
         <meta name="format-detection" content="telephone=no" />
       </head>
       <body>
-        <AppShell initialDevice={deviceInfo}>{children}</AppShell>
+        <TechBackground />
+        <div className="relative z-10">
+          <AppShell initialDevice={deviceInfo}>{children}</AppShell>
+        </div>
       </body>
     </html>
   );

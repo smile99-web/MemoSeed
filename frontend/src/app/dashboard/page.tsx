@@ -493,7 +493,7 @@ function WordHistoryModal({ history, onClose }: { history: WordHistoryResponse; 
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center overflow-auto bg-slate-950/60 px-4 py-10" onClick={onClose}>
-      <div className="relative w-full max-w-2xl rounded-lg bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+      <div className="glass-card relative w-full max-w-2xl p-6" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-xl font-bold">{history.word} 的复习历史</h2>
           <button onClick={onClose} className="text-muted-foreground hover:text-slate-900 text-lg">x</button>
@@ -831,7 +831,7 @@ export default function DashboardPage() {
             <Link className="text-sm font-medium text-primary hover:underline ipad:text-base" href="/">
               返回首页
             </Link>
-            <h1 className="mt-4 text-3xl font-bold tracking-tight ipad:text-4xl">学习数据看板</h1>
+            <h1 className="mt-4 text-3xl font-bold tracking-tight ipad:text-4xl"><span className="text-gradient">学习数据看板</span></h1>
             <p className="mt-2 text-muted-foreground ipad:text-lg">基于 FSRS 复习记录、错词日志和记忆强度生成。</p>
           </div>
           <div className="flex flex-wrap gap-3">

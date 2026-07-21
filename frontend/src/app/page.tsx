@@ -319,7 +319,7 @@ export default function HomePage() {
     <main className="min-h-screen px-6 py-10 ipad:px-8 ipad:py-14">
       {isSettingsOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-6 py-8">
-          <div className="max-h-full w-full max-w-2xl overflow-y-auto rounded-2xl bg-white p-6 shadow-xl">
+          <div className="max-h-full w-full max-w-2xl overflow-y-auto glass-card p-6">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-2xl font-bold tracking-tight ipad:text-3xl">模型设置</h2>
@@ -602,7 +602,7 @@ export default function HomePage() {
 
       <div className="mx-auto mb-6 max-w-6xl text-sm text-muted-foreground">
         {hasLoadedSession ? (
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-white px-4 py-3 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3 glass-card px-4 py-3">
             {currentUser ? (
               <div className="flex flex-wrap items-center gap-4">
                 <div>
@@ -650,18 +650,28 @@ export default function HomePage() {
       </div>
 
       <section className="mx-auto flex max-w-6xl flex-col gap-10">
-        <div className="rounded-3xl bg-white p-8 shadow-sm md:p-12 ipad:p-10">
-          <p className="text-sm font-semibold uppercase tracking-[0.3em] text-primary ipad:text-base">MemoSeed</p>
-          <h1 className="mt-4 max-w-3xl text-4xl font-bold tracking-tight md:text-6xl ipad:text-5xl">
-            英语记忆种子
-          </h1>
-          <p className="mt-6 max-w-2xl text-lg leading-8 text-muted-foreground ipad:text-xl ipad:leading-9">
-            基于艾宾浩斯记忆曲线、FSRS算法推荐 和 AI 动态调度，专注中小学阶段英语基础薄弱学生的单词、短语与简单句长期记忆。
-          </p>
-          <div className="mt-8 flex flex-wrap gap-3">
+        <div className="glass-card relative overflow-hidden p-8 md:p-12 ipad:p-10">
+          <div className="pointer-events-none absolute -right-20 -top-24 h-64 w-64 rounded-full bg-cyan-300/30 blur-3xl" />
+          <div className="pointer-events-none absolute -bottom-24 right-24 h-52 w-52 rounded-full bg-violet-300/25 blur-3xl" />
+          <div className="relative">
+            <div className="inline-flex items-center gap-2 rounded-full border border-cyan-200/80 bg-cyan-50/80 px-4 py-1.5 backdrop-blur">
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-cyan-400 opacity-75" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-cyan-500" />
+              </span>
+              <p className="text-xs font-bold uppercase tracking-[0.3em] text-cyan-700 ipad:text-sm">MemoSeed · AI 记忆引擎</p>
+            </div>
+            <h1 className="mt-5 max-w-3xl text-4xl font-bold tracking-tight md:text-6xl ipad:text-5xl">
+              <span className="text-gradient">英语记忆种子</span>
+            </h1>
+            <p className="mt-6 max-w-2xl text-lg leading-8 text-muted-foreground ipad:text-xl ipad:leading-9">
+              基于艾宾浩斯记忆曲线、FSRS算法推荐 和 AI 动态调度，专注中小学阶段英语基础薄弱学生的单词、短语与简单句长期记忆。
+            </p>
+          </div>
+          <div className="relative mt-8 flex flex-wrap gap-3">
             {isLoggedIn ? (
               <>
-                <Button asChild size="lg" className="ipad:text-lg ipad:px-6 ipad:py-6">
+                <Button asChild size="lg" className="animate-glow-pulse ipad:text-lg ipad:px-6 ipad:py-6">
                   <Link href="/learning/study?mode=review&ai=1&phonics=1">📚 单词复习</Link>
                 </Button>
                 <Button asChild size="lg" variant="secondary" className="ipad:text-lg ipad:px-6 ipad:py-6">
@@ -696,12 +706,13 @@ export default function HomePage() {
         </div>
 
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4 ipad:grid-cols-2">
-          {workflowCards.map((card) => {
+          {workflowCards.map((card, cardIndex) => {
             const Icon = card.icon;
+            const chipClasses = ["icon-chip", "icon-chip-emerald", "icon-chip-violet", "icon-chip-amber"];
             return (
-              <Card key={card.title}>
+              <Card className="hover-lift animate-pop-in" key={card.title}>
                 <CardHeader>
-                  <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-primary/10 text-primary ipad:h-12 ipad:w-12">
+                  <div className={`mb-3 h-11 w-11 ipad:h-12 ipad:w-12 ${chipClasses[cardIndex % chipClasses.length]}`}>
                     <Icon className="h-5 w-5 ipad:h-6 ipad:w-6" />
                   </div>
                   <CardTitle className="ipad:text-xl">{card.title}</CardTitle>

@@ -3545,22 +3545,22 @@ function StudyContent() {
             label: "📚 单词复习",
             description: "只显示所有课程的到期复习单词",
             color: "text-violet-700",
-            bg: "bg-violet-50",
-            border: "border-violet-200",
+            bg: "bg-violet-50/70 backdrop-blur-xl",
+            border: "border-violet-300/60",
           },
           learn: {
             label: "📝 新句子学",
             description: "只显示本课的新内容（句子/短语/单词）",
             color: "text-amber-700",
-            bg: "bg-amber-50",
-            border: "border-amber-200",
+            bg: "bg-amber-50/70 backdrop-blur-xl",
+            border: "border-amber-300/60",
           },
           mix: {
             label: "🔄 混合模式",
             description: "复习 + 新内容一起",
             color: "text-slate-700",
-            bg: "bg-slate-50",
-            border: "border-slate-200",
+            bg: "bg-white/70 backdrop-blur-xl",
+            border: "border-white/70",
           },
         };
         const current = modeConfig[studyMode];
@@ -3568,18 +3568,18 @@ function StudyContent() {
         return (
           <>
           {timeSuggestion ? (
-            <div className="mx-4 mt-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2.5 ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3">
+            <div className="mx-4 mt-3 rounded-2xl border border-blue-300/60 bg-blue-50/70 px-4 py-2.5 shadow-soft backdrop-blur-xl ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3">
               <p className="text-xs font-bold text-blue-700 ipad:text-sm">{timeSuggestion}</p>
             </div>
           ) : null}
           {isPhonics ? (
-            <div className="mx-4 mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2.5 ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3">
+            <div className="mx-4 mt-3 rounded-2xl border border-emerald-300/60 bg-emerald-50/70 px-4 py-2.5 shadow-soft backdrop-blur-xl ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3">
               <p className="text-sm font-bold text-emerald-700">🔤 自然拼读模式</p>
               <p className="mt-1 text-xs text-emerald-600">同音组词一起练,先听发音拆音节再拼写,通过声音规律记忆单词</p>
             </div>
           ) : null}
           {aiRecommendedWords.length > 0 ? (
-            <div className="mx-4 mt-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3">
+            <div className="mx-4 mt-3 rounded-2xl border border-amber-300/60 bg-amber-50/70 px-4 py-2.5 shadow-soft backdrop-blur-xl ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3">
               <p className="text-sm font-bold text-amber-700">🤖 AI 推荐复习 · {aiRecommendedWords.length} 个重点词优先</p>
               <p className="mt-1 text-xs text-amber-600">{aiReasoning || "基于最近7天学习数据,以下单词需要更多练习:"}</p>
               <div className="mt-2 flex flex-wrap gap-1.5">
@@ -3589,7 +3589,7 @@ function StudyContent() {
               </div>
             </div>
           ) : null}
-          <div className={`mx-4 mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border ${current.border} ${current.bg} px-4 py-2.5 ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3`}>
+          <div className={`mx-4 mt-3 flex flex-wrap items-center justify-between gap-3 rounded-2xl border ${current.border} ${current.bg} px-4 py-2.5 shadow-soft ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3`}>
             <div className="flex items-center gap-3">
               <span className={`text-sm font-bold ipad:text-base ${current.color}`}>{current.label}</span>
               <span className="text-xs text-slate-600 ipad:text-sm">{current.description}</span>
@@ -3616,7 +3616,7 @@ function StudyContent() {
           </>
         );
       })()}
-      <main className={isStudyFullscreen ? "flex min-h-[100dvh] flex-col overflow-y-auto bg-white text-slate-950" : "flex min-h-[100dvh] flex-col overflow-y-auto bg-slate-50 text-slate-950"}>
+      <main className={isStudyFullscreen ? "flex min-h-[100dvh] flex-col overflow-y-auto bg-gradient-to-b from-white/60 via-cyan-50/40 to-violet-50/50 text-slate-950 backdrop-blur-sm" : "flex min-h-[100dvh] flex-col overflow-y-auto text-slate-950"}>
       {celebrationSummary ? <CelebrationModal nextCourse={nextCourse} summary={celebrationSummary} /> : null}
       {focusRotatedMessage ? (
         <div className="fixed left-1/2 top-6 z-40 -translate-x-1/2 animate-bounce rounded-full bg-emerald-500 px-6 py-3 text-base font-bold text-white shadow-lg ipad:px-8 ipad:py-4 ipad:text-lg">
@@ -3632,7 +3632,7 @@ function StudyContent() {
         <>
           <div className="fixed left-4 top-4 z-30 flex items-center gap-2 ipad:left-6 ipad:top-6">
             {perfectSentenceCount > 0 ? (
-              <div className="flex items-center gap-1 rounded-full bg-white/90 px-3 py-1.5 text-sm font-bold text-amber-500 shadow-sm backdrop-blur ipad:px-4 ipad:text-base">
+              <div className="flex items-center gap-1 rounded-full border border-amber-200/70 bg-white/80 px-3 py-1.5 text-sm font-bold text-amber-500 shadow-soft backdrop-blur-xl ipad:px-4 ipad:text-base">
                 <span key={starAnimKey} style={{ animation: starAnimKey > 0 ? "star-join 0.6s ease-out" : "none" }}>⭐</span>
                 <span>{perfectSentenceCount}</span>
               </div>
@@ -3640,7 +3640,7 @@ function StudyContent() {
           </div>
           <div className="fixed right-4 top-4 z-30 flex items-center gap-2 ipad:right-6 ipad:top-6">
             {currentStreak > 0 ? (
-              <div className="flex items-center gap-1 rounded-full bg-white/90 px-3 py-1.5 text-sm font-bold text-orange-500 shadow-sm backdrop-blur ipad:px-4 ipad:text-base" style={{ animation: currentStreak >= 5 ? "fire-pulse 0.6s ease-in-out infinite" : "none" }}>
+              <div className="flex items-center gap-1 rounded-full border border-orange-200/70 bg-white/80 px-3 py-1.5 text-sm font-bold text-orange-500 shadow-soft backdrop-blur-xl ipad:px-4 ipad:text-base" style={{ animation: currentStreak >= 5 ? "fire-pulse 0.6s ease-in-out infinite" : "none" }}>
                 <span key={currentStreak} style={{ animation: currentStreak > 0 ? "streak-flash 0.3s ease-out" : "none" }}>🔥</span>
                 <span>{currentStreak}</span>
               </div>
@@ -3655,7 +3655,7 @@ function StudyContent() {
         </>
       ) : null}
       {!isStudyFullscreen ? (
-        <header className="shrink-0 border-b bg-white/95 px-4 py-2.5 shadow-sm ipad:px-5 ipad:py-2">
+        <header className="shrink-0 border-b border-white/60 bg-white/70 px-4 py-2.5 shadow-soft backdrop-blur-xl ipad:px-5 ipad:py-2">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <div className={`rounded-md border px-3 py-2 text-left transition-colors ${isStudyPaused ? "border-amber-300 bg-amber-50" : "bg-slate-50"}`}>
@@ -3680,8 +3680,8 @@ function StudyContent() {
               </Button>
             </div>
           </div>
-          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted ipad:h-2">
-            <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${progressPercent}%` }} />
+          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-200/70 ipad:h-2">
+            <div className="progress-gradient h-full rounded-full transition-all" style={{ width: `${progressPercent}%` }} />
           </div>
         </header>
       ) : null}
@@ -3692,7 +3692,7 @@ function StudyContent() {
         {!isLoading && !errorMessage && !currentItem ? <p className="text-lg font-bold text-muted-foreground ipad:text-xl">当前课程还没有导入内容。</p> : null}
 
         {!isLoading && !errorMessage && currentItem ? (
-          <div className={isStudyFullscreen ? "w-full max-w-7xl text-center" : "w-full max-w-6xl rounded-lg border border-slate-200 bg-white px-5 py-5 text-center shadow-sm ipad:px-6 ipad:py-5 ipad-lg:px-8 ipad-lg:py-6"}>
+          <div className={isStudyFullscreen ? "w-full max-w-7xl text-center" : "w-full max-w-6xl rounded-2xl border border-white/70 bg-white/75 px-5 py-5 text-center shadow-soft backdrop-blur-xl ipad:px-6 ipad:py-5 ipad-lg:px-8 ipad-lg:py-6"}>
             {!isStudyFullscreen ? (
               <div className="flex justify-center gap-3 text-sm font-medium text-slate-500 ipad:text-sm">
               <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1">{itemTypeLabels[currentItem.item_type]}</span>
@@ -3753,7 +3753,7 @@ function StudyContent() {
                 </div>
               ) : null}
               {encodingStage && encodingStage !== "whole_recall" && answerState === "typing" ? null : warmUpWords.length > 0 ? (
-                <div className={isStudyFullscreen ? "mx-auto flex max-w-4xl flex-col items-center gap-6 ipad:gap-8" : "mx-auto flex max-w-xl flex-col items-center gap-4 rounded-lg border border-amber-200 bg-amber-50 px-5 py-6 ipad:max-w-xl ipad:gap-4 ipad:px-6 ipad:py-6 ipad-lg:max-w-2xl ipad-lg:gap-5 ipad-lg:px-7 ipad-lg:py-7"}>
+                <div className={isStudyFullscreen ? "mx-auto flex max-w-4xl flex-col items-center gap-6 ipad:gap-8" : "mx-auto flex max-w-xl flex-col items-center gap-4 rounded-2xl border border-amber-300/60 bg-amber-50/70 px-5 py-6 shadow-soft backdrop-blur-xl ipad:max-w-xl ipad:gap-4 ipad:px-6 ipad:py-6 ipad-lg:max-w-2xl ipad-lg:gap-5 ipad-lg:px-7 ipad-lg:py-7"}>
                   <p className="text-sm font-bold text-amber-700 ipad:text-base">🌱 新词预热 {warmUpIndex + 1} / {warmUpWords.length} — 先认识这个单词</p>
                   <p className="text-5xl font-bold text-slate-900 ipad:text-6xl">{warmUpWords[warmUpIndex]}</p>
                   {warmUpMeanings[normalizeEnglishKey(warmUpWords[warmUpIndex] ?? "")] ? (
@@ -3766,7 +3766,7 @@ function StudyContent() {
                   <p className="text-xs text-slate-500 ipad:text-sm">回车 = 继续 · 空格 = 听发音</p>
                 </div>
               ) : isChoiceReviewTask ? (
-                <div className={isStudyFullscreen ? "mx-auto flex max-w-4xl flex-col items-center gap-6 ipad:gap-8" : "mx-auto flex max-w-xl flex-col items-center gap-4 rounded-lg border bg-slate-50 px-5 py-5 ipad:max-w-xl ipad:gap-4 ipad:px-6 ipad:py-5 ipad-lg:max-w-2xl ipad-lg:gap-5 ipad-lg:px-7 ipad-lg:py-6"}>
+                <div className={isStudyFullscreen ? "mx-auto flex max-w-4xl flex-col items-center gap-6 ipad:gap-8" : "mx-auto flex max-w-xl flex-col items-center gap-4 rounded-2xl border border-white/70 bg-white/65 px-5 py-5 shadow-soft backdrop-blur-xl ipad:max-w-xl ipad:gap-4 ipad:px-6 ipad:py-5 ipad-lg:max-w-2xl ipad-lg:gap-5 ipad-lg:px-7 ipad-lg:py-6"}>
                   <p className="text-4xl font-bold text-slate-900 ipad:text-5xl ipad-lg:text-6xl">{isListeningChoiceReviewTask ? "听读音，选中文" : currentWords[0]}</p>
                   <p className="text-sm font-medium text-slate-500 ipad:text-base">按数字键 1-6 选择，空格键确认</p>
                   <div className="grid w-full max-w-xl grid-cols-2 gap-3"
@@ -3813,7 +3813,7 @@ function StudyContent() {
                   </div>
                 </div>
               ) : answerState === "mistake-word-practice" ? (
-                <div className={isStudyFullscreen ? "mx-auto flex max-w-4xl flex-col items-center gap-6 ipad:gap-8" : "mx-auto flex max-w-xl flex-col items-center gap-4 rounded-lg border bg-slate-50 px-5 py-5 ipad:max-w-xl ipad:gap-4 ipad:px-6 ipad:py-5 ipad-lg:max-w-2xl ipad-lg:gap-5 ipad-lg:px-7 ipad-lg:py-6"}>
+                <div className={isStudyFullscreen ? "mx-auto flex max-w-4xl flex-col items-center gap-6 ipad:gap-8" : "mx-auto flex max-w-xl flex-col items-center gap-4 rounded-2xl border border-white/70 bg-white/65 px-5 py-5 shadow-soft backdrop-blur-xl ipad:max-w-xl ipad:gap-4 ipad:px-6 ipad:py-5 ipad-lg:max-w-2xl ipad-lg:gap-5 ipad-lg:px-7 ipad-lg:py-6"}>
                   {!isStudyFullscreen ? (
                     <div className="space-y-1 ipad:space-y-2">
                       <p className="text-base font-bold text-muted-foreground ipad:text-base ipad-lg:text-lg">错词单独拼写 {mistakePracticeIndex + 1} / {mistakePracticeWords.length}</p>
@@ -3924,13 +3924,13 @@ function StudyContent() {
                   <div className="mb-1 text-center text-sm font-bold text-amber-700 ipad:text-base ipad-lg:text-lg">
                     记住它！还剩 {previewCountdownSeconds} 秒
                   </div>
-                  <div className="h-2 w-full overflow-hidden rounded-full bg-amber-100">
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-amber-100/70">
                     <div className="h-full rounded-full bg-amber-500 transition-all duration-200 ease-linear" style={{ width: `${(previewCountdownSeconds / Math.max(1, previewCountdownTotal)) * 100}%` }} />
                   </div>
                 </div>
               ) : null}
               {childHint ? ( <div className="flex flex-col items-center gap-2"> <p className={isStudyFullscreen ? "text-xl font-bold text-red-600 ipad:text-2xl ipad-lg:text-3xl" : "text-base font-bold text-red-600 ipad:text-base ipad-lg:text-lg"}>{childHint.text}</p> <HintDisplay word={childHint.word} chunks={childHint.chunks} matchedPrefixLength={childHint.matchedPrefixLength} onPlayChunk={(i) => playSyllableAudio(childHint.word, i, currentItem?.syllables, (blob) => { void playAudioBlob(blob); })} onPlayPhonics={(i) => { void playPhonicsAudio(childHint.word, i, currentItem?.grapheme_phoneme_map, currentItem?.syllables, (blob) => { void playAudioBlob(blob); }); }} graphemePhonemeMap={currentItem?.grapheme_phoneme_map} cachedSyllables={currentItem?.syllables} /> </div> ) : feedbackMessage ? <p key={celebrationTrigger} className={`${isStudyFullscreen ? `text-xl font-bold ipad:text-2xl ipad-lg:text-3xl ${feedbackType === "error" ? "text-red-600" : feedbackType === "success" ? "text-emerald-700" : "text-slate-600"}` : `text-base font-bold ipad:text-base ipad-lg:text-lg ${feedbackType === "error" ? "text-red-600" : feedbackType === "success" ? "text-emerald-600" : "text-slate-600"}`} ${celebrationTrigger > 0 ? "celebration-burst" : ""}`}>{feedbackMessage}</p> : null}
-              <div className={isStudyFullscreen ? "mx-auto flex w-full max-w-5xl flex-wrap items-center justify-center gap-4 px-0 py-0 ipad:gap-5 ipad-lg:gap-6" : "mx-auto flex w-full max-w-3xl flex-col items-center gap-4 rounded-lg border border-slate-200 bg-slate-50/90 px-4 py-4 ipad:max-w-3xl ipad:flex-col ipad:justify-center ipad:gap-4 ipad:px-5 ipad-lg:max-w-4xl ipad-lg:flex-row ipad-lg:gap-6 ipad-lg:px-6"}>
+              <div className={isStudyFullscreen ? "mx-auto flex w-full max-w-5xl flex-wrap items-center justify-center gap-4 px-0 py-0 ipad:gap-5 ipad-lg:gap-6" : "mx-auto flex w-full max-w-3xl flex-col items-center gap-4 rounded-2xl border border-white/70 bg-white/60 px-4 py-4 shadow-soft backdrop-blur-xl ipad:max-w-3xl ipad:flex-col ipad:justify-center ipad:gap-4 ipad:px-5 ipad-lg:max-w-4xl ipad-lg:flex-row ipad-lg:gap-6 ipad-lg:px-6"}>
                 <div className="flex flex-wrap justify-center gap-3 ipad:gap-3 ipad-lg:gap-4">
                   {answerState === "mistake-word-practice" ? (
                     <>
@@ -4017,7 +4017,7 @@ function StudyContent() {
 
 export default function StudyPage() {
   return (
-    <Suspense fallback={<main className="flex min-h-screen items-center justify-center bg-white text-sm text-muted-foreground">正在加载学习内容...</main>}>
+    <Suspense fallback={<main className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">正在加载学习内容...</main>}>
       <StudyContent />
     </Suspense>
   );

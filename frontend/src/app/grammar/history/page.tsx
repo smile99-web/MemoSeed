@@ -51,7 +51,7 @@ export default function GrammarHistoryPage() {
       <header className="flex items-center justify-between gap-4">
         <div>
           <p className="text-sm font-semibold uppercase tracking-[0.3em] text-primary">Grammar</p>
-          <h1 className="mt-1 text-2xl font-bold ipad:text-3xl">练习历史</h1>
+          <h1 className="mt-1 text-2xl font-bold ipad:text-3xl"><span className="text-gradient">练习历史</span></h1>
           <p className="mt-1 text-sm text-muted-foreground ipad:text-base">
             看看最近每场练习的准确率和答题时间。
           </p>
