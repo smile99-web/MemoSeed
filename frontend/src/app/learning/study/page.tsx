@@ -3369,6 +3369,18 @@ function StudyContent() {
     return true;
   }, [clearMistakePracticePreview, playChineseThenEnglish, setPendingMistakePractice, translateMistakePracticeWords, updateAnswerState]);
 
+  // Always-fresh dispatcher for the window-level keydown handler: judging must
+  // use the LATEST closures (wordStatuses/activeWordIndex), so the ref is
+  // re-assigned on every render instead of captured once inside useEffect.
+  const judgeActiveWordRef = useRef<() => void>(() => undefined);
+  judgeActiveWordRef.current = () => {
+    if (answerStateRef.current === "mistake-word-practice") {
+      void checkMistakePracticeWord();
+      return;
+    }
+    checkWord(activeWordIndex);
+  };
+
   useEffect(() => {
 	    function handleWindowKeyDown(event: globalThis.KeyboardEvent) {
 	      const isSpace = event.key === " ";
@@ -3424,8 +3436,30 @@ function StudyContent() {
 	        return;
 	      }
 
-	      // Space in typing/mistake-practice: let per-input handlers process it
-	      if (isSpace && (currentState === "typing" || currentState === "mistake-word-practice")) {
+	      // Space/Enter in typing/mistake-practice states:
+	      // - focus inside a study input -> per-input onKeyDown handles it (return)
+	      // - focus on a button/link -> let the native activation happen
+	      // - otherwise (iPad soft keyboard dismissed / focus lost) the key would
+	      //   be silently dropped -- judge at window level instead. This fixes the
+	      //   "space dead, enter dead" dead zone: the input no longer needs focus.
+	      if ((isSpace || isEnter) && !isChoiceTask && (currentState === "typing" || currentState === "mistake-word-practice")) {
+	        const targetEl = event.target as HTMLElement | null;
+	        if (targetEl instanceof HTMLInputElement || targetEl instanceof HTMLTextAreaElement) {
+	          return;
+	        }
+	        if (targetEl?.closest?.("button, a, select, [role='button']")) {
+	          return;
+	        }
+	        event.preventDefault();
+	        if (event.repeat) {
+	          return;
+	        }
+	        const judgeNow = Date.now();
+	        if (judgeNow - spaceCooldownRef.current < 400) {
+	          return;
+	        }
+	        spaceCooldownRef.current = judgeNow;
+	        judgeActiveWordRef.current();
 	        return;
 	      }
 
@@ -3616,7 +3650,7 @@ function StudyContent() {
           </>
         );
       })()}
-      <main className={isStudyFullscreen ? "flex min-h-[100dvh] flex-col overflow-y-auto bg-gradient-to-b from-white/60 via-cyan-50/40 to-violet-50/50 text-slate-950 backdrop-blur-sm" : "flex min-h-[100dvh] flex-col overflow-y-auto text-slate-950"}>
+      <main className={isStudyFullscreen ? "flex min-h-[100dvh] flex-col overflow-y-auto bg-gradient-to-b from-white/90 via-cyan-50/80 to-violet-50/85 text-slate-950" : "flex min-h-[100dvh] flex-col overflow-y-auto text-slate-950"}>
       {celebrationSummary ? <CelebrationModal nextCourse={nextCourse} summary={celebrationSummary} /> : null}
       {focusRotatedMessage ? (
         <div className="fixed left-1/2 top-6 z-40 -translate-x-1/2 animate-bounce rounded-full bg-emerald-500 px-6 py-3 text-base font-bold text-white shadow-lg ipad:px-8 ipad:py-4 ipad:text-lg">

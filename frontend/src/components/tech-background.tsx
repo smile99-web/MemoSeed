@@ -5,8 +5,10 @@ import { useEffect, useRef } from "react";
 /**
  * 全局科技风背景：
  *  - CSS 极光光斑（青/紫/翠）缓慢漂移
- *  - 极细网格线，营造“驾驶舱”科技感
- *  - Canvas 漂浮微粒（上升的光点），轻量 60fps
+ *  - 极细网格线，营造"驾驶舱"科技感
+ *  - Canvas 漂浮微粒（上升的光点）
+ * 性能（iPad 关键）：微粒用预渲染 sprite（drawImage，无逐帧 shadowBlur），
+ * 触屏设备减量，页面隐藏时暂停 rAF。
  */
 export function TechBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -29,12 +31,32 @@ export function TechBackground() {
       speed: number;
       drift: number;
       phase: number;
-      hue: number;
+      sprite: HTMLCanvasElement;
       alpha: number;
     }
 
     const HUES = [187, 160, 262]; // cyan / emerald / violet
     const particles: Particle[] = [];
+
+    // 预渲染光点 sprite：径向渐变一次，之后 drawImage，避免逐帧 shadowBlur。
+    const spriteCache = new Map<number, HTMLCanvasElement>();
+    function getSprite(hue: number): HTMLCanvasElement {
+      const cached = spriteCache.get(hue);
+      if (cached) return cached;
+      const size = 32;
+      const sprite = document.createElement("canvas");
+      sprite.width = size;
+      sprite.height = size;
+      const sctx = sprite.getContext("2d")!;
+      const gradient = sctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+      gradient.addColorStop(0, `hsla(${hue} 90% 50% / 0.9)`);
+      gradient.addColorStop(0.35, `hsla(${hue} 90% 55% / 0.45)`);
+      gradient.addColorStop(1, `hsla(${hue} 90% 55% / 0)`);
+      sctx.fillStyle = gradient;
+      sctx.fillRect(0, 0, size, size);
+      spriteCache.set(hue, sprite);
+      return sprite;
+    }
 
     function resize() {
       width = window.innerWidth;
@@ -47,18 +69,25 @@ export function TechBackground() {
       ctx!.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
 
-    function spawn(count: number) {
+    function particleBudget(): number {
+      const coarse = window.matchMedia("(pointer: coarse)").matches;
+      const cap = coarse ? 28 : 60;
+      return Math.min(cap, Math.floor((width * height) / 32000));
+    }
+
+    function spawn() {
       particles.length = 0;
+      const count = particleBudget();
       for (let i = 0; i < count; i += 1) {
         particles.push({
           x: Math.random() * width,
           y: Math.random() * height,
-          r: 1 + Math.random() * 2.2,
-          speed: 0.12 + Math.random() * 0.3,
+          r: 6 + Math.random() * 14,
+          speed: 0.1 + Math.random() * 0.25,
           drift: 0.15 + Math.random() * 0.35,
           phase: Math.random() * Math.PI * 2,
-          hue: HUES[Math.floor(Math.random() * HUES.length)],
-          alpha: 0.12 + Math.random() * 0.22,
+          sprite: getSprite(HUES[Math.floor(Math.random() * HUES.length)]),
+          alpha: 0.25 + Math.random() * 0.4,
         });
       }
     }
@@ -68,34 +97,46 @@ export function TechBackground() {
       for (const p of particles) {
         p.y -= p.speed;
         p.x += Math.sin(time / 2400 + p.phase) * p.drift * 0.12;
-        if (p.y < -8) {
-          p.y = height + 8;
+        if (p.y < -20) {
+          p.y = height + 20;
           p.x = Math.random() * width;
         }
-        const twinkle = 0.65 + 0.35 * Math.sin(time / 900 + p.phase * 3);
-        ctx!.beginPath();
-        ctx!.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-        ctx!.fillStyle = `hsla(${p.hue} 90% 46% / ${(p.alpha * twinkle).toFixed(3)})`;
-        ctx!.shadowColor = `hsla(${p.hue} 90% 50% / 0.6)`;
-        ctx!.shadowBlur = 6;
-        ctx!.fill();
-        ctx!.shadowBlur = 0;
+        const twinkle = 0.6 + 0.4 * Math.sin(time / 900 + p.phase * 3);
+        ctx!.globalAlpha = p.alpha * twinkle;
+        ctx!.drawImage(p.sprite, p.x - p.r / 2, p.y - p.r / 2, p.r, p.r);
       }
+      ctx!.globalAlpha = 1;
       rafId = requestAnimationFrame(tick);
     }
 
+    function start() {
+      if (!rafId) rafId = requestAnimationFrame(tick);
+    }
+    function stop() {
+      if (rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = 0;
+      }
+    }
+    function onVisibility() {
+      if (document.hidden) stop();
+      else start();
+    }
+
     resize();
-    spawn(Math.min(70, Math.floor((width * height) / 26000)));
-    rafId = requestAnimationFrame(tick);
+    spawn();
+    start();
 
     const onResize = () => {
       resize();
-      spawn(Math.min(70, Math.floor((width * height) / 26000)));
+      spawn();
     };
     window.addEventListener("resize", onResize);
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
-      cancelAnimationFrame(rafId);
+      stop();
       window.removeEventListener("resize", onResize);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 
