@@ -899,6 +899,9 @@ function StudyContent() {
       }
       setPreviewCountdownSeconds(0);
       setPreviewWordIndex(null);
+      // The word goes back to idle for a fresh attempt — release the judged
+      // guard from the error judgment, or the next space/enter is swallowed.
+      wordJudgedRef.current.delete(index);
       setWordStatuses((current) => {
         const nextStatuses = [...current];
         if (nextStatuses[index] === "incorrect") {
@@ -2667,6 +2670,9 @@ function StudyContent() {
       setFeedback(null);
     }
     if (wordStatuses[index] === "incorrect" || wordStatuses[index] === "skipped") {
+      // A fresh attempt is being typed after a wrong judgment — release the
+      // judged guard so the next space/enter actually judges this attempt.
+      wordJudgedRef.current.delete(index);
       setWordStatuses((current) => {
         const nextStatuses = [...current];
         nextStatuses[index] = "idle";
@@ -2880,6 +2886,10 @@ function StudyContent() {
           nextAnswers[index] = "";
           return nextAnswers;
         });
+        // The word returns to idle for the next confirmation round — release
+        // the judged guard, otherwise the next space/enter press is swallowed
+        // (the child gets stuck after the 1st correct re-spell).
+        wordJudgedRef.current.delete(index);
         setWordStatuses((current) => {
           const nextStatuses = [...current];
           nextStatuses[index] = "idle";
@@ -3361,7 +3371,7 @@ function StudyContent() {
     setMistakeMeaningQuizCorrect("");
     clearMistakePracticePreview();
     updateAnswerState("mistake-word-practice");
-    setFeedback("现在进入错词单独拼写（每词需连续正确 3 次后完成中文意思选择）。");
+    setFeedback(`现在进入错词单独拼写（每词需连续正确 ${MISTAKE_PRACTICE_REQUIRED_CONSECUTIVE} 次后完成中文意思选择）。`);
     const firstTranslation = practiceTranslations[words[0]];
     if (firstTranslation) {
       await playChineseThenEnglish(firstTranslation, words[0]);
@@ -3380,6 +3390,15 @@ function StudyContent() {
     }
     checkWord(activeWordIndex);
   };
+
+  // completeCurrentSentence reads per-item state (mistakenWords etc.). The
+  // window keydown handler below is registered only when its deps change, so
+  // its captured closure sees the mistakes state from the LAST dep change —
+  // pressing space/enter during word-meaning-review completed the sentence
+  // WITHOUT queueing the mistake practice (and logged the sentence as fully
+  // correct). Route through an always-fresh ref, same as judgeActiveWordRef.
+  const completeCurrentSentenceRef = useRef(completeCurrentSentence);
+  completeCurrentSentenceRef.current = completeCurrentSentence;
 
   useEffect(() => {
 	    function handleWindowKeyDown(event: globalThis.KeyboardEvent) {
@@ -3425,6 +3444,25 @@ function StudyContent() {
 		        }
 		        return;
 		      }
+
+	      // Space/Enter in the meaning quiz: digits/click confirm an option
+	      // immediately, so there is no pending selection to confirm. Guide the
+	      // child instead of silently swallowing the key (previously dead).
+	      if ((isSpace || isEnter) && currentState === "mistake-meaning-quiz") {
+	        const quizTarget = event.target as HTMLElement | null;
+	        if (quizTarget?.closest?.("button, a, select, [role='button']")) {
+	          return; // let native button activation happen
+	        }
+	        event.preventDefault();
+	        if (!event.repeat) {
+	          const hintNow = Date.now();
+	          if (hintNow - spaceCooldownRef.current >= 400) {
+	            spaceCooldownRef.current = hintNow;
+	            setFeedback("请按数字键 1-6 选择中文意思，或直接点击答案。");
+	          }
+	        }
+	        return;
+	      }
 
 	      // Space: confirm choice selection
 	      if (isSpace && isChoiceTask && currentState === "typing") {
@@ -3488,13 +3526,11 @@ function StudyContent() {
 	          void beginPendingMistakePractice();
 	          return;
 	        }
-	        // Enter key: equivalent to clicking "下一句" button
-	        if (isEnter) {
-	          answerStateRef.current = "typing";
-	          handleNextItem({ completedCurrentItem: true });
-	          return;
-	        }
-	        // Space: do NOT auto-advance — press Enter or click button
+	        // Space/Enter: equivalent to clicking "下一句" button. Safe under
+	        // mashing: event.repeat is blocked above and the 400ms cooldown
+	        // applies; the next item starts with an empty answer.
+	        answerStateRef.current = "typing";
+	        handleNextItem({ completedCurrentItem: true });
 	        return;
 	      }
 
@@ -3506,7 +3542,7 @@ function StudyContent() {
 	          wordMeaningReviewTimeoutRef.current = null;
 	        }
 	        setSentenceWordMeanings({});
-	        void completeCurrentSentence({ fromWordMeaningReview: true });
+	        void completeCurrentSentenceRef.current({ fromWordMeaningReview: true });
 	        return;
 	      }
 	    }
