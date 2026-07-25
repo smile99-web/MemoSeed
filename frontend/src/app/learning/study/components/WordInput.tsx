@@ -17,6 +17,7 @@ interface WordInputProps {
   isRespellTarget: boolean;
   shouldShowInput: boolean;
   isPreview: boolean;
+  isCopyMode: boolean;
   answerState: "typing" | "mistake-word-practice" | "word-meaning-review" | "sentence-complete";
   wordInputSizeClass: string;
   wordDisplaySizeClass: string;
@@ -41,6 +42,7 @@ const WordInput = memo(function WordInput({
   isRespellNonTarget,
   shouldShowInput,
   isPreview,
+  isCopyMode,
   answerState,
   wordInputSizeClass,
   wordDisplaySizeClass,
@@ -119,6 +121,17 @@ const WordInput = memo(function WordInput({
       {isPreview ? (
         <span className="rounded-md bg-amber-100 px-3 py-1 text-3xl font-bold text-amber-950 ipad:text-4xl ipad-lg:text-5xl">
           {word}
+        </span>
+      ) : null}
+
+      {/* Copy-mode: word stays visible so the child copies it once before
+          the hidden recall (guaranteed successful encoding). */}
+      {isCopyMode ? (
+        <span className="flex flex-col items-center gap-1">
+          <span className="rounded-md bg-sky-100 px-3 py-1 text-3xl font-bold tracking-widest text-sky-950 ipad:text-4xl ipad-lg:text-5xl">
+            {word}
+          </span>
+          <span className="text-sm font-bold text-sky-700 ipad:text-base">✏️ 抄一抄</span>
         </span>
       ) : null}
 

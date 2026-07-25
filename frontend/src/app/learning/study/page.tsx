@@ -13,7 +13,18 @@ import { Course, listCoursePackages, listCourses } from "@/lib/courses";
 import { generateDynamicSentence, generateLearningEncouragement, getWordTranslations, LearningItem, listDueReviewItems, listLearningItems, logWordMistake, logWordReview, translateLearningText } from "@/lib/learning";
 import { fetchWithAuth, parseApiError } from "@/lib/api";
 import { getApiBaseUrl } from "@/lib/api-base-url";
-import { recordCourseCompletion, recordStudyTime, rotateFocusWord, scheduleMemoryReview, getReviewAdvice, generateReviewAdvice } from "@/lib/memory";
+import { recordCourseCompletion, recordStudyTime, rotateFocusWord, scheduleMemoryReview, getReviewAdvice, generateReviewAdvice, awardPoints } from "@/lib/memory";
+import {
+  getEchoCountToday,
+  getPhonicsTip,
+  hasNonLatinLetters,
+  incrementEchoCountToday,
+  isLikelyWildGuess,
+  lookupConfusableTip,
+  ECHO_DAILY_POINTS_CAP,
+  ECHO_POINTS_PER_READ,
+} from "@/lib/learn-boost";
+import { initVoiceEcho, isVoiceEchoSupported, listenForVoice, shutdownVoiceEcho } from "@/lib/voice-echo";
 import { ModelSettings, defaultModelSettings, getModelSettings, loadPersistedModelSettings } from "@/lib/model-settings";
 import { playAudioBlob, prefetchCourseAudio, stopAudioPlayback, synthesizeCosyVoiceSpeech, synthesizeKokoroSpeech, synthesizeVolcengineSpeech, TtsSynthesisOptions } from "@/lib/tts";
 
@@ -455,6 +466,17 @@ function StudyContent() {
   const [wordStatuses, setWordStatuses] = useState<WordStatus[]>([]);
   const [wordErrorCounts, setWordErrorCounts] = useState<number[]>([]);
   const [previewWordIndex, setPreviewWordIndex] = useState<number | null>(null);
+  // Copy-mode: after the preview hides, the word stays visible one more step
+  // so the child copies it correctly ONCE before the hidden recall. This
+  // guarantees at least one successful encoding for repeatedly-wrong words
+  // (the parent observed errors repeating because retrieval kept failing).
+  const [copyWordIndex, setCopyWordIndex] = useState<number | null>(null);
+  // Read-aloud ("echo") prompt shown on the sentence-complete screen. Never
+  // blocks advancing — the child can skip it with 下一句/space as usual.
+  const [echoPrompt, setEchoPrompt] = useState<{ text: string; translation: string } | null>(null);
+  const [echoStatus, setEchoStatus] = useState<"idle" | "listening" | "success">("idle");
+  const [echoVolume, setEchoVolume] = useState(0);
+  const [echoCountToday, setEchoCountToday] = useState(0);
   const [previewMistakePracticeWord, setPreviewMistakePracticeWord] = useState(false);
   const [mistakenWords, setMistakenWords] = useState<string[]>([]);
   const [mistakePracticeWords, setMistakePracticeWords] = useState<string[]>([]);
@@ -647,6 +669,16 @@ function StudyContent() {
   const encodingItemIdRef = useRef<string>("");
   const hiddenPreviewTimeoutRef = useRef<number | null>(null);
   const wordMeaningReviewTimeoutRef = useRef<number | null>(null);
+  // Anti-guess gate: after a wild guess is judged, space/enter re-judgment is
+  // blocked briefly so the mash rhythm breaks and the child reads the anchor
+  // (meaning + first letter + chunks) on screen.
+  const thinkGateUntilRef = useRef(0);
+  const copyErrorsRef = useRef(0);
+  // Echo (read-aloud) bookkeeping. echoItemIdRef prevents re-showing the
+  // prompt for the same item; echoListenGenerationRef invalidates a stale
+  // listen window when the child advances mid-echo.
+  const echoItemIdRef = useRef("");
+  const echoListenGenerationRef = useRef(0);
 
   const [encodingStage, setEncodingStage] = useState<EncodingStage | null>(null);
   const [encodingWord, setEncodingWord] = useState("");
@@ -911,7 +943,12 @@ function StudyContent() {
         }
         return nextStatuses;
       });
-      setFeedback(chineseMeaning ? `现在请凭记忆重新拼写这个单词。中文意思：${chineseMeaning}` : "现在请凭记忆重新拼写这个单词。");
+      // Copy step between preview and recall: the word stays visible so the
+      // child copies it once (guaranteed successful encoding) BEFORE the
+      // hidden recall — repeatedly-wrong words kept failing at retrieval.
+      setCopyWordIndex(index);
+      copyErrorsRef.current = 0;
+      setFeedback(chineseMeaning ? `先看着抄一遍这个单词。中文意思：${chineseMeaning}` : "先看着抄一遍这个单词。");
       window.setTimeout(() => inputRefs.current[index]?.focus(), 0);
     }, WORD_PREVIEW_MS);
   }, [clearWordPreview]);
@@ -1741,6 +1778,13 @@ function StudyContent() {
     clearWordMeaningReview();
     clearWordPreview();
     clearMistakePracticePreview();
+    setCopyWordIndex(null);
+    copyErrorsRef.current = 0;
+    thinkGateUntilRef.current = 0;
+    setEchoPrompt(null);
+    setEchoStatus("idle");
+    setEchoVolume(0);
+    echoListenGenerationRef.current += 1;
     setMistakenWords([]);
     setMistakePracticeWords([]);
     setMistakePracticeIndex(0);
@@ -2137,6 +2181,13 @@ function StudyContent() {
     clearWordMeaningReview();
     clearWordPreview();
     clearMistakePracticePreview();
+    setCopyWordIndex(null);
+    copyErrorsRef.current = 0;
+    thinkGateUntilRef.current = 0;
+    setEchoPrompt(null);
+    setEchoStatus("idle");
+    setEchoVolume(0);
+    echoListenGenerationRef.current += 1;
     setMistakenWords([]);
     setMistakePracticeWords([]);
     setMistakePracticeIndex(0);
@@ -2611,11 +2662,17 @@ function StudyContent() {
     // Transition to sentence-complete IMMEDIATELY so the child can advance
     // right away; review logging, dynamic-sentence generation and completion
     // audio all continue in the background block below.
+    let echoStarted = false;
     if (uniqueMistakenWords.length > 0) {
       if (respellWordIndexesRef.current.length > 0) {
         respellWordIndexesRef.current = [];
         updateAnswerState("sentence-complete");
         setFeedback("错词重拼完成。点击「下一句」按钮继续。", "success");
+        startEchoPrompt(
+          isFocusedWordReview && currentFocusedReviewWord ? currentFocusedReviewWord : currentItem.english_text,
+          isFocusedWordReview ? reviewTaskWordTranslation : currentItem.chinese_text,
+        );
+        echoStarted = echoItemIdRef.current === completingItemId;
       } else {
         setPendingMistakePractice(uniqueMistakenWords, {});
         updateAnswerState("sentence-complete");
@@ -2631,14 +2688,20 @@ function StudyContent() {
       }
       updateAnswerState("sentence-complete");
       setFeedback(wasRespellRound ? "错词重拼完全正确。点击「下一句」按钮继续。" : "整句拼写正确。点击「下一句」按钮继续。", "success");
+      startEchoPrompt(
+        isFocusedWordReview && currentFocusedReviewWord ? currentFocusedReviewWord : currentItem.english_text,
+        isFocusedWordReview ? reviewTaskWordTranslation : currentItem.chinese_text,
+      );
+      echoStarted = echoItemIdRef.current === completingItemId;
     }
     isCompletingSentenceRef.current = false;
 
     // Background: completion audio (the child's instant confirmation — never
     // make it wait for the network), review logging, dynamic-sentence
-    // generation. None of these may block the advance.
+    // generation. None of these may block the advance. When the echo prompt
+    // is up it supplies the audio instead — don't double-play.
     void (async () => {
-      const audioPromise = playCurrentReviewCompletionAudio().catch(() => undefined);
+      const audioPromise = echoStarted ? Promise.resolve() : playCurrentReviewCompletionAudio().catch(() => undefined);
       try {
         await finalizeCurrentSentenceReview();
         if (deferredWords.length > 0 && !isStaleCompletion()) {
@@ -2661,6 +2724,113 @@ function StudyContent() {
     }
     await playChineseThenEnglish(currentItem.chinese_text, currentItem.english_text);
   }
+
+  // ---------------------------------------------------------------------
+  // Read-aloud ("echo") prompt — the parent observed the child answers
+  // silently and asked for design that gets him to OPEN HIS MOUTH. Shown on
+  // the celebration screen; never blocks advancing (skippable with 下一句/
+  // space). Accuracy is NOT judged — opening the mouth is the goal.
+  // ---------------------------------------------------------------------
+  function startEchoPrompt(text: string, translation: string) {
+    const cleanText = text.trim();
+    if (!cleanText || !currentItem) {
+      return;
+    }
+    if (echoItemIdRef.current === currentItem.id) {
+      return; // once per item
+    }
+    echoItemIdRef.current = currentItem.id;
+    echoListenGenerationRef.current += 1;
+    setEchoVolume(0);
+    setEchoStatus("idle");
+    setEchoPrompt({ text: cleanText, translation });
+  }
+
+  function completeEcho(source: "voice" | "manual") {
+    const echo = echoPrompt;
+    if (!echo || echoStatus === "success") {
+      return;
+    }
+    echoListenGenerationRef.current += 1; // cancel any listen window
+    setEchoStatus("success");
+    setEchoVolume(0);
+    const nextCount = incrementEchoCountToday();
+    setEchoCountToday(nextCount);
+    const earnsPoints = (nextCount - 1) * ECHO_POINTS_PER_READ < ECHO_DAILY_POINTS_CAP;
+    if (earnsPoints) {
+      const token = getAccessToken();
+      if (token) {
+        void awardPoints(token, ECHO_POINTS_PER_READ, "read-aloud", echo.text.slice(0, 80)).catch(() => undefined);
+      }
+    }
+    if (nextCount > 0 && nextCount % 10 === 0) {
+      playLevelUpSound();
+    } else {
+      playCorrectDing();
+    }
+    setFeedback(
+      source === "voice"
+        ? `听到了！声音真响亮！🌟 开口跟读 ${earnsPoints ? "+2 分" : "完成"}（今天第 ${nextCount} 次）`
+        : `跟读完成，真棒！${earnsPoints ? "+2 分 " : ""}（今天第 ${nextCount} 次）`,
+      "success",
+    );
+    window.setTimeout(() => {
+      setEchoPrompt((current) => (current === echo ? null : current));
+      setEchoStatus("idle");
+    }, 1500);
+  }
+
+  // Echo side-effects: play the model English TTS, then (when the device
+  // supports it — secure context + mic permission) open a listening window
+  // that auto-completes the echo on voice-level sound.
+  useEffect(() => {
+    if (!echoPrompt) {
+      return;
+    }
+    const generation = echoListenGenerationRef.current;
+    const settings = modelSettingsRef.current;
+    const sequenceId = startVoiceSequence();
+    void speakClearEnglish(sequenceId, echoPrompt.text, settings, true);
+    let cancelled = false;
+    if (isVoiceEchoSupported()) {
+      void (async () => {
+        const micReady = await initVoiceEcho();
+        if (!micReady || cancelled || echoListenGenerationRef.current !== generation) {
+          return;
+        }
+        setEchoStatus("listening");
+        const detected = await listenForVoice(7000, (level) => {
+          if (!cancelled && echoListenGenerationRef.current === generation) {
+            setEchoVolume(level);
+          }
+        });
+        if (cancelled || echoListenGenerationRef.current !== generation) {
+          return;
+        }
+        if (detected) {
+          completeEcho("voice");
+        } else {
+          setEchoStatus("idle");
+          setEchoVolume(0);
+        }
+      })();
+    }
+    return () => {
+      cancelled = true;
+    };
+    // completeEcho/startVoiceSequence/speakClearEnglish are stable enough for
+    // this one-shot-per-prompt effect; echoPrompt is the real trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [echoPrompt]);
+
+  // Initialize the daily echo counter on mount (localStorage is client-only).
+  useEffect(() => {
+    setEchoCountToday(getEchoCountToday());
+  }, []);
+
+  // Release the microphone when leaving the study page.
+  useEffect(() => () => shutdownVoiceEcho(), []);
+
 
   function updateWordAnswer(index: number, value: string) {
     setChildHint(null);
@@ -2734,9 +2904,49 @@ function StudyContent() {
     if (currentItemIdRef.current !== itemIdAtError) {
       return;
     }
-    const hintText = translatedWord ? `${hint.text} 中文意思：${translatedWord}` : hint.text;
+    const phonicsTip = getPhonicsTip(expectedWord);
+    const hintText = `${translatedWord ? `${hint.text} 中文意思：${translatedWord}` : hint.text}${phonicsTip ? ` 小秘诀：${phonicsTip}` : ""}`;
     setChildHint({ ...hint, text: hintText });
     setFeedback(hintText, "error");
+    if (translatedWord) {
+      await playChineseThenEnglish(translatedWord, expectedWord);
+    }
+    window.setTimeout(() => inputRefs.current[index]?.focus(), 0);
+  }
+
+  /** Anchored feedback for confusable answers (typed another learned word)
+   *  and wild guesses: meaning + chunks + optional phonics rule + audio,
+   *  then a short re-judgment gate to break the mash rhythm. */
+  async function handleAnchoredMistake(index: number, expectedWord: string, typedWord: string, confusableTip: string | null) {
+    const cachedSyllables = currentItem?.syllables;
+    const chunks = splitIntoSyllables(expectedWord, cachedSyllables);
+    const itemIdAtError = currentItemIdRef.current;
+    const translatedWord = await translateWordForHint(expectedWord);
+    if (currentItemIdRef.current !== itemIdAtError) {
+      return;
+    }
+    const phonicsTip = getPhonicsTip(expectedWord);
+    let hintText: string;
+    if (confusableTip) {
+      hintText = `你打成了另一个词！${confusableTip} 再听一遍 ${expectedWord}。`;
+    } else if (hasNonLatinLetters(typedWord)) {
+      hintText = `这是英文拼写题，要用英文字母哦！${translatedWord ? `先想意思「${translatedWord}」，再` : ""}一个字母一个字母拼：${chunks.join(" — ")}`;
+    } else {
+      hintText = `🤔 先想一想，不要急。${translatedWord ? `这个词是「${translatedWord}」，` : ""}首字母是 ${normalizeEnglishKey(expectedWord).charAt(0)}，分 ${chunks.length} 小段：${chunks.join(" — ")}`;
+    }
+    if (phonicsTip) {
+      hintText += ` 小秘诀：${phonicsTip}`;
+    }
+    setChildHint({ text: hintText, word: expectedWord, chunks, matchedPrefixLength: 0 });
+    setFeedback(hintText, "error");
+    // Break the mash rhythm: block re-judgment briefly so the child reads
+    // the anchor before hammering space/enter again.
+    thinkGateUntilRef.current = Date.now() + 1600;
+    setWordAnswers((current) => {
+      const nextAnswers = [...current];
+      nextAnswers[index] = "";
+      return nextAnswers;
+    });
     if (translatedWord) {
       await playChineseThenEnglish(translatedWord, expectedWord);
     }
@@ -2774,6 +2984,11 @@ function StudyContent() {
       window.setTimeout(() => inputRefs.current[firstBlankIndex]?.focus(), 0);
       return;
     }
+    // Anti-guess gate: a wild guess was just judged and the anchor hint is on
+    // screen. Swallow premature re-judgment so the mash rhythm breaks.
+    if (Date.now() < thinkGateUntilRef.current) {
+      return;
+    }
 
     const expectedWord = currentWords[index];
     if (!expectedWord) {
@@ -2785,6 +3000,45 @@ function StudyContent() {
     const typedValue = normalizeTypedWord(currentRawAnswer);
     if (!typedValue) {
       window.setTimeout(() => inputRefs.current[index]?.focus(), 0);
+      return;
+    }
+
+    // Copy-mode judgment: the word is visible above the input — the child is
+    // copying, not recalling. A correct copy is NOT logged as a review
+    // success (it is scaffolding, not retrieval); it only unlocks the hidden
+    // recall that follows.
+    if (copyWordIndex === index) {
+      if (typedValue === normalizeTypedWord(expectedWord)) {
+        playCorrectDing();
+        setCopyWordIndex(null);
+        copyErrorsRef.current = 0;
+        setWordAnswers((current) => {
+          const nextAnswers = [...current];
+          nextAnswers[index] = "";
+          return nextAnswers;
+        });
+        setFeedback("抄对了！现在不看它，凭记忆再拼一遍 💪", "success");
+        window.setTimeout(() => inputRefs.current[index]?.focus(), 0);
+      } else {
+        playIncorrectTap();
+        copyErrorsRef.current += 1;
+        setWordAnswers((current) => {
+          const nextAnswers = [...current];
+          nextAnswers[index] = "";
+          return nextAnswers;
+        });
+        if (copyErrorsRef.current >= 2) {
+          // Copying failed twice — show the full preview again.
+          setCopyWordIndex(null);
+          copyErrorsRef.current = 0;
+          void translateWordForHint(expectedWord).then((translatedWord) => {
+            showWordPreview(index, expectedWord, translatedWord ?? "");
+          });
+        } else {
+          setFeedback("还没抄对，对照上面的单词一个字母一个字母来。");
+        }
+        window.setTimeout(() => inputRefs.current[index]?.focus(), 0);
+      }
       return;
     }
 
@@ -2843,6 +3097,17 @@ function StudyContent() {
           }
           showWordPreview(index, expectedWord, translatedWord);
         });
+        return;
+      }
+      // Anchored feedback for the two patterns that dominate the error logs:
+      //  (a) the typed answer IS another learned word (are->is, want->what,
+      //      quiet->quite, ...) — show a contrast tip (form or GRAMMAR);
+      //  (b) a wild guess (keyboard mash / Chinese characters / way off) —
+      //      re-anchor with meaning + first letter + chunks and gate the
+      //      next judgment briefly so the mash rhythm breaks.
+      const confusableTip = lookupConfusableTip(expectedWord, actualWord);
+      if (confusableTip || isLikelyWildGuess(expectedWord, actualWord)) {
+        void handleAnchoredMistake(index, expectedWord, actualWord, confusableTip);
         return;
       }
       if (getFirstLetter(typedValue) !== getFirstLetter(expectedWord)) {
@@ -2919,6 +3184,7 @@ function StudyContent() {
       if (currentItem?.item_type === "word" && currentWords.length === 1) {
         updateAnswerState("sentence-complete");
         setFeedback("拼写完成！点击「下一句」继续。", "success");
+        startEchoPrompt(expectedWord, hasChineseText(currentItem.chinese_text) ? currentItem.chinese_text : "");
         return;
       }
     }
@@ -2949,6 +3215,7 @@ function StudyContent() {
     if (currentItem?.item_type === "word" && currentWords.length === 1 && prevErrorCount === 0) {
       updateAnswerState("sentence-complete");
       setFeedback("拼写正确！点击「下一句」继续。", "success");
+      startEchoPrompt(expectedWord, hasChineseText(currentItem.chinese_text) ? currentItem.chinese_text : "");
       return;
     }
 
@@ -3082,8 +3349,13 @@ function StudyContent() {
       }
 
       const practiceHint = buildChildFriendlyHint(expectedWord, errorType, getMatchedPrefixLength(expectedWord, normalizedAnswer), currentItem?.syllables);
-      setChildHint(practiceHint);
-      setFeedback(`${practiceHint.text} 已连续错误 ${nextErrorCount} 次。`, "error");
+      // Practice words are the WEAKEST ones — attach the contrast tip when the
+      // child typed another learned word, and the phonics rule when known.
+      const practiceConfusable = lookupConfusableTip(expectedWord, normalizedAnswer);
+      const practicePhonics = getPhonicsTip(expectedWord);
+      const practiceText = `${practiceConfusable ? `你打成了另一个词！${practiceConfusable}` : practiceHint.text}${practicePhonics ? ` 小秘诀：${practicePhonics}` : ""}`;
+      setChildHint({ ...practiceHint, text: practiceText });
+      setFeedback(`${practiceText} 已连续错误 ${nextErrorCount} 次。`, "error");
       return;
     }
 
@@ -3336,6 +3608,7 @@ function StudyContent() {
     setChoiceResult(null);
     updateAnswerState("sentence-complete");
     setFeedback("选择正确！请点击「下一句」按钮继续。", "success");
+    startEchoPrompt(word, correctMeaning);
   }, [currentItem, currentWords, getSourceLearningItemId, isChoiceReviewTask, playEnglishThenChinese, reviewTaskWordTranslation, updateAnswerState]);
 
   function handleMistakePracticeKeyDown(event: KeyboardEvent<HTMLInputElement>) {
@@ -3983,6 +4256,7 @@ function StudyContent() {
                         isRespellTarget={isRespellTarget}
                         shouldShowInput={shouldShowInput}
                         isPreview={previewWordIndex === index}
+                        isCopyMode={copyWordIndex === index}
                         answerState={answerState}
                         wordInputSizeClass={wordInputSizeClass}
                         wordDisplaySizeClass={wordDisplaySizeClass}
@@ -4013,6 +4287,48 @@ function StudyContent() {
                 </div>
               ) : null}
               {childHint ? ( <div className="flex flex-col items-center gap-2"> <p className={isStudyFullscreen ? "text-xl font-bold text-red-600 ipad:text-2xl ipad-lg:text-3xl" : "text-base font-bold text-red-600 ipad:text-base ipad-lg:text-lg"}>{childHint.text}</p> <HintDisplay word={childHint.word} chunks={childHint.chunks} matchedPrefixLength={childHint.matchedPrefixLength} onPlayChunk={(i) => playSyllableAudio(childHint.word, i, currentItem?.syllables, (blob) => { void playAudioBlob(blob); })} onPlayPhonics={(i) => { void playPhonicsAudio(childHint.word, i, currentItem?.grapheme_phoneme_map, currentItem?.syllables, (blob) => { void playAudioBlob(blob); }); }} graphemePhonemeMap={currentItem?.grapheme_phoneme_map} cachedSyllables={currentItem?.syllables} /> </div> ) : feedbackMessage ? <p key={celebrationTrigger} className={`${isStudyFullscreen ? `text-xl font-bold ipad:text-2xl ipad-lg:text-3xl ${feedbackType === "error" ? "text-red-600" : feedbackType === "success" ? "text-emerald-700" : "text-slate-600"}` : `text-base font-bold ipad:text-base ipad-lg:text-lg ${feedbackType === "error" ? "text-red-600" : feedbackType === "success" ? "text-emerald-600" : "text-slate-600"}`} ${celebrationTrigger > 0 ? "celebration-burst" : ""}`}>{feedbackMessage}</p> : null}
+              {answerState === "sentence-complete" && echoPrompt ? (
+                <div className="mx-auto flex w-full max-w-2xl flex-col items-center gap-2 rounded-2xl border-2 border-emerald-300 bg-emerald-50/90 px-5 py-3 shadow-soft">
+                  <p className="text-lg font-bold text-emerald-800">
+                    🎤 轮到你了！大声读出来
+                    {echoCountToday * ECHO_POINTS_PER_READ < ECHO_DAILY_POINTS_CAP ? <span className="ml-2 rounded-full bg-emerald-600 px-2 py-0.5 text-sm font-bold text-white">+{ECHO_POINTS_PER_READ} 分</span> : null}
+                  </p>
+                  <p className="max-w-full break-words text-center text-2xl font-bold text-slate-900 ipad:text-3xl">{echoPrompt.text}</p>
+                  {echoPrompt.translation ? <p className="text-sm font-medium text-slate-500">{echoPrompt.translation}</p> : null}
+                  <div className="flex flex-wrap items-center justify-center gap-3">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className={actionButtonClass}
+                      onMouseDown={keepStudyInputFocus}
+                      onClick={() => {
+                        // Replay the model TTS (also restarts the listen window).
+                        echoListenGenerationRef.current += 1;
+                        setEchoStatus("idle");
+                        setEchoVolume(0);
+                        setEchoPrompt({ ...echoPrompt });
+                      }}
+                    >
+                      🔊 再听一遍
+                    </Button>
+                    <Button
+                      type="button"
+                      className={actionButtonClass}
+                      onMouseDown={keepStudyInputFocus}
+                      disabled={echoStatus === "success"}
+                      onClick={() => completeEcho("manual")}
+                    >
+                      {echoStatus === "success" ? "🌟 真棒！" : echoStatus === "listening" ? "🎧 正在听…读出来！" : "🎤 我读完了！"}
+                    </Button>
+                  </div>
+                  {echoStatus === "listening" ? (
+                    <div className="h-2 w-56 overflow-hidden rounded-full bg-emerald-100">
+                      <div className="h-full rounded-full bg-emerald-500 transition-all duration-100" style={{ width: `${Math.round(echoVolume * 100)}%` }} />
+                    </div>
+                  ) : null}
+                  <p className="text-xs font-bold text-emerald-700">今天已开口 {echoCountToday} 次</p>
+                </div>
+              ) : null}
               <div className={isStudyFullscreen ? "mx-auto flex w-full max-w-5xl flex-wrap items-center justify-center gap-4 px-0 py-0 ipad:gap-5 ipad-lg:gap-6" : "mx-auto flex w-full max-w-3xl flex-col items-center gap-4 rounded-2xl border border-white/70 bg-white/60 px-4 py-4 shadow-soft backdrop-blur-xl ipad:max-w-3xl ipad:flex-col ipad:justify-center ipad:gap-4 ipad:px-5 ipad-lg:max-w-4xl ipad-lg:flex-row ipad-lg:gap-6 ipad-lg:px-6"}>
                 <div className="flex flex-wrap justify-center gap-3 ipad:gap-3 ipad-lg:gap-4">
                   {answerState === "mistake-word-practice" ? (
