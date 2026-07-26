@@ -42,6 +42,7 @@ from app.schemas.learning import (
     LearningItemRead,
     LearningTranslationRequest,
     LearningTranslationResponse,
+    PronunciationCheckResponse,
     WordMistakeLogRequest,
     WordMistakeLogResponse,
     WordReviewRequest,
@@ -70,6 +71,7 @@ from app.services.memory_scheduler import (
     stuck_word_daily_cap_filter_clause,
     stuck_word_filter_clause,
 )
+from app.services.pronunciation import recognize_speech_flash, score_pronunciation
 from app.services.secure_model_settings import get_private_model_settings
 from app.services.speech_asset_cache import build_learning_speech_targets, ensure_volcengine_speech_asset, precache_learning_speech_assets
 from app.services.tts_cache import build_cache_key, get_cached_audio
@@ -91,6 +93,8 @@ logger = logging.getLogger(__name__)
 
 WORD_MEMORY_SOURCE = "word-memory"
 MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024  # 10 MB upload cap for imports
+MAX_PRONUNCIATION_AUDIO_BYTES = 2 * 1024 * 1024  # ~10 s of 16 kHz mono WAV
+MAX_PRONUNCIATION_TEXT_CHARS = 200
 GENERIC_WORD_DISTRACTORS = [
     "老师",
     "学生",
@@ -2102,6 +2106,51 @@ def generate_learning_encouragement(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="LLM encouragement response is incomplete")
 
     return LearningEncouragementResponse(chinese_text=chinese_text, english_text=english_text)
+
+
+@router.post("/pronunciation-check", response_model=PronunciationCheckResponse)
+async def check_pronunciation(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    expected_text: Annotated[str, Form()],
+    file: Annotated[UploadFile, File()],
+) -> PronunciationCheckResponse:
+    """Transcribe the child's read-aloud clip and leniently score it.
+
+    The frontend records right after the echo prompt's model TTS finishes,
+    converts to 16 kHz mono WAV, and uploads here. `heard_speech=false`
+    means silence/noise — the child gets re-prompted without it counting
+    as a failed attempt.
+    """
+    expected = expected_text.strip()
+    if not expected:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="expected_text is required")
+    if len(expected) > MAX_PRONUNCIATION_TEXT_CHARS:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="expected_text is too long")
+
+    audio = await file.read(MAX_PRONUNCIATION_AUDIO_BYTES + 1)
+    if not audio:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audio file is empty")
+    if len(audio) > MAX_PRONUNCIATION_AUDIO_BYTES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="audio file is too large")
+
+    stored_settings = get_private_model_settings(db, current_user.id)
+    api_key = string_setting(stored_settings, "volcengineTtsApiKey") or app_settings.volcengine_tts_api_key
+    if not api_key:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="speech recognition is not configured")
+
+    try:
+        transcript = await run_in_threadpool(recognize_speech_flash, audio, api_key=api_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    result = score_pronunciation(expected, transcript)
+    return PronunciationCheckResponse(
+        transcript=transcript,
+        score=round(result.score, 3),
+        passed=result.passed,
+        heard_speech=result.heard_speech,
+    )
 
 
 @router.post("/word-mistakes", response_model=WordMistakeLogResponse, status_code=status.HTTP_201_CREATED)

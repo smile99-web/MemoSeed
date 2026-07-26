@@ -203,3 +203,10 @@ class LearningEncouragementRequest(BaseModel):
 class LearningEncouragementResponse(BaseModel):
     chinese_text: str
     english_text: str
+
+
+class PronunciationCheckResponse(BaseModel):
+    transcript: str
+    score: float
+    passed: bool
+    heard_speech: bool

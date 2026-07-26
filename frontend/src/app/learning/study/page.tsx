@@ -24,7 +24,7 @@ import {
   ECHO_DAILY_POINTS_CAP,
   ECHO_POINTS_PER_READ,
 } from "@/lib/learn-boost";
-import { initVoiceEcho, isVoiceEchoSupported, listenForVoice, shutdownVoiceEcho } from "@/lib/voice-echo";
+import { cancelActiveRecording, initVoiceEcho, isPronunciationCheckSupported, isVoiceEchoSupported, listenForVoice, recordAndRecognize, shutdownVoiceEcho } from "@/lib/voice-echo";
 import { ModelSettings, defaultModelSettings, getModelSettings, loadPersistedModelSettings } from "@/lib/model-settings";
 import { playAudioBlob, prefetchCourseAudio, stopAudioPlayback, synthesizeCosyVoiceSpeech, synthesizeKokoroSpeech, synthesizeVolcengineSpeech, TtsSynthesisOptions } from "@/lib/tts";
 
@@ -471,10 +471,15 @@ function StudyContent() {
   // guarantees at least one successful encoding for repeatedly-wrong words
   // (the parent observed errors repeating because retrieval kept failing).
   const [copyWordIndex, setCopyWordIndex] = useState<number | null>(null);
-  // Read-aloud ("echo") prompt shown on the sentence-complete screen. Never
-  // blocks advancing — the child can skip it with 下一句/space as usual.
+  // Read-aloud ("echo") prompt shown on the sentence-complete screen. While
+  // it is up AND the pronunciation check is healthy, reading the text aloud
+  // correctly is the ONLY way forward (Enter/Space/下一句/跳过 are blocked);
+  // 5 failed attempts auto-advance anyway so the child is never trapped.
   const [echoPrompt, setEchoPrompt] = useState<{ text: string; translation: string } | null>(null);
-  const [echoStatus, setEchoStatus] = useState<"idle" | "listening" | "success">("idle");
+  const [echoStatus, setEchoStatus] = useState<"idle" | "listening" | "checking" | "success" | "retry" | "giveup">("idle");
+  // Degraded mode: mic denied / ASR repeatedly failing / too much silence —
+  // fall back to the pre-ASR behavior (manual 我读完了 button, no gate).
+  const [echoManualMode, setEchoManualMode] = useState(false);
   const [echoVolume, setEchoVolume] = useState(0);
   const [echoCountToday, setEchoCountToday] = useState(0);
   const [previewMistakePracticeWord, setPreviewMistakePracticeWord] = useState(false);
@@ -679,6 +684,19 @@ function StudyContent() {
   // listen window when the child advances mid-echo.
   const echoItemIdRef = useRef("");
   const echoListenGenerationRef = useRef(0);
+  // Pronunciation-gate bookkeeping: failed-attempt counter (auto-advance at
+  // MAX), session-level ASR health (consecutive errors / no-speech streak
+  // trip the degraded manual fallback), and mirrors of echo state for the
+  // window-level keyboard handler (which must read refs, not state).
+  const echoAttemptsRef = useRef(0);
+  const echoAsrErrorsRef = useRef(0);
+  const echoNoSpeechRef = useRef(0);
+  const echoManualModeRef = useRef(false);
+  const echoGateActiveRef = useRef(false);
+  const echoPromptRef = useRef<{ text: string; translation: string } | null>(null);
+  const ECHO_MAX_ATTEMPTS = 5;
+  const ECHO_MAX_CONSECUTIVE_ASR_ERRORS = 2;
+  const ECHO_MAX_CONSECUTIVE_NO_SPEECH = 3;
 
   const [encodingStage, setEncodingStage] = useState<EncodingStage | null>(null);
   const [encodingWord, setEncodingWord] = useState("");
@@ -1785,6 +1803,7 @@ function StudyContent() {
     setEchoStatus("idle");
     setEchoVolume(0);
     echoListenGenerationRef.current += 1;
+    cancelActiveRecording();
     setMistakenWords([]);
     setMistakePracticeWords([]);
     setMistakePracticeIndex(0);
@@ -2188,6 +2207,7 @@ function StudyContent() {
     setEchoStatus("idle");
     setEchoVolume(0);
     echoListenGenerationRef.current += 1;
+    cancelActiveRecording();
     setMistakenWords([]);
     setMistakePracticeWords([]);
     setMistakePracticeIndex(0);
@@ -2726,10 +2746,15 @@ function StudyContent() {
   }
 
   // ---------------------------------------------------------------------
-  // Read-aloud ("echo") prompt — the parent observed the child answers
-  // silently and asked for design that gets him to OPEN HIS MOUTH. Shown on
-  // the celebration screen; never blocks advancing (skippable with 下一句/
-  // space). Accuracy is NOT judged — opening the mouth is the goal.
+  // Read-aloud ("echo") prompt with REAL pronunciation checking (parent's
+  // requirement): while the echo card is up and the ASR pipeline is healthy,
+  // reading the text aloud correctly is the only way to advance — Enter,
+  // Space, 下一句 and 跳过 are blocked. Lenient scoring (roughly-correct
+  // passes) protects confidence; nonsense reading must be re-read; 5 failed
+  // attempts auto-advance so the child is never trapped. When the mic/ASR is
+  // unavailable (denied permission, repeated ASR errors, constant silence)
+  // the card degrades to the old manual mode (button + loudness detection,
+  // no gate).
   // ---------------------------------------------------------------------
   function startEchoPrompt(text: string, translation: string) {
     const cleanText = text.trim();
@@ -2741,9 +2766,47 @@ function StudyContent() {
     }
     echoItemIdRef.current = currentItem.id;
     echoListenGenerationRef.current += 1;
+    echoAttemptsRef.current = 0;
+    echoNoSpeechRef.current = 0;
     setEchoVolume(0);
     setEchoStatus("idle");
     setEchoPrompt({ text: cleanText, translation });
+  }
+
+  // Switch to degraded (manual) echo mode for the rest of the session:
+  // manual 我读完了 button + loudness auto-detect, and no advancing gate.
+  function enterEchoManualMode(hint?: string) {
+    if (echoManualModeRef.current) {
+      return;
+    }
+    echoManualModeRef.current = true;
+    setEchoManualMode(true);
+    if (hint) {
+      setFeedback(hint);
+    }
+  }
+
+  // Advance past the sentence-complete screen because of the echo (pass or
+  // 5-attempt giveup). Mirrors the 下一句 button logic. Guards against the
+  // prompt having been replaced/dismissed while the success timer ran.
+  function advanceFromEcho(echo: { text: string; translation: string }) {
+    if (echoPromptRef.current !== echo) {
+      return;
+    }
+    if (answerStateRef.current !== "sentence-complete") {
+      return;
+    }
+    echoListenGenerationRef.current += 1;
+    cancelActiveRecording();
+    setEchoPrompt(null);
+    setEchoStatus("idle");
+    setEchoVolume(0);
+    if (pendingMistakePracticeWordsRef.current.length > 0) {
+      void beginPendingMistakePractice();
+      return;
+    }
+    answerStateRef.current = "typing";
+    handleNextItem({ completedCurrentItem: true });
   }
 
   function completeEcho(source: "voice" | "manual") {
@@ -2752,6 +2815,7 @@ function StudyContent() {
       return;
     }
     echoListenGenerationRef.current += 1; // cancel any listen window
+    cancelActiveRecording();
     setEchoStatus("success");
     setEchoVolume(0);
     const nextCount = incrementEchoCountToday();
@@ -2774,49 +2838,188 @@ function StudyContent() {
         : `跟读完成，真棒！${earnsPoints ? "+2 分 " : ""}（今天第 ${nextCount} 次）`,
       "success",
     );
-    window.setTimeout(() => {
-      setEchoPrompt((current) => (current === echo ? null : current));
-      setEchoStatus("idle");
-    }, 1500);
+    if (source === "voice" && !echoManualModeRef.current) {
+      // Pronunciation passed — reading correctly IS the confirmation, so
+      // advance automatically (no Enter/button needed or allowed).
+      window.setTimeout(() => advanceFromEcho(echo), 1200);
+    } else {
+      window.setTimeout(() => {
+        setEchoPrompt((current) => (current === echo ? null : current));
+        setEchoStatus("idle");
+      }, 1500);
+    }
   }
 
-  // Echo side-effects: play the model English TTS, then (when the device
-  // supports it — secure context + mic permission) open a listening window
-  // that auto-completes the echo on voice-level sound.
+  // Keep a ref mirror of the echo prompt + gate state for the window-level
+  // keyboard handler (it deliberately reads refs to avoid stale closures).
+  useEffect(() => {
+    echoPromptRef.current = echoPrompt;
+  }, [echoPrompt]);
+  useEffect(() => {
+    echoManualModeRef.current = echoManualMode;
+  }, [echoManualMode]);
+  useEffect(() => {
+    echoGateActiveRef.current = echoPrompt !== null && !echoManualMode;
+  }, [echoPrompt, echoManualMode]);
+
+  // Echo side-effects: play the model English TTS, then record the child and
+  // score the pronunciation. Replays (再听一遍 / retry) retrigger this effect
+  // by replacing the prompt object.
   useEffect(() => {
     if (!echoPrompt) {
       return;
     }
     const generation = echoListenGenerationRef.current;
+    const isCurrent = () => !cancelled && echoListenGenerationRef.current === generation;
     const settings = modelSettingsRef.current;
     const sequenceId = startVoiceSequence();
-    void speakClearEnglish(sequenceId, echoPrompt.text, settings, true);
     let cancelled = false;
-    if (isVoiceEchoSupported()) {
-      void (async () => {
-        const micReady = await initVoiceEcho();
-        if (!micReady || cancelled || echoListenGenerationRef.current !== generation) {
-          return;
-        }
-        setEchoStatus("listening");
-        const detected = await listenForVoice(7000, (level) => {
-          if (!cancelled && echoListenGenerationRef.current === generation) {
+
+    const isManual = echoManualModeRef.current || !isPronunciationCheckSupported();
+    if (isManual) {
+      // Degraded path: pre-ASR behavior — loudness detection auto-completes,
+      // manual button stays available.
+      void speakClearEnglish(sequenceId, echoPrompt.text, settings, true);
+      if (isVoiceEchoSupported()) {
+        void (async () => {
+          const micReady = await initVoiceEcho();
+          if (!micReady || !isCurrent()) {
+            return;
+          }
+          setEchoStatus("listening");
+          const detected = await listenForVoice(7000, (level) => {
+            if (isCurrent()) {
+              setEchoVolume(level);
+            }
+          });
+          if (!isCurrent()) {
+            return;
+          }
+          if (detected) {
+            completeEcho("voice");
+          } else {
+            setEchoStatus("idle");
+            setEchoVolume(0);
+          }
+        })();
+      }
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void (async () => {
+      // Play the full model reading FIRST and wait for it — recording during
+      // TTS would transcribe the model's own voice and falsely pass.
+      const ttsFinished = await Promise.race([
+        speakClearEnglish(sequenceId, echoPrompt.text, settings, true),
+        wait(20000).then(() => "timeout" as const),
+      ]);
+      if (!isCurrent()) {
+        return;
+      }
+      if (ttsFinished === "timeout") {
+        // TTS hung — don't trap the child behind a gate that can't proceed.
+        enterEchoManualMode("语音加载有点慢，这次先手动继续吧 🎈");
+        setEchoPrompt({ ...echoPrompt });
+        return;
+      }
+      const micReady = await initVoiceEcho();
+      if (!isCurrent()) {
+        return;
+      }
+      if (!micReady) {
+        enterEchoManualMode("麦克风打不开，这次先手动继续吧 🎈");
+        setEchoPrompt({ ...echoPrompt });
+        return;
+      }
+      const accessToken = getAccessToken();
+      if (!accessToken) {
+        enterEchoManualMode();
+        setEchoPrompt({ ...echoPrompt });
+        return;
+      }
+      setEchoStatus("listening");
+      setEchoVolume(0);
+      const attempt = await recordAndRecognize(echoPrompt.text, accessToken, {
+        onVolume: (level) => {
+          if (isCurrent()) {
             setEchoVolume(level);
           }
-        });
-        if (cancelled || echoListenGenerationRef.current !== generation) {
+        },
+        onChecking: () => {
+          if (isCurrent()) {
+            setEchoStatus("checking");
+            setEchoVolume(0);
+          }
+        },
+      });
+      if (!isCurrent() || attempt.status === "cancelled") {
+        return;
+      }
+      setEchoVolume(0);
+
+      if (attempt.status === "error") {
+        echoAsrErrorsRef.current += 1;
+        if (echoAsrErrorsRef.current >= ECHO_MAX_CONSECUTIVE_ASR_ERRORS) {
+          enterEchoManualMode("语音识别暂时不可用，先手动继续吧 🎈");
+          setEchoPrompt({ ...echoPrompt });
           return;
         }
-        if (detected) {
-          completeEcho("voice");
-        } else {
-          setEchoStatus("idle");
-          setEchoVolume(0);
+        // Transient error: quietly replay the model and re-record.
+        setEchoStatus("idle");
+        setEchoPrompt({ ...echoPrompt });
+        return;
+      }
+      echoAsrErrorsRef.current = 0;
+
+      if (attempt.status === "no-speech") {
+        // Silence doesn't count as an attempt — but a constant-silence mic
+        // (broken/unplugged) must not trap the child behind the gate.
+        echoNoSpeechRef.current += 1;
+        if (echoNoSpeechRef.current >= ECHO_MAX_CONSECUTIVE_NO_SPEECH) {
+          enterEchoManualMode("好像一直听不到声音，检查一下麦克风，先手动继续吧 🎈");
+          setEchoPrompt({ ...echoPrompt });
+          return;
         }
-      })();
-    }
+        setEchoStatus("idle");
+        setFeedback("没听到你的声音哦，大声读出来！🎤");
+        window.setTimeout(() => {
+          if (isCurrent()) {
+            setEchoPrompt({ ...echoPrompt });
+          }
+        }, 1400);
+        return;
+      }
+      echoNoSpeechRef.current = 0;
+
+      if (attempt.passed) {
+        completeEcho("voice");
+        return;
+      }
+
+      echoAttemptsRef.current += 1;
+      if (echoAttemptsRef.current >= ECHO_MAX_ATTEMPTS) {
+        setEchoStatus("giveup");
+        setFeedback("没关系，这句有点难，我们先继续，一会儿再回来读！💪", "success");
+        playCorrectDing();
+        window.setTimeout(() => {
+          advanceFromEcho(echoPrompt);
+        }, 1800);
+        return;
+      }
+      setEchoStatus("retry");
+      setFeedback(`还差一点点！再试一次（第 ${echoAttemptsRef.current + 1} 次）💪`);
+      window.setTimeout(() => {
+        if (isCurrent()) {
+          setEchoStatus("idle");
+          setEchoPrompt({ ...echoPrompt });
+        }
+      }, 1600);
+    })();
     return () => {
       cancelled = true;
+      cancelActiveRecording();
     };
     // completeEcho/startVoiceSequence/speakClearEnglish are stable enough for
     // this one-shot-per-prompt effect; echoPrompt is the real trigger.
@@ -2826,6 +3029,15 @@ function StudyContent() {
   // Initialize the daily echo counter on mount (localStorage is client-only).
   useEffect(() => {
     setEchoCountToday(getEchoCountToday());
+  }, []);
+
+  // Browsers without secure-context mic + MediaRecorder get the degraded
+  // manual echo mode from the start (no pronunciation gate).
+  useEffect(() => {
+    if (!isPronunciationCheckSupported()) {
+      enterEchoManualMode();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Release the microphone when leaving the study page.
@@ -3808,6 +4020,13 @@ function StudyContent() {
 	        if (event.repeat) {
 	          return;
 	        }
+	        // Pronunciation gate: while the echo card is up and ASR is healthy,
+	        // reading aloud correctly is the way forward — Enter/Space cannot
+	        // skip it (5 failed attempts auto-advance anyway).
+	        if (echoGateActiveRef.current) {
+	          setFeedback("大声读出来就能前进哦 🎤");
+	          return;
+	        }
 	        if (pendingMistakePracticeWordsRef.current.length > 0) {
 	          void beginPendingMistakePractice();
 	          return;
@@ -4302,7 +4521,7 @@ function StudyContent() {
                       className={actionButtonClass}
                       onMouseDown={keepStudyInputFocus}
                       onClick={() => {
-                        // Replay the model TTS (also restarts the listen window).
+                        // Replay the model TTS (also restarts the recording).
                         echoListenGenerationRef.current += 1;
                         setEchoStatus("idle");
                         setEchoVolume(0);
@@ -4311,15 +4530,31 @@ function StudyContent() {
                     >
                       🔊 再听一遍
                     </Button>
-                    <Button
-                      type="button"
-                      className={actionButtonClass}
-                      onMouseDown={keepStudyInputFocus}
-                      disabled={echoStatus === "success"}
-                      onClick={() => completeEcho("manual")}
-                    >
-                      {echoStatus === "success" ? "🌟 真棒！" : echoStatus === "listening" ? "🎧 正在听…读出来！" : "🎤 我读完了！"}
-                    </Button>
+                    {echoManualMode ? (
+                      <Button
+                        type="button"
+                        className={actionButtonClass}
+                        onMouseDown={keepStudyInputFocus}
+                        disabled={echoStatus === "success"}
+                        onClick={() => completeEcho("manual")}
+                      >
+                        {echoStatus === "success" ? "🌟 真棒！" : echoStatus === "listening" ? "🎧 正在听…读出来！" : "🎤 我读完了！"}
+                      </Button>
+                    ) : (
+                      <div className="rounded-full bg-white/80 px-4 py-2 text-sm font-bold text-emerald-700">
+                        {echoStatus === "success"
+                          ? "🌟 读对了！真棒！"
+                          : echoStatus === "checking"
+                            ? "⏳ 正在检查…"
+                            : echoStatus === "retry"
+                              ? "🔁 再试一次！"
+                              : echoStatus === "giveup"
+                                ? "💪 没关系，继续前进！"
+                                : echoStatus === "listening"
+                                  ? "🎤 正在录音…大声读！"
+                                  : "🎧 仔细听，然后大声读！"}
+                      </div>
+                    )}
                   </div>
                   {echoStatus === "listening" ? (
                     <div className="h-2 w-56 overflow-hidden rounded-full bg-emerald-100">
@@ -4353,6 +4588,12 @@ function StudyContent() {
                       onMouseDown={keepStudyInputFocus}
                       onClick={() => {
                         runStudyButtonAction(() => {
+                          // Pronunciation gate: reading aloud correctly is
+                          // the way forward while the echo card is up.
+                          if (echoGateActiveRef.current) {
+                            setFeedback("大声读出来就能前进哦 🎤");
+                            return;
+                          }
                           if (pendingMistakePracticeWordsRef.current.length > 0) {
                             return beginPendingMistakePractice();
                           }
@@ -4368,7 +4609,13 @@ function StudyContent() {
                   <Button className={actionButtonClass} onClick={() => runStudyButtonAction(resetAnswer)} onMouseDown={keepStudyInputFocus} type="button" variant="secondary">
                     再来一次
                   </Button>
-                  <Button className={actionButtonClass} onClick={() => runStudyButtonAction(() => handleNextItem())} onMouseDown={keepStudyInputFocus} type="button" variant="outline">
+                  <Button className={actionButtonClass} onClick={() => runStudyButtonAction(() => {
+                    if (echoGateActiveRef.current) {
+                      setFeedback("大声读出来就能前进哦 🎤");
+                      return;
+                    }
+                    handleNextItem();
+                  })} onMouseDown={keepStudyInputFocus} type="button" variant="outline">
                     跳过
                   </Button>
                   {isStudyFullscreen ? (
