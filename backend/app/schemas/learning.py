@@ -210,3 +210,15 @@ class PronunciationCheckResponse(BaseModel):
     score: float
     passed: bool
     heard_speech: bool
+
+
+class ReadAloudEventRequest(BaseModel):
+    learning_item_id: UUID | None = None
+    english_text: str = Field(default="", max_length=200)
+    passed: bool
+    duration_seconds: float = Field(default=0, ge=0, le=600)
+    transcript: str | None = Field(default=None, max_length=400)
+
+
+class ReadAloudEventResponse(BaseModel):
+    learning_item_id: UUID | None = None

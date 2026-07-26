@@ -173,6 +173,7 @@ export function getReviewTaskModeLabel(taskType: string | undefined): string {
     missing_letter: "缺字母填空",
     cloze_sentence: "短句填空",
     hidden_recall: "隐藏重拼",
+    read_aloud: "🎤 语音练习",
   };
   return taskType ? labels[taskType] ?? "专项复习" : "";
 }

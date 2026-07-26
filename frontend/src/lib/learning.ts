@@ -598,6 +598,47 @@ export async function listLearningItems(accessToken: string, courseId?: string, 
   return (await response.json()) as LearningItem[];
 }
 
+export async function listSpeakItems(accessToken: string, limit = 20): Promise<LearningItem[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/learning/speak-items?${params.toString()}`,
+    {
+      cache: "no-store",
+    },
+    accessToken,
+  );
+
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+
+  return (await response.json()) as LearningItem[];
+}
+
+export interface ReadAloudEventPayload {
+  learning_item_id?: string;
+  english_text: string;
+  passed: boolean;
+  duration_seconds: number;
+  transcript?: string;
+}
+
+export async function logReadAloudEvent(accessToken: string, payload: ReadAloudEventPayload): Promise<void> {
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/learning/read-aloud-events`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    accessToken,
+  );
+
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+}
+
 export async function listDueReviewItems(
   accessToken: string,
   excludeCourseId?: string,

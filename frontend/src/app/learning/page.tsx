@@ -244,7 +244,7 @@ export default function LearningStartPage() {
           </Button>
         </div>
 
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className="grid gap-3 md:grid-cols-3">
           <Link
             className={`hover-lift flex items-center justify-between gap-3 rounded-2xl border px-5 py-4 shadow-soft backdrop-blur-xl transition-colors ipad:px-6 ipad:py-5 ${
               globalDueReviewCount > 0
@@ -281,6 +281,21 @@ export default function LearningStartPage() {
               课程
             </span>
           </div>
+
+          <Link
+            className="hover-lift flex items-center justify-between gap-3 rounded-2xl border border-emerald-300/70 bg-emerald-50/70 px-5 py-4 shadow-soft backdrop-blur-xl transition-colors hover:border-emerald-400 ipad:px-6 ipad:py-5"
+            href="/learning/study?mode=speak"
+          >
+            <div>
+              <p className="text-base font-bold text-emerald-700 ipad:text-lg">🎤 语音练习</p>
+              <p className="mt-1 text-xs text-slate-600 ipad:text-sm">
+                跟着示范大声读句子，读对了才能前进
+              </p>
+            </div>
+            <span className="shrink-0 rounded-full bg-emerald-500 px-3 py-1 text-sm font-bold text-white ipad:text-base">
+              开口
+            </span>
+          </Link>
         </div>
 
         {errorMessage ? <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 ipad:px-6 ipad:py-4 ipad:text-base">{errorMessage}</p> : null}

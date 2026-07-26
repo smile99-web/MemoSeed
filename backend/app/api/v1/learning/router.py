@@ -17,6 +17,7 @@ from app.api.deps import get_current_user
 from app.core.config import settings as app_settings
 from app.db.session import get_db
 from app.models.course import Course
+from app.models.learning_event import LearningEvent
 from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
 from app.models.mistake_log import MistakeLog
@@ -43,6 +44,8 @@ from app.schemas.learning import (
     LearningTranslationRequest,
     LearningTranslationResponse,
     PronunciationCheckResponse,
+    ReadAloudEventRequest,
+    ReadAloudEventResponse,
     WordMistakeLogRequest,
     WordMistakeLogResponse,
     WordReviewRequest,
@@ -73,6 +76,12 @@ from app.services.memory_scheduler import (
 )
 from app.services.pronunciation import recognize_speech_flash, score_pronunciation
 from app.services.secure_model_settings import get_private_model_settings
+from app.services.speak_practice import (
+    READ_ALOUD_REVIEW_MODE,
+    READ_ALOUD_TASK_TYPE,
+    SPEAK_DAILY_CAP,
+    select_speak_candidates,
+)
 from app.services.speech_asset_cache import build_learning_speech_targets, ensure_volcengine_speech_asset, precache_learning_speech_assets
 from app.services.tts_cache import build_cache_key, get_cached_audio
 from app.services.word_memory import (
@@ -2151,6 +2160,128 @@ async def check_pronunciation(
         passed=result.passed,
         heard_speech=result.heard_speech,
     )
+
+
+@router.get("/speak-items", response_model=list[LearningItemRead])
+def list_speak_items(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: int = 20,
+) -> list[LearningItemRead]:
+    """Familiar sentences/phrases for the dedicated read-aloud speaking mode.
+
+    Studied content only (MemoryState.repetition_count > 0): speaking practice
+    rehearses what the child already knows — it must never ambush them with
+    brand-new words. Items already spoken today are excluded and a small
+    daily cap keeps the mode a light complement to review, not a second job.
+    Each item is served with review_task_type="read_aloud" so the frontend
+    runs the whole exercise on the pronunciation-gated echo card.
+    """
+    capped_limit = max(1, min(limit, 50))
+    now = datetime.now(UTC)
+    today_start = now.astimezone(LOCAL_TIMEZONE).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).astimezone(UTC)
+
+    spoken_today_ids = {
+        row_id
+        for row_id in db.scalars(
+            select(LearningEvent.learning_item_id).where(
+                LearningEvent.user_id == current_user.id,
+                LearningEvent.review_mode == READ_ALOUD_REVIEW_MODE,
+                LearningEvent.occurred_at >= today_start,
+                LearningEvent.learning_item_id.is_not(None),
+            )
+        ).all()
+        if row_id is not None
+    }
+    daily_remaining = max(SPEAK_DAILY_CAP - len(spoken_today_ids), 0)
+    if daily_remaining == 0:
+        return []
+
+    last_spoken = (
+        select(
+            LearningEvent.learning_item_id.label("item_id"),
+            func.max(LearningEvent.occurred_at).label("last_spoken_at"),
+        )
+        .where(
+            LearningEvent.user_id == current_user.id,
+            LearningEvent.review_mode == READ_ALOUD_REVIEW_MODE,
+        )
+        .group_by(LearningEvent.learning_item_id)
+        .subquery()
+    )
+    statement = (
+        select(LearningItem, MemoryState.repetition_count, last_spoken.c.last_spoken_at)
+        .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
+        .outerjoin(last_spoken, last_spoken.c.item_id == LearningItem.id)
+        .where(
+            LearningItem.user_id == current_user.id,
+            LearningItem.item_type.in_(["sentence", "phrase"]),
+            MemoryState.repetition_count > 0,
+        )
+    )
+    rows = [(item, reps, spoken_at) for item, reps, spoken_at in db.execute(statement).all()]
+    selected = select_speak_candidates(
+        rows,
+        spoken_today_ids=spoken_today_ids,
+        limit=min(capped_limit, daily_remaining),
+    )
+    return [
+        LearningItemRead.model_validate(item).model_copy(update={"review_task_type": READ_ALOUD_TASK_TYPE})
+        for item in selected
+    ]
+
+
+@router.post("/read-aloud-events", response_model=ReadAloudEventResponse, status_code=status.HTTP_201_CREATED)
+def create_read_aloud_event(
+    payload: ReadAloudEventRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ReadAloudEventResponse:
+    """Record a finished read-aloud exercise (pass or 5-attempt giveup).
+
+    Telemetry only — same rule as the assisted review modes: a LearningEvent
+    for the replay timeline, NO review_log, NO FSRS mutation, NO accuracy
+    contribution. A pass scores 3; a giveup scores 1 and stays
+    is_correct=False so the timeline is honest about which sentences are
+    still hard to say.
+    """
+    learning_item: LearningItem | None = None
+    if payload.learning_item_id is not None:
+        learning_item = db.scalar(
+            select(LearningItem).where(
+                LearningItem.id == payload.learning_item_id,
+                LearningItem.user_id == current_user.id,
+            )
+        )
+    if learning_item is None:
+        # Defensive fallback (mirrors /word-reviews): resolve by text so the
+        # event is never silently lost.
+        english_text = payload.english_text.strip()
+        if english_text:
+            learning_item = db.scalar(
+                select(LearningItem).where(
+                    LearningItem.user_id == current_user.id,
+                    LearningItem.english_text == english_text,
+                ).limit(1)
+            )
+    try:
+        from app.services.learning_replay import record_assisted_learning_event
+        record_assisted_learning_event(
+            db,
+            current_user.id,
+            learning_item,
+            READ_ALOUD_REVIEW_MODE,
+            3 if payload.passed else 1,
+            response_text=(payload.transcript or "").strip() or None,
+            duration_ms=min(int(payload.duration_seconds * 1000), 5 * 60 * 1000) or 10_000,
+            is_correct=payload.passed,
+        )
+    except Exception as exc:
+        logger.warning("Failed to record read-aloud learning event: %s", exc)
+    db.commit()
+    return ReadAloudEventResponse(learning_item_id=(learning_item.id if learning_item else None))
 
 
 @router.post("/word-mistakes", response_model=WordMistakeLogResponse, status_code=status.HTTP_201_CREATED)

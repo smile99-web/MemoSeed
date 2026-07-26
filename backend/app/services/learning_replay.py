@@ -110,12 +110,17 @@ def record_assisted_learning_event(
     response_text: str | None = None,
     duration_ms: int = 0,
     error_type: str | None = None,
+    is_correct: bool = True,
 ) -> LearningEvent | None:
     """P15: record an ASSISTED-phase attempt (answer was shown / heavily
     hinted) as telemetry only — a LearningEvent + minute stat, with
     review_log_id=None. Assisted phases must NOT create review_logs, mutate
     FSRS state, or feed accuracy metrics: they cannot fail, so their 100%
     "correct" rate used to fake mastery evidence (63% of all review_logs).
+
+    `is_correct` stays True for the genuinely unfailable assisted phases;
+    telemetry-only modes that CAN fail (e.g. read-aloud giveup) pass False
+    so the replay timeline stays honest.
     """
     now = datetime.now(UTC)
     local_dt = now.astimezone(LOCAL_TIMEZONE)
@@ -131,7 +136,7 @@ def record_assisted_learning_event(
         event_year=local_dt.year,
         item_type=(learning_item.item_type if learning_item else "word"),
         review_mode=review_mode,
-        is_correct=True,
+        is_correct=is_correct,
         score=score,
         english_text=(learning_item.english_text if learning_item else ""),
         chinese_text=(learning_item.chinese_text if learning_item else None),
