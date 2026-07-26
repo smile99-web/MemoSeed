@@ -23,6 +23,16 @@ VOLCENGINE_ASR_FLASH_ENDPOINT = "https://openspeech.bytedance.com/api/v3/auc/big
 VOLCENGINE_ASR_RESOURCE_ID = "volc.bigasr.auc_turbo"
 ASR_STATUS_OK = "20000000"
 
+# Volcengine returns status 20000003 ("Normal silence audio / no valid speech")
+# when the clip contains no usable speech — the child read too quietly, or only
+# background noise was captured. That is a NORMAL outcome, not an outage:
+# mapping it to an empty transcript lets the scorer answer heard_speech=False
+# (HTTP 200) instead of the endpoint returning 502. The frontend counts 502s
+# as ASR failures and used to DISABLE the pronunciation gate after just two of
+# them — two quiet reads were enough to switch the session into the ungated
+# manual mode, which is exactly the bug the parent reported.
+ASR_NO_SPEECH_STATUSES = {"20000003"}
+
 # Lenient pass bar: max() of the three similarity metrics must reach this.
 # Tuned so ASR imperfections (case, punctuation, a/an swaps like
 # "Give Me Your pen." for "Give me a pen") pass while unrelated speech fails.
@@ -82,6 +92,8 @@ def recognize_speech_flash(
         raise ValueError(f"Volcengine ASR request failed: {exc}") from exc
 
     if status_code != ASR_STATUS_OK:
+        if status_code in ASR_NO_SPEECH_STATUSES or "silence" in status_message.lower() or "no valid speech" in status_message.lower():
+            return ""
         raise ValueError(f"Volcengine ASR failed: {status_code or 'no status'} {status_message}".strip())
 
     try:

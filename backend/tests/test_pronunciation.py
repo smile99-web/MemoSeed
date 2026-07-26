@@ -7,7 +7,12 @@ Product rules under test (parent's requirements):
 - silence/noise is not an attempt at all (heard_speech=False).
 """
 
-from app.services.pronunciation import PASS_THRESHOLD, score_pronunciation
+import json
+
+import pytest
+
+from app.services import pronunciation
+from app.services.pronunciation import PASS_THRESHOLD, recognize_speech_flash, score_pronunciation
 
 
 def test_exact_match_passes():
@@ -78,3 +83,46 @@ def test_word_order_hiccup_still_passes():
 def test_score_is_bounded():
     result = score_pronunciation("hello world", "completely unrelated sentence here")
     assert 0.0 <= result.score <= 1.0
+
+
+class _FakeHttpResponse:
+    """Minimal stand-in for urllib's urlopen response (context manager)."""
+
+    def __init__(self, headers: dict[str, str], body: bytes):
+        self.headers = headers
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, status_code: str, message: str, text: str = "") -> None:
+    body = json.dumps({"result": {"text": text}}).encode("utf-8")
+    response = _FakeHttpResponse({"X-Api-Status-Code": status_code, "X-Api-Message": message}, body)
+    monkeypatch.setattr(pronunciation, "urlopen", lambda *args, **kwargs: response)
+
+
+def test_silence_status_returns_empty_transcript(monkeypatch: pytest.MonkeyPatch):
+    # 20000003 "Normal silence audio" is a quiet-read outcome, not an outage —
+    # it must surface as "" (→ heard_speech=False, HTTP 200) instead of the
+    # 502 that tripped the frontend's ASR-error circuit breaker and disabled
+    # the pronunciation gate.
+    _patch_urlopen(monkeypatch, "20000003", "Normal silence audio no valid speech in audio")
+    assert recognize_speech_flash(b"fake-audio", api_key="test-key") == ""
+
+
+def test_real_asr_failure_still_raises(monkeypatch: pytest.MonkeyPatch):
+    _patch_urlopen(monkeypatch, "45000000", "invalid argument")
+    with pytest.raises(ValueError, match="Volcengine ASR failed"):
+        recognize_speech_flash(b"fake-audio", api_key="test-key")
+
+
+def test_ok_status_returns_transcript(monkeypatch: pytest.MonkeyPatch):
+    _patch_urlopen(monkeypatch, "20000000", "Success", text="Give me a pen")
+    assert recognize_speech_flash(b"fake-audio", api_key="test-key") == "Give me a pen"

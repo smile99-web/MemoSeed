@@ -1251,6 +1251,17 @@ function StudyContent() {
   }
 
   function advanceWarmup() {
+    // Pronunciation gate: while the echo card is up, reading the warm-up word
+    // aloud is the way forward — the button/Enter cannot skip it (the echo
+    // pass auto-advances via advanceFromEcho).
+    if (echoGateActiveRef.current) {
+      setFeedback("大声读出来就能前进哦 🎤");
+      return;
+    }
+    advanceWarmupUngated();
+  }
+
+  function advanceWarmupUngated() {
     const nextIndex = warmUpIndex + 1;
     if (nextIndex >= warmUpWords.length) {
       finishWarmup();
@@ -1259,12 +1270,19 @@ function StudyContent() {
     setWarmUpIndex(nextIndex);
     const word = warmUpWords[nextIndex];
     const meaning = warmUpMeanings[normalizeEnglishKey(word)] ?? "";
-    if (word && meaning) {
-      void playChineseThenEnglish(meaning, word);
+    if (word) {
+      // The echo effect plays the model TTS itself (and only then records).
+      startEchoPrompt(word, meaning);
     }
   }
 
   function replayWarmupWord() {
+    // While the echo card owns the warm-up advance, replaying the TTS here
+    // would play over the recording — the echo card's own 再听一遍 button
+    // replays the model correctly (TTS → silence gap → record).
+    if (echoGateActiveRef.current) {
+      return;
+    }
     const word = warmUpWords[warmUpIndex];
     if (!word) return;
     const settings = modelSettingsRef.current;
@@ -1462,10 +1480,33 @@ function StudyContent() {
     await speakClearEnglish(sequenceId, englishText, settings, true);
   }, [speakClearEnglish, speakInVoiceSequence, startVoiceSequence, waitInVoiceSequence]);
 
+  // Read-aloud ("echo") gate entry point. Declared before startWarmupFn
+  // because useCallback deps arrays are evaluated at render time — a later
+  // declaration would be a TDZ ReferenceError in startWarmupFn's deps.
+  const startEchoPrompt = useCallback(function startEchoPrompt(text: string, translation: string) {
+    const cleanText = text.trim();
+    if (!cleanText || !currentItem) {
+      return;
+    }
+    if (echoItemIdRef.current === currentItem.id) {
+      return; // once per item (re-armed by advanceFromEcho/resetAnswer)
+    }
+    echoItemIdRef.current = currentItem.id;
+    echoListenGenerationRef.current += 1;
+    echoAttemptsRef.current = 0;
+    echoNoSpeechRef.current = 0;
+    echoStartedAtMsRef.current = Date.now();
+    echoLastTranscriptRef.current = "";
+    setEchoVolume(0);
+    setEchoStatus("idle");
+    setEchoPrompt({ text: cleanText, translation });
+  }, [currentItem]);
+
   // N4: sentence new-word warm-up — one recognition card per weak word
   // before the sentence typing UI appears. (Placed after
   // playChineseThenEnglish: the deps array is evaluated at render time, so
   // the callback must be declared after everything it references.)
+
   const startWarmupFn = useCallback(async function startWarmup(words: string[]) {
     const itemIdAtStart = currentItemIdRef.current;
     warmUpItemIdRef.current = itemIdAtStart;
@@ -1481,11 +1522,11 @@ function StudyContent() {
     // Item guard: the user may have advanced during the translation fetch.
     if (currentItemIdRef.current !== itemIdAtStart) return;
     setWarmUpMeanings(meanings);
-    const meaning = meanings[normalizeEnglishKey(first)] ?? "";
-    if (meaning) {
-      void playChineseThenEnglish(meaning, first);
-    }
-  }, [playChineseThenEnglish]);
+    // Course-learning warm-up is a pronunciation exercise too (parent rule:
+    // EVERY exercise ends with the child reading aloud). The echo card plays
+    // the model reading, waits for it to finish, then records the child.
+    startEchoPrompt(first, meanings[normalizeEnglishKey(first)] ?? "");
+  }, [startEchoPrompt]);
 
   const playEnglishThenChinese = useCallback(async function playEnglishThenChinese(englishText: string, chineseText: string, sequenceId = startVoiceSequence()) {
     if (isDictationModeRef.current) {
@@ -1816,6 +1857,9 @@ function StudyContent() {
     setEchoVolume(0);
     echoListenGenerationRef.current += 1;
     cancelActiveRecording();
+    // Re-arm the once-per-item echo guard for the NEW item (a repeated
+    // item id in a looping/wrapped queue must still get its gate).
+    echoItemIdRef.current = "";
     setMistakenWords([]);
     setMistakePracticeWords([]);
     setMistakePracticeIndex(0);
@@ -1884,6 +1928,10 @@ function StudyContent() {
     // already in the correction loop).
     const sentenceWarmupWords = (
       currentItem && currentItem.item_type === "sentence" && studyMode !== "review"
+        // read_aloud/voice_practice items run ENTIRELY on their own echo card
+        // (see the short-circuit effect below) — a warm-up echo here would
+        // consume the once-per-item guard and block that card.
+        && currentItem.review_task_type !== "read_aloud" && currentItem.review_task_type !== "voice_practice"
         ? dynamicReviewWords.slice(0, 2)
         : []
     ).filter(Boolean);
@@ -2250,6 +2298,11 @@ function StudyContent() {
     setEchoVolume(0);
     echoListenGenerationRef.current += 1;
     cancelActiveRecording();
+    // Re-arm the pronunciation gate: without this, redoing an item via
+    // 再来一次 could never show the echo card again (the once-per-item
+    // guard still held this item's id) — the child advanced with zero
+    // read-aloud, which is exactly the bypass the parent reported.
+    echoItemIdRef.current = "";
     setMistakenWords([]);
     setMistakePracticeWords([]);
     setMistakePracticeIndex(0);
@@ -2290,6 +2343,14 @@ function StudyContent() {
     encodingStartTimeRef.current = 0;
     setEncodingStage(null);
     encodingStageRef.current = null;
+    // Redoing during a course warm-up card restarts the word's read-aloud
+    // echo (the card is still up — its pronunciation gate must come back).
+    if (warmUpWords.length > 0) {
+      const warmUpWord = warmUpWords[warmUpIndex] ?? "";
+      if (warmUpWord) {
+        startEchoPrompt(warmUpWord, warmUpMeanings[normalizeEnglishKey(warmUpWord)] ?? "");
+      }
+    }
     window.setTimeout(() => inputRefs.current[dynamicReviewWordIndexes[0] ?? 0]?.focus(), 0);
   }
 
@@ -2819,33 +2880,15 @@ function StudyContent() {
 
   // ---------------------------------------------------------------------
   // Read-aloud ("echo") prompt with REAL pronunciation checking (parent's
-  // requirement): while the echo card is up and the ASR pipeline is healthy,
-  // reading the text aloud correctly is the only way to advance — Enter,
-  // Space, 下一句 and 跳过 are blocked. Lenient scoring (roughly-correct
-  // passes) protects confidence; nonsense reading must be re-read; 5 failed
-  // attempts auto-advance so the child is never trapped. When the mic/ASR is
-  // unavailable (denied permission, repeated ASR errors, constant silence)
-  // the card degrades to the old manual mode (button + loudness detection,
-  // no gate).
+  // requirement): while the echo card is up, reading the text aloud is the
+  // only way to advance — Enter, Space, 下一句 and 跳过 are blocked, ALWAYS.
+  // Lenient scoring (roughly-correct passes) protects confidence; nonsense
+  // reading must be re-read; 5 failed attempts auto-advance so the child is
+  // never trapped. When the mic/ASR is unavailable (denied permission,
+  // repeated ASR errors, constant silence) the card degrades to manual mode
+  // (我读完了 button + loudness detection) — the gate STAYS ON there too:
+  // the advance still goes through completeEcho, never around it.
   // ---------------------------------------------------------------------
-  function startEchoPrompt(text: string, translation: string) {
-    const cleanText = text.trim();
-    if (!cleanText || !currentItem) {
-      return;
-    }
-    if (echoItemIdRef.current === currentItem.id) {
-      return; // once per item
-    }
-    echoItemIdRef.current = currentItem.id;
-    echoListenGenerationRef.current += 1;
-    echoAttemptsRef.current = 0;
-    echoNoSpeechRef.current = 0;
-    echoStartedAtMsRef.current = Date.now();
-    echoLastTranscriptRef.current = "";
-    setEchoVolume(0);
-    setEchoStatus("idle");
-    setEchoPrompt({ text: cleanText, translation });
-  }
 
   // Speak-mode telemetry: a finished read_aloud exercise (pass or giveup)
   // becomes a timeline LearningEvent via /learning/read-aloud-events.
@@ -2872,7 +2915,9 @@ function StudyContent() {
   }
 
   // Switch to degraded (manual) echo mode for the rest of the session:
-  // manual 我读完了 button + loudness auto-detect, and no advancing gate.
+  // loudness auto-detect + the manual 我读完了 button replace ASR scoring.
+  // The pronunciation GATE stays on — the child still reads aloud (or, with a
+  // broken mic, explicitly confirms) before every advance.
   function enterEchoManualMode(hint?: string) {
     if (echoManualModeRef.current) {
       return;
@@ -2884,14 +2929,16 @@ function StudyContent() {
     }
   }
 
-  // Advance past the sentence-complete screen because of the echo (pass or
-  // 5-attempt giveup). Mirrors the 下一句 button logic. Guards against the
-  // prompt having been replaced/dismissed while the success timer ran.
+  // Advance past the sentence-complete screen (or the course warm-up card)
+  // because of the echo (pass or 5-attempt giveup). Mirrors the 下一句 button
+  // logic. Guards against the prompt having been replaced/dismissed while the
+  // success timer ran.
   function advanceFromEcho(echo: { text: string; translation: string }) {
     if (echoPromptRef.current !== echo) {
       return;
     }
-    if (answerStateRef.current !== "sentence-complete") {
+    const warmupActive = warmUpWords.length > 0;
+    if (!warmupActive && answerStateRef.current !== "sentence-complete") {
       return;
     }
     echoListenGenerationRef.current += 1;
@@ -2899,6 +2946,16 @@ function StudyContent() {
     setEchoPrompt(null);
     setEchoStatus("idle");
     setEchoVolume(0);
+    // Re-arm the once-per-item guard BEFORE moving on: the next warm-up word
+    // and the sentence-level echo of this same item must still fire. (Also
+    // fixes single-item queues looping back onto the same item id.)
+    echoItemIdRef.current = "";
+    if (warmupActive) {
+      // Course-learning warm-up: passing the word's read-aloud moves to the
+      // next warm-up card (or finishes warm-up into the sentence).
+      advanceWarmupUngated();
+      return;
+    }
     if (pendingMistakePracticeWordsRef.current.length > 0) {
       void beginPendingMistakePractice();
       return;
@@ -2942,16 +2999,10 @@ function StudyContent() {
         : `跟读完成，真棒！${earnsPoints ? "+2 分 " : ""}（今天第 ${nextCount} 次）`,
       "success",
     );
-    if (source === "voice" && !echoManualModeRef.current) {
-      // Pronunciation passed — reading correctly IS the confirmation, so
-      // advance automatically (no Enter/button needed or allowed).
-      window.setTimeout(() => advanceFromEcho(echo), 1200);
-    } else {
-      window.setTimeout(() => {
-        setEchoPrompt((current) => (current === echo ? null : current));
-        setEchoStatus("idle");
-      }, 1500);
-    }
+    // Reading aloud IS the confirmation — advance automatically in both ASR
+    // and manual (degraded) mode. The gate is always on, so dismissing the
+    // prompt without advancing would just force a second click.
+    window.setTimeout(() => advanceFromEcho(echo), 1200);
   }
 
   // Keep a ref mirror of the echo prompt + gate state for the window-level
@@ -2963,8 +3014,13 @@ function StudyContent() {
     echoManualModeRef.current = echoManualMode;
   }, [echoManualMode]);
   useEffect(() => {
-    echoGateActiveRef.current = echoPrompt !== null && !echoManualMode;
-  }, [echoPrompt, echoManualMode]);
+    // The gate is ALWAYS on while the echo card is up — degraded (manual)
+    // mode included. The parent's rule: every exercise ends with the child
+    // reading aloud; 下一句/Enter/跳过 must never bypass it. In manual mode
+    // the pass comes from loudness detection or the 我读完了 button instead
+    // of ASR, but the advance still goes through completeEcho.
+    echoGateActiveRef.current = echoPrompt !== null;
+  }, [echoPrompt]);
 
   // Echo side-effects: play the model English TTS, then record the child and
   // score the pronunciation. Replays (再听一遍 / retry) retrigger this effect
@@ -3018,9 +3074,16 @@ function StudyContent() {
     void (async () => {
       // Play the full model reading FIRST and wait for it — recording during
       // TTS would transcribe the model's own voice and falsely pass.
+      // The timeout scales with text length: the 3-pass slow reading of a
+      // long course sentence (natural + chunked + word-by-word) legitimately
+      // takes 25-40s. A fixed 20s cutoff misread those as hung TTS and dropped
+      // the session into degraded manual mode (no ASR correctness check) —
+      // exactly the "didn't have to read correctly" gap the parent saw on
+      // course-package sentences.
+      const ttsTimeoutMs = Math.min(90000, 15000 + tokenizeEnglish(echoPrompt.text).length * 4000);
       const ttsFinished = await Promise.race([
         speakClearEnglish(sequenceId, echoPrompt.text, settings, true),
-        wait(20000).then(() => "timeout" as const),
+        wait(ttsTimeoutMs).then(() => "timeout" as const),
       ]);
       if (!isCurrent()) {
         return;
@@ -4142,9 +4205,9 @@ function StudyContent() {
 	        if (event.repeat) {
 	          return;
 	        }
-	        // Pronunciation gate: while the echo card is up and ASR is healthy,
-	        // reading aloud correctly is the way forward — Enter/Space cannot
-	        // skip it (5 failed attempts auto-advance anyway).
+	        // Pronunciation gate: while the echo card is up, reading aloud is
+	        // the ONLY way forward — Enter/Space cannot skip it, in manual
+	        // (degraded) mode too (5 failed attempts auto-advance anyway).
 	        if (echoGateActiveRef.current) {
 	          setFeedback("大声读出来就能前进哦 🎤");
 	          return;
@@ -4464,8 +4527,17 @@ function StudyContent() {
                     <p className="text-2xl font-bold text-emerald-700 ipad:text-3xl">{warmUpMeanings[normalizeEnglishKey(warmUpWords[warmUpIndex] ?? "")]}</p>
                   ) : null}
                   <div className="flex flex-wrap justify-center gap-3">
-                    <Button className={actionButtonClass} onClick={replayWarmupWord} onMouseDown={keepStudyInputFocus} type="button" variant="secondary">🔊 再听一遍</Button>
-                    <Button className={actionButtonClass} onClick={advanceWarmup} onMouseDown={keepStudyInputFocus} type="button">记住了，继续 →</Button>
+                    {echoPrompt ? (
+                      // The echo card below owns the warm-up advance now:
+                      // its 再听一遍 replays the model safely (TTS → silence
+                      // gap → record), and passing the read-aloud moves on.
+                      <p className="text-sm font-bold text-emerald-700 ipad:text-base">🎤 大声读出这个单词就能继续</p>
+                    ) : (
+                      <>
+                        <Button className={actionButtonClass} onClick={replayWarmupWord} onMouseDown={keepStudyInputFocus} type="button" variant="secondary">🔊 再听一遍</Button>
+                        <Button className={actionButtonClass} onClick={advanceWarmup} onMouseDown={keepStudyInputFocus} type="button">记住了，继续 →</Button>
+                      </>
+                    )}
                   </div>
                   <p className="text-xs text-slate-500 ipad:text-sm">回车 = 继续 · 空格 = 听发音</p>
                 </div>
@@ -4635,7 +4707,7 @@ function StudyContent() {
                 </div>
               ) : null}
               {childHint ? ( <div className="flex flex-col items-center gap-2"> <p className={isStudyFullscreen ? "text-xl font-bold text-red-600 ipad:text-2xl ipad-lg:text-3xl" : "text-base font-bold text-red-600 ipad:text-base ipad-lg:text-lg"}>{childHint.text}</p> <HintDisplay word={childHint.word} chunks={childHint.chunks} matchedPrefixLength={childHint.matchedPrefixLength} onPlayChunk={(i) => playSyllableAudio(childHint.word, i, currentItem?.syllables, (blob) => { void playAudioBlob(blob); })} onPlayPhonics={(i) => { void playPhonicsAudio(childHint.word, i, currentItem?.grapheme_phoneme_map, currentItem?.syllables, (blob) => { void playAudioBlob(blob); }); }} graphemePhonemeMap={currentItem?.grapheme_phoneme_map} cachedSyllables={currentItem?.syllables} /> </div> ) : feedbackMessage ? <p key={celebrationTrigger} className={`${isStudyFullscreen ? `text-xl font-bold ipad:text-2xl ipad-lg:text-3xl ${feedbackType === "error" ? "text-red-600" : feedbackType === "success" ? "text-emerald-700" : "text-slate-600"}` : `text-base font-bold ipad:text-base ipad-lg:text-lg ${feedbackType === "error" ? "text-red-600" : feedbackType === "success" ? "text-emerald-600" : "text-slate-600"}`} ${celebrationTrigger > 0 ? "celebration-burst" : ""}`}>{feedbackMessage}</p> : null}
-              {answerState === "sentence-complete" && echoPrompt ? (
+              {echoPrompt && (answerState === "sentence-complete" || warmUpWords.length > 0) ? (
                 <div className="mx-auto flex w-full max-w-2xl flex-col items-center gap-2 rounded-2xl border-2 border-emerald-300 bg-emerald-50/90 px-5 py-3 shadow-soft">
                   <p className="text-lg font-bold text-emerald-800">
                     🎤 轮到你了！大声读出来
@@ -4717,8 +4789,8 @@ function StudyContent() {
                       onMouseDown={keepStudyInputFocus}
                       onClick={() => {
                         runStudyButtonAction(() => {
-                          // Pronunciation gate: reading aloud correctly is
-                          // the way forward while the echo card is up.
+                          // Pronunciation gate: reading aloud is the ONLY
+                          // way forward while the echo card is up.
                           if (echoGateActiveRef.current) {
                             setFeedback("大声读出来就能前进哦 🎤");
                             return;
