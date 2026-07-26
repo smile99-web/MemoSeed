@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, aliased
 
 from app.models.ai_daily_report import AiDailyReport
 from app.models.daily_plan import DailyPlan
+from app.models.learning_event import LearningEvent
 from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
 from app.models.mistake_log import MistakeLog
@@ -341,6 +342,10 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
     fsrs_settings = stored_settings.settings if stored_settings is not None else {}
     fsrs_fitted_at = parse_datetime_setting(fsrs_settings.get("fsrsFittedAt"))
     next_review_at = min((state.next_review_at for state in memory_states), default=None)
+    # Single local "now" shared by all "today" aggregations (study_time,
+    # read-aloud counter). Avoids the day-boundary inconsistency where one
+    # helper uses UTC and another uses Asia/Shanghai.
+    now_local = datetime.now(LOCAL_TIMEZONE)
     study_time = build_study_time_summary(db, user_id)
 
     # Word-centric: count only word-type items and unique tracked words
@@ -372,6 +377,7 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
         next_review_at=next_review_at,
         study_time=study_time,
         review_buckets=build_review_buckets(memory_states, now),
+        today_read_aloud_count=count_today_read_aloud(db, user_id, now_local),
         weakest_words=sorted(summaries, key=lambda summary: (-summary.priority_score, summary.memory_strength, -summary.forget_risk)),
         strongest_words=sorted(summaries, key=lambda summary: (-summary.memory_strength, summary.mistake_count, summary.forget_risk)),
     )
@@ -397,6 +403,30 @@ def build_study_time_summary(db: Session, user_id: UUID) -> StudyTimeSummary:
         month_seconds=active_since(month_start),
         year_seconds=active_since(year_start),
         total_seconds=active_since(None),
+    )
+
+
+def count_today_read_aloud(db: Session, user_id: UUID, now_local: datetime | None = None) -> int:
+    """Number of read-aloud exercises the child finished today (Asia/Shanghai).
+
+    "Finished" = a LearningEvent was recorded for review_mode="read-aloud".
+    Counts BOTH pass and 5-attempt giveup events, because the parent asked for
+    "每天读了多少次" — every time the child attempted the exercise (even if
+    they eventually gave up) is a real "开口" that should show up on the
+    dashboard.
+    """
+    local_now = now_local or datetime.now(LOCAL_TIMEZONE)
+    today_start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_utc = today_start_local.astimezone(UTC)
+    return int(
+        db.scalar(
+            select(func.count(LearningEvent.id)).where(
+                LearningEvent.user_id == user_id,
+                LearningEvent.review_mode == "read-aloud",
+                LearningEvent.occurred_at >= today_start_utc,
+            )
+        )
+        or 0
     )
 
 

@@ -135,7 +135,6 @@ export async function refreshAccessToken(): Promise<string | null> {
 async function refreshAccessTokenOnce(): Promise<string | null> {
   const refreshToken = getRefreshToken();
   if (!refreshToken) {
-    clearAuthSession();
     return null;
   }
 
@@ -148,10 +147,44 @@ async function refreshAccessTokenOnce(): Promise<string | null> {
     window.localStorage.setItem(refreshTokenKey, tokens.refresh_token);
     return tokens.access_token;
   } catch {
-    if (getRefreshToken() !== refreshToken) {
+    // The refresh itself failed. Two real reasons:
+    //   (a) the refresh token is genuinely dead (revoked server-side, or
+    //       expired) — we must log the user out;
+    //   (b) transient network blip — another device on the same account may
+    //       have just rotated the token and our in-flight call raced.
+    // Before nuking the session, give the user a chance: try one more time
+    // with whatever refresh token is currently in storage (a sibling tab
+    // or another device may have already replaced it). This stops the
+    // "我刚登录就被另一台设备挤掉" symptom on flaky networks.
+    if (getRefreshToken() && getRefreshToken() !== refreshToken) {
+      return getAccessToken();
+    }
+    // Last attempt: re-read the refresh token one more time after a tiny
+    // delay. If it changed (e.g., a parallel tab's refresh succeeded), use
+    // the new access token and skip the logout.
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+    if (getRefreshToken() && getRefreshToken() !== refreshToken) {
       return getAccessToken();
     }
     clearAuthSession();
+    notifySessionExpired();
     return null;
   }
+}
+
+const SESSION_EXPIRED_EVENT = "memoseed:session-expired";
+
+export function onSessionExpired(listener: () => void): () => void {
+  if (typeof window === "undefined") {
+    return () => undefined;
+  }
+  window.addEventListener(SESSION_EXPIRED_EVENT, listener);
+  return () => window.removeEventListener(SESSION_EXPIRED_EVENT, listener);
+}
+
+function notifySessionExpired(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
 }

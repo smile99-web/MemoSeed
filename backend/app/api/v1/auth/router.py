@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -24,7 +24,14 @@ from app.schemas.common import MessageResponse
 router = APIRouter()
 
 
-def issue_tokens(db: Session, user: User) -> TokenResponse:
+def _extract_device_hint(user_agent: str | None) -> str | None:
+    """Best-effort, truncated User-Agent for the audit trail. Never trusted."""
+    if not user_agent:
+        return None
+    return user_agent[:160]
+
+
+def issue_tokens(db: Session, user: User, device_hint: str | None = None) -> TokenResponse:
     access_token = create_access_token(subject=str(user.id))
     refresh_token = create_refresh_token()
     db.add(
@@ -32,6 +39,7 @@ def issue_tokens(db: Session, user: User) -> TokenResponse:
             user_id=user.id,
             token_hash=hash_refresh_token(refresh_token),
             expires_at=get_refresh_token_expires_at(),
+            device_hint=device_hint,
         )
     )
     db.commit()
@@ -39,7 +47,11 @@ def issue_tokens(db: Session, user: User) -> TokenResponse:
 
 
 @router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
-def register(payload: RegisterRequest, db: Annotated[Session, Depends(get_db)]) -> AuthResponse:
+def register(
+    payload: RegisterRequest,
+    db: Annotated[Session, Depends(get_db)],
+    user_agent: Annotated[str | None, Header(alias="User-Agent")] = None,
+) -> AuthResponse:
     existing_user = db.scalar(select(User).where(or_(User.email == payload.email, User.username == payload.username)))
     if existing_user is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email or username already exists")
@@ -53,22 +65,30 @@ def register(payload: RegisterRequest, db: Annotated[Session, Depends(get_db)]) 
     db.commit()
     db.refresh(user)
 
-    tokens = issue_tokens(db, user)
+    tokens = issue_tokens(db, user, device_hint=_extract_device_hint(user_agent))
     return AuthResponse(user=AuthUserResponse.model_validate(user), tokens=tokens)
 
 
 @router.post("/login", response_model=AuthResponse)
-def login(payload: LoginRequest, db: Annotated[Session, Depends(get_db)]) -> AuthResponse:
+def login(
+    payload: LoginRequest,
+    db: Annotated[Session, Depends(get_db)],
+    user_agent: Annotated[str | None, Header(alias="User-Agent")] = None,
+) -> AuthResponse:
     user = db.scalar(select(User).where(User.email == payload.email, User.is_active.is_(True)))
     if user is None or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
 
-    tokens = issue_tokens(db, user)
+    tokens = issue_tokens(db, user, device_hint=_extract_device_hint(user_agent))
     return AuthResponse(user=AuthUserResponse.model_validate(user), tokens=tokens)
 
 
 @router.post("/refresh", response_model=TokenResponse)
-def refresh(payload: RefreshTokenRequest, db: Annotated[Session, Depends(get_db)]) -> TokenResponse:
+def refresh(
+    payload: RefreshTokenRequest,
+    db: Annotated[Session, Depends(get_db)],
+    user_agent: Annotated[str | None, Header(alias="User-Agent")] = None,
+) -> TokenResponse:
     token_hash = hash_refresh_token(payload.refresh_token)
     matched_token = db.scalar(
         select(RefreshToken).where(
@@ -87,7 +107,9 @@ def refresh(payload: RefreshTokenRequest, db: Annotated[Session, Depends(get_db)
     matched_token.is_revoked = True
     matched_token.revoked_at = datetime.now(UTC)
     db.add(matched_token)
-    return issue_tokens(db, user)
+    # Carry the original device hint onto the rotated token so a long-running
+    # session keeps the same "iPad Safari" label even after multiple refreshes.
+    return issue_tokens(db, user, device_hint=matched_token.device_hint or _extract_device_hint(user_agent))
 
 
 @router.post("/logout", response_model=MessageResponse)

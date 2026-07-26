@@ -126,6 +126,12 @@ class MemoryDashboardResponse(BaseModel):
     review_buckets: list[ReviewBucket]
     weakest_words: list[WordMasterySummary]
     strongest_words: list[WordMasterySummary]
+    # Today: how many times the child has actually spoken aloud and either
+    # passed or hit the 5-attempt giveup. Counts BOTH pass and giveup events
+    # so the number reflects "开口次数" honestly (giveup = the child still
+    # tried five times, that effort should show up here). Defined as any
+    # LearningEvent with review_mode="read-aloud" today (Asia/Shanghai).
+    today_read_aloud_count: int = 0
 
 
 class FsrsFitResponse(BaseModel):

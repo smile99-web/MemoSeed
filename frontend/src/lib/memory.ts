@@ -102,6 +102,11 @@ export interface MemoryDashboard {
   review_buckets: ReviewBucket[];
   weakest_words: WordMasterySummary[];
   strongest_words: WordMasterySummary[];
+  /** How many read-aloud (voice practice) sessions finished today. Counts
+   * BOTH pass and 5-attempt giveup so the number honestly reflects how
+   * many times the child opened their mouth. Default 0 keeps older cached
+   * dashboard responses from breaking. */
+  today_read_aloud_count?: number;
 }
 
 export interface FsrsFitResponse {

@@ -19,8 +19,14 @@ class Settings(BaseSettings):
 
     jwt_secret_key: str = Field(default="change_me_to_a_long_random_secret", alias="JWT_SECRET_KEY")
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
-    jwt_access_token_expire_minutes: int = Field(default=15, alias="JWT_ACCESS_TOKEN_EXPIRE_MINUTES")
-    jwt_refresh_token_expire_days: int = Field(default=30, alias="JWT_REFRESH_TOKEN_EXPIRE_DAYS")
+    # Access token default: 8h. Long enough that children on iPads rarely hit a
+    # mid-session refresh (which can race across devices and log them out),
+    # short enough to bound compromise. Override via JWT_ACCESS_TOKEN_EXPIRE_MINUTES.
+    jwt_access_token_expire_minutes: int = Field(default=480, alias="JWT_ACCESS_TOKEN_EXPIRE_MINUTES")
+    # Refresh token default: 90d. A child may not log in for weeks; we don't
+    # want a hard 30-day logout. Multiple refresh tokens per user are allowed
+    # (one per device) so login on a new device does NOT kick older devices.
+    jwt_refresh_token_expire_days: int = Field(default=90, alias="JWT_REFRESH_TOKEN_EXPIRE_DAYS")
 
     ai_provider: str | None = Field(default=None, alias="AI_PROVIDER")
     ai_base_url: str | None = Field(default=None, alias="AI_BASE_URL")

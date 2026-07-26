@@ -1283,6 +1283,19 @@ export default function DashboardPage() {
               )}
             </div>
 
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <StatCard
+                label="今日朗读次数"
+                value={`${dashboard.today_read_aloud_count ?? 0} 次`}
+                hint="语音练习中每读一句（读对或 5 次放弃）算一次"
+              />
+              <StatCard
+                label="累计朗读"
+                value={`${(dashboard.total_reviews ?? 0).toLocaleString()} 题`}
+                hint="所有复习题总数（含拼写、选择、句意回顾）"
+              />
+            </div>
+
             <Card>
               <CardHeader>
                 <CardTitle>复习时间分布</CardTitle>

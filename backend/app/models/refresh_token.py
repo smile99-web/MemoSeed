@@ -22,5 +22,9 @@ class RefreshToken(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Free-form device label — typically a truncated User-Agent (browser / OS).
+    # Purely informational so users/admins can audit "which devices am I logged
+    # in on" without trusting the client. Safe to be empty or duplicated.
+    device_hint: Mapped[str | None] = mapped_column(String(160), nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="refresh_tokens")
