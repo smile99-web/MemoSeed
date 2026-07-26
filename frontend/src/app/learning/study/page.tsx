@@ -1115,7 +1115,12 @@ function StudyContent() {
       setEncodingWord("");
       setEncodingChineseText("");
       updateAnswerState("sentence-complete");
-      setFeedback("记忆编码完成！点击「下一题」按钮继续。", "success");
+      setFeedback("记忆编码完成！大声读出来吧 🎤", "success");
+      // Every exercise must end with pronunciation practice - the parent
+      // requires the child to read aloud correctly before advancing.
+      if (word) {
+        startEchoPrompt(word, chineseText);
+      }
       return;
     }
 
@@ -2978,10 +2983,14 @@ function StudyContent() {
     if (isManual) {
       // Degraded path: pre-ASR behavior — loudness detection auto-completes,
       // manual button stays available.
-      void speakClearEnglish(sequenceId, echoPrompt.text, settings, true);
-      if (isVoiceEchoSupported()) {
-        void (async () => {
-          const micReady = await initVoiceEcho();
+      void (async () => {
+        await speakClearEnglish(sequenceId, echoPrompt.text, settings, true);
+        if (!isCurrent()) return;
+        stopAudioPlayback();
+        await wait(300);
+        if (!isCurrent()) return;
+        if (!isVoiceEchoSupported()) return;
+        const micReady = await initVoiceEcho();
           if (!micReady || !isCurrent()) {
             return;
           }
@@ -3001,7 +3010,6 @@ function StudyContent() {
             setEchoVolume(0);
           }
         })();
-      }
       return () => {
         cancelled = true;
       };
@@ -3021,6 +3029,14 @@ function StudyContent() {
         // TTS hung — don't trap the child behind a gate that can't proceed.
         enterEchoManualMode("语音加载有点慢，这次先手动继续吧 🎈");
         setEchoPrompt({ ...echoPrompt });
+        return;
+      }
+      // CRITICAL: flush trailing TTS audio + 500ms silence gap before
+      // recording. Without this the mic catches the system TTS tail and
+      // ASR transcribes the model voice as the child (false pass).
+      stopAudioPlayback();
+      await wait(500);
+      if (!isCurrent()) {
         return;
       }
       const micReady = await initVoiceEcho();
