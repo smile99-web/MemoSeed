@@ -32,6 +32,8 @@ POINTS_STREAK_15 = 50            # 15 correct in a row
 POINTS_DAILY_STUDY = 30          # study at least once today
 POINTS_COURSE_COMPLETE = 100     # finish a course
 POINTS_MASTER_WORD = 20          # master a difficult word (3 consecutive correct)
+POINTS_VOICE_PRACTICE_PASS = 1    # small bonus for actively reading aloud (capped per day)
+VOICE_PRACTICE_DAILY_POINTS_CAP = 20
 POINTS_WRONG = -2                # wrong answer (minor penalty)
 
 # --- Levels ---

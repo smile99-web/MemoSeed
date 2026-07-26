@@ -1913,7 +1913,7 @@ function StudyContent() {
   // read-aloud flow. Intro TTS / encoding / warm-up are skipped — the echo
   // effect plays the model reading itself before recording.
   useEffect(() => {
-    if (currentItem?.review_task_type !== "read_aloud") {
+    if (currentItem?.review_task_type !== "read_aloud" && currentItem?.review_task_type !== "voice_practice") {
       return;
     }
     updateAnswerState("sentence-complete");
@@ -2470,6 +2470,30 @@ function StudyContent() {
     ).catch(() => undefined);
   }
 
+  // Voice practice review task: when the echo card fires on a
+  // review_task_type="voice_practice" item, the read-aloud is the whole
+  // exercise — a real test of the child's spoken recall. Submit a real
+  // review_log with review_mode="voice-practice" so FSRS gets fed actual
+  // signal (unlike the speak-mode echo card which is telemetry-only).
+  // Pass score=4 (production-without-hint tier); giveup score=1 (lapse).
+  function recordVoicePracticeReview(passed: boolean) {
+    const item = currentItemRef.current;
+    if (!item || item.review_task_type !== "voice_practice") {
+      return;
+    }
+    const targetText = (item.english_text || "").trim();
+    if (!targetText) {
+      return;
+    }
+    recordWordMemoryReview(
+      targetText,
+      passed ? 4 : 1,
+      "voice-practice",
+      echoLastTranscriptRef.current || "",
+      passed ? undefined : "pronunciation",
+    );
+  }
+
   function recordSuccessfulWordSpelling(expectedWord: string, typedWord: string, errorCount: number, usedPreview: boolean, isStandalonePractice: boolean) {
     if (usedPreview) {
       recordWordMemoryReview(expectedWord, 3, "word-preview", typedWord);
@@ -2888,6 +2912,11 @@ function StudyContent() {
     setEchoStatus("success");
     setEchoVolume(0);
     logReadAloudCompletion(true);
+    // Voice practice task: submit a real review_log so FSRS learns from
+    // the read-aloud outcome. Pass score=4 (production, no hint).
+    if (source === "voice" && currentItemRef.current?.review_task_type === "voice_practice") {
+      recordVoicePracticeReview(true);
+    }
     const nextCount = incrementEchoCountToday();
     setEchoCountToday(nextCount);
     const earnsPoints = (nextCount - 1) * ECHO_POINTS_PER_READ < ECHO_DAILY_POINTS_CAP;
@@ -3075,6 +3104,11 @@ function StudyContent() {
         setFeedback("没关系，这句有点难，我们先继续，一会儿再回来读！💪", "success");
         playCorrectDing();
         logReadAloudCompletion(false);
+        // Voice practice task giveup: submit a lapsed review so FSRS sees
+        // the failed attempt (telemetry-only speak-mode echo skips this).
+        if (currentItemRef.current?.review_task_type === "voice_practice") {
+          recordVoicePracticeReview(false);
+        }
         window.setTimeout(() => {
           advanceFromEcho(echoPrompt);
         }, 1800);
@@ -4685,7 +4719,7 @@ function StudyContent() {
                       {pendingMistakePracticeWords.length > 0 ? "进入错词复习" : "下一句"}
                     </Button>
                   ) : null}
-                  {currentItem?.review_task_type !== "read_aloud" ? (
+                  {currentItem?.review_task_type !== "read_aloud" && currentItem?.review_task_type !== "voice_practice" ? (
                     <Button className={actionButtonClass} onClick={() => runStudyButtonAction(resetAnswer)} onMouseDown={keepStudyInputFocus} type="button" variant="secondary">
                       再来一次
                     </Button>

@@ -734,11 +734,22 @@ def list_learning_items(
             enriched.append(choice_item)
             enriched.append(_apply_course_cloze(LearningItemRead.model_validate(item)))
 
+        # Active voice practice in learn mode: sprinkle read-aloud tasks onto
+        # familiar content so the child speaks aloud during new-word learning
+        # too (parent asked for "单词复习 + 新句子学习" coverage).
+        learn_voice = _build_voice_practice_items(db, current_user.id, enriched)
+        if learn_voice:
+            enriched = _interleave_voice(enriched, learn_voice, step=7)
+
         # Prune to limit if needed
         if limit is not None and limit > 0:
             return enriched[:limit]
         return enriched
 
+    # Non-include_choices path: still inject voice practice.
+    voice = _build_voice_practice_items(db, current_user.id, result)
+    if voice:
+        result = _interleave_voice(result, voice, step=7)
     return result
 
 
@@ -830,6 +841,94 @@ def _get_phonics_group(word: str) -> str | None:
         if w in members or w.endswith(group):
             return group
     return None
+
+
+def _build_voice_practice_items(
+    db: Session,
+    user_id: UUID,
+    existing_items: list[LearningItemRead],
+) -> list[LearningItemRead]:
+    """Pick familiar word/sentence items for active voice practice.
+
+    Returns synthetic LearningItemRead objects with review_task_type=
+    "voice_practice". Items are sourced from LearningItem rows the child has
+    already studied (MemoryState.repetition_count >= 3) and that are NOT
+    already in the existing queue (avoids testing the same word twice in one
+    session). Capped at 4 per queue so voice work stays a light complement.
+    """
+    VOICE_PRACTICE_MAX_PER_QUEUE = 4
+    # Collect english_text already in the queue so we don't duplicate.
+    existing_texts: set[str] = set()
+    for item in existing_items:
+        eng = (item.english_text or "").strip().lower()
+        if eng:
+            existing_texts.add(eng)
+    candidates = db.execute(
+        select(LearningItem, MemoryState.repetition_count)
+        .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
+        .where(
+            LearningItem.user_id == user_id,
+            LearningItem.item_type.in_(["word", "phrase", "sentence"]),
+            MemoryState.repetition_count >= 3,
+        )
+        .order_by(MemoryState.repetition_count.desc(), LearningItem.id)
+        .limit(40)
+    ).all()
+    voice_items: list[LearningItemRead] = []
+    for cand_item, _reps in candidates:
+        if len(voice_items) >= VOICE_PRACTICE_MAX_PER_QUEUE:
+            break
+        eng = (cand_item.english_text or "").strip()
+        if not eng or eng.lower() in existing_texts:
+            continue
+        voice_items.append(
+            LearningItemRead(
+                id=uuid4(),
+                source_item_id=cand_item.id,
+                user_id=user_id,
+                course_id=cand_item.course_id,
+                item_type=cand_item.item_type,
+                english_text=eng,
+                chinese_text=(cand_item.chinese_text or "").strip(),
+                review_task_type="voice_practice",
+                review_prompt="🎤 跟我读一遍",
+                review_answer=eng,
+                source="主动发音练习",
+                focus_words=[eng.lower()] if cand_item.item_type == "word" else [],
+                created_at=cand_item.created_at,
+                updated_at=cand_item.updated_at,
+            )
+        )
+        existing_texts.add(eng.lower())
+    return voice_items
+
+
+def _interleave_voice(
+    base_items: list[LearningItemRead],
+    voice_items: list[LearningItemRead],
+    *,
+    step: int = 6,
+) -> list[LearningItemRead]:
+    """Splice voice_practice items evenly into the base queue.
+
+    After every `step` regular items, insert one voice item. No regular
+    items are removed - the voice items are pure additions.
+    """
+    if not voice_items:
+        return base_items
+    merged: list[LearningItemRead] = []
+    queue_idx = 0
+    voice_idx = 0
+    s = max(1, step)
+    while queue_idx < len(base_items) or voice_idx < len(voice_items):
+        for _ in range(s):
+            if queue_idx < len(base_items):
+                merged.append(base_items[queue_idx])
+                queue_idx += 1
+        if voice_idx < len(voice_items):
+            merged.append(voice_items[voice_idx])
+            voice_idx += 1
+    return merged
 
 
 @router.get("/review-items", response_model=list[LearningItemRead])
@@ -1555,6 +1654,16 @@ def list_due_review_items(
         tail_items = [s for s in sentence_review_items
                       if s.id not in prefix_ids
                       and tokenize_words(s.english_text) and tokenize_words(s.english_text)[0].strip().lower() not in prefix_word_set]
+        # Active voice practice (voice_practice task type): sprinkle read-aloud
+        # tasks into the review queue so the child is actively pushed to speak
+        # on familiar content during normal review. One voice task every ~6
+        # regular tasks keeps the queue mostly spelling/choice but introduces
+        # voice work organically. Items are picked from already-studied
+        # (repetition_count >= 3) word/sentence items - voice work supplements
+        # the existing ladder rather than replacing it.
+        voice_items = _build_voice_practice_items(db, current_user.id, prefix_items)
+        if voice_items:
+            prefix_items = _interleave_voice(prefix_items, voice_items, step=6)
         review_items = task_review_items + prefix_items + tail_items
         # Clamp to capped_limit
         return review_items[:capped_limit] if len(review_items) > capped_limit else review_items
@@ -1578,6 +1687,9 @@ def list_due_review_items(
                     break
             if review_idx >= len(task_review_items) and sentence_idx >= len(sentence_review_items):
                 break
+        voice_items = _build_voice_practice_items(db, current_user.id, review_items)
+        if voice_items:
+            review_items = _interleave_voice(review_items, voice_items, step=6)
         return review_items
 
     review_items: list[LearningItemRead] = task_review_items[:]
@@ -1585,6 +1697,11 @@ def list_due_review_items(
         if len(review_items) >= capped_limit:
             break
         review_items.append(item_read)
+
+    # Active voice practice for non-focus-mode paths too.
+    voice_items = _build_voice_practice_items(db, current_user.id, review_items)
+    if voice_items:
+        review_items = _interleave_voice(review_items, voice_items, step=6)
 
     # Phonics mode: regroup items by sound family so the child
     # practices related words together (e.g., light/night/right
