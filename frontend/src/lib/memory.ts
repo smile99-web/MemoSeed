@@ -107,6 +107,9 @@ export interface MemoryDashboard {
    * many times the child opened their mouth. Default 0 keeps older cached
    * dashboard responses from breaking. */
   today_read_aloud_count?: number;
+  /* Same event set as today_read_aloud_count, counted since Monday 00:00
+   * Asia/Shanghai — feeds the 每周朗读次数 card. */
+  week_read_aloud_count?: number;
 }
 
 export interface FsrsFitResponse {

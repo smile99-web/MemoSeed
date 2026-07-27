@@ -29,6 +29,15 @@ SPEAK_DAILY_CAP = 10
 # the echo-gate flow) / review_mode on the timeline LearningEvent.
 READ_ALOUD_TASK_TYPE = "read_aloud"
 READ_ALOUD_REVIEW_MODE = "read-aloud"
+# Echo completions attached to ordinary exercises (spelling/choice/cloze/
+# warm-up/voice_practice) — every exercise ends with a read-aloud gate now.
+# Kept SEPARATE from READ_ALOUD_REVIEW_MODE so the speak-mode candidate
+# selection (which excludes items already spoken today) is not affected by
+# review/learn echoes, while dashboard counters count both.
+ECHO_READ_REVIEW_MODE = "echo-read"
+# All review_mode values that mean "the child read aloud once" — the
+# dashboard's 今日/每周朗读次数 count these.
+READ_ALOUD_COUNT_MODES = (READ_ALOUD_REVIEW_MODE, ECHO_READ_REVIEW_MODE)
 
 _EPOCH = datetime(1970, 1, 1)
 

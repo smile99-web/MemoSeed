@@ -621,6 +621,11 @@ export interface ReadAloudEventPayload {
   passed: boolean;
   duration_seconds: number;
   transcript?: string;
+  // "speak-mode" = dedicated 语音练习 queue; "exercise-echo" = the read-aloud
+  // gate after any ordinary exercise. Backend maps these to review_mode
+  // "read-aloud" / "echo-read" respectively. Omitting it keeps the legacy
+  // speak-mode behaviour.
+  source?: "speak-mode" | "exercise-echo";
 }
 
 export async function logReadAloudEvent(accessToken: string, payload: ReadAloudEventPayload): Promise<void> {

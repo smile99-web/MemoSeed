@@ -1791,7 +1791,13 @@ function StudyContent() {
       const now = Date.now();
       const elapsedMs = Math.max(0, now - lastStudyTickAtRef.current);
       lastStudyTickAtRef.current = now;
-      if (now - lastStudyActivityAtRef.current > STUDY_IDLE_TIMEOUT_MS) {
+      // An active echo card (听音跟读) IS study activity: the child listens to
+      // the model pronunciation then reads aloud — neither produces keydown /
+      // pointer events, so without this exemption the timer auto-paused 10s
+      // into every read-aloud (most visibly in 语音练习, which looked like it
+      // "没有计时" at all).
+      const echoActive = echoPromptRef.current !== null;
+      if (!echoActive && now - lastStudyActivityAtRef.current > STUDY_IDLE_TIMEOUT_MS) {
         if (!isStudyPausedRef.current) {
           isStudyPausedRef.current = true;
           setIsStudyPaused(true);
@@ -2890,14 +2896,17 @@ function StudyContent() {
   // the advance still goes through completeEcho, never around it.
   // ---------------------------------------------------------------------
 
-  // Speak-mode telemetry: a finished read_aloud exercise (pass or giveup)
-  // becomes a timeline LearningEvent via /learning/read-aloud-events.
-  // Telemetry only — the backend touches no FSRS/review_log for these. For
-  // non-read_aloud items (normal echo after a typed/choice answer) this is
-  // a no-op: those completions already have their own review submission.
+  // Read-aloud telemetry: EVERY finished echo gate (pass or giveup) becomes
+  // a timeline LearningEvent via /learning/read-aloud-events — the dashboard
+  // 今日/每周朗读次数 cards count these. Telemetry only — the backend touches
+  // no FSRS/review_log for them. source tells the backend which review_mode
+  // to store: "speak-mode" (dedicated 语音练习 queue → "read-aloud") vs
+  // "exercise-echo" (gate after an ordinary typed/choice answer → "echo-read",
+  // kept separate so review echoes never shrink the speak queue's
+  // already-spoken-today exclusion).
   function logReadAloudCompletion(passed: boolean) {
     const item = currentItemRef.current;
-    if (!item || item.review_task_type !== "read_aloud") {
+    if (!item) {
       return;
     }
     const token = getAccessToken();
@@ -2905,12 +2914,19 @@ function StudyContent() {
       return;
     }
     const startedAtMs = echoStartedAtMsRef.current;
+    // Generated wrapper items (dynamic sentences etc.) have no row in
+    // learning_items — log against the source item instead, or leave the id
+    // out entirely and let the backend keep just the english_text.
+    const realId = item.source_item_id ?? (item.id.startsWith("generated-") ? undefined : item.id);
     void logReadAloudEvent(token, {
-      learning_item_id: item.id,
-      english_text: item.english_text,
+      learning_item_id: realId ?? undefined,
+      // Log what the child actually read: for course warm-up word echoes the
+      // prompt is a single word, not the parent sentence item's text.
+      english_text: (echoPromptRef.current?.text ?? item.english_text).slice(0, 200),
       passed,
       duration_seconds: startedAtMs > 0 ? Math.max(1, Math.round((Date.now() - startedAtMs) / 1000)) : 1,
       transcript: echoLastTranscriptRef.current || undefined,
+      source: item.review_task_type === "read_aloud" ? "speak-mode" : "exercise-echo",
     }).catch(() => undefined);
   }
 

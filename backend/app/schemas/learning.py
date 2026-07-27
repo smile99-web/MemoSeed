@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -218,6 +219,10 @@ class ReadAloudEventRequest(BaseModel):
     passed: bool
     duration_seconds: float = Field(default=0, ge=0, le=600)
     transcript: str | None = Field(default=None, max_length=400)
+    # "speak-mode" = the dedicated 语音练习 queue (review_mode "read-aloud");
+    # "exercise-echo" = the read-aloud gate after any ordinary exercise
+    # (review_mode "echo-read"). Defaults keep older clients working.
+    source: Literal["speak-mode", "exercise-echo"] = "speak-mode"
 
 
 class ReadAloudEventResponse(BaseModel):

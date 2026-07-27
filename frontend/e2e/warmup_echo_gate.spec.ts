@@ -90,6 +90,15 @@ async function openCourseLearnPage(page: Page) {
       body: JSON.stringify({ translations: { strawberry: "草莓" } }),
     });
   });
+  // The warmup echo pass posts an exercise-echo read-aloud event — mock it
+  // so test runs don't inflate the child's 今日/每周朗读次数 on production.
+  await page.route("**/api/v1/learning/read-aloud-events", async (route) => {
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({ learning_item_id: null }),
+    });
+  });
 
   await page.goto(
     `${BASE}/learning/study?course_id=${COURSE_ID}&package_id=${PACKAGE_ID}&course_name=${encodeURIComponent("测试课")}&mode=learn`,

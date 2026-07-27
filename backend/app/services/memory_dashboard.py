@@ -17,6 +17,7 @@ from app.models.review_log import ReviewLog
 from app.models.study_time_log import StudyTimeLog
 from app.models.user_model_settings import UserModelSettings
 from app.models.word_memory_state import WordMemoryState
+from app.services.speak_practice import READ_ALOUD_COUNT_MODES
 from app.models.word_review_task import WordReviewTask
 from app.schemas.memory import MemoryDashboardResponse, ReviewBucket, StudyTimeSummary, WordMasterySummary
 from app.services.fsrs_fitting import MIN_FSRS_TRAINING_REVIEWS
@@ -378,6 +379,7 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
         study_time=study_time,
         review_buckets=build_review_buckets(memory_states, now),
         today_read_aloud_count=count_today_read_aloud(db, user_id, now_local),
+        week_read_aloud_count=count_week_read_aloud(db, user_id, now_local),
         weakest_words=sorted(summaries, key=lambda summary: (-summary.priority_score, summary.memory_strength, -summary.forget_risk)),
         strongest_words=sorted(summaries, key=lambda summary: (-summary.memory_strength, summary.mistake_count, summary.forget_risk)),
     )
@@ -407,13 +409,13 @@ def build_study_time_summary(db: Session, user_id: UUID) -> StudyTimeSummary:
 
 
 def count_today_read_aloud(db: Session, user_id: UUID, now_local: datetime | None = None) -> int:
-    """Number of read-aloud exercises the child finished today (Asia/Shanghai).
+    """Number of times the child read aloud today (Asia/Shanghai).
 
-    "Finished" = a LearningEvent was recorded for review_mode="read-aloud".
-    Counts BOTH pass and 5-attempt giveup events, because the parent asked for
-    "每天读了多少次" — every time the child attempted the exercise (even if
-    they eventually gave up) is a real "开口" that should show up on the
-    dashboard.
+    "Read aloud" = a completed echo gate — pass or 5-attempt giveup — from
+    ANY flow: the dedicated 语音练习 queue (review_mode "read-aloud") AND the
+    read-aloud gate after ordinary exercises (review_mode "echo-read"). The
+    parent asked for "每天读了多少次": every time the child opened their
+    mouth counts, regardless of which exercise it was attached to.
     """
     local_now = now_local or datetime.now(LOCAL_TIMEZONE)
     today_start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -422,8 +424,29 @@ def count_today_read_aloud(db: Session, user_id: UUID, now_local: datetime | Non
         db.scalar(
             select(func.count(LearningEvent.id)).where(
                 LearningEvent.user_id == user_id,
-                LearningEvent.review_mode == "read-aloud",
+                LearningEvent.review_mode.in_(READ_ALOUD_COUNT_MODES),
                 LearningEvent.occurred_at >= today_start_utc,
+            )
+        )
+        or 0
+    )
+
+
+def count_week_read_aloud(db: Session, user_id: UUID, now_local: datetime | None = None) -> int:
+    """Number of times the child read aloud this week (Mon 00:00 Asia/Shanghai).
+
+    Same event set as count_today_read_aloud — the dashboard's 每周朗读次数
+    card (replaced the old 累计朗读 card per the parent's request).
+    """
+    local_now = now_local or datetime.now(LOCAL_TIMEZONE)
+    today_start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start_utc = (today_start_local - timedelta(days=today_start_local.weekday())).astimezone(UTC)
+    return int(
+        db.scalar(
+            select(func.count(LearningEvent.id)).where(
+                LearningEvent.user_id == user_id,
+                LearningEvent.review_mode.in_(READ_ALOUD_COUNT_MODES),
+                LearningEvent.occurred_at >= week_start_utc,
             )
         )
         or 0

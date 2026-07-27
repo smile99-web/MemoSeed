@@ -111,6 +111,7 @@ def record_assisted_learning_event(
     duration_ms: int = 0,
     error_type: str | None = None,
     is_correct: bool = True,
+    fallback_english_text: str = "",
 ) -> LearningEvent | None:
     """P15: record an ASSISTED-phase attempt (answer was shown / heavily
     hinted) as telemetry only — a LearningEvent + minute stat, with
@@ -121,6 +122,10 @@ def record_assisted_learning_event(
     `is_correct` stays True for the genuinely unfailable assisted phases;
     telemetry-only modes that CAN fail (e.g. read-aloud giveup) pass False
     so the replay timeline stays honest.
+
+    `fallback_english_text` is used when the learning item could not be
+    resolved (e.g. a warm-up word with no standalone item) so the timeline
+    row still shows WHAT was read instead of a blank.
     """
     now = datetime.now(UTC)
     local_dt = now.astimezone(LOCAL_TIMEZONE)
@@ -138,7 +143,7 @@ def record_assisted_learning_event(
         review_mode=review_mode,
         is_correct=is_correct,
         score=score,
-        english_text=(learning_item.english_text if learning_item else ""),
+        english_text=(learning_item.english_text if learning_item else fallback_english_text.strip()),
         chinese_text=(learning_item.chinese_text if learning_item else None),
         response_text=response_text,
         duration_ms=max(0, duration_ms),

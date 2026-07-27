@@ -78,6 +78,7 @@ from app.services.pronunciation import recognize_speech_flash, score_pronunciati
 from app.services.secure_model_settings import get_private_model_settings
 from app.services.speak_practice import (
     READ_ALOUD_REVIEW_MODE,
+    ECHO_READ_REVIEW_MODE,
     READ_ALOUD_TASK_TYPE,
     SPEAK_DAILY_CAP,
     select_speak_candidates,
@@ -2363,6 +2364,13 @@ def create_read_aloud_event(
     contribution. A pass scores 3; a giveup scores 1 and stays
     is_correct=False so the timeline is honest about which sentences are
     still hard to say.
+
+    `source` splits the timeline mode: "speak-mode" events keep
+    review_mode="read-aloud" (the dedicated 语音练习 queue — the speak-item
+    candidate selection excludes items already spoken today based on it),
+    while "exercise-echo" events (the read-aloud gate after any ordinary
+    exercise) use "echo-read" so they never shrink the speak queue. The
+    dashboard's 今日/每周朗读次数 count both.
     """
     learning_item: LearningItem | None = None
     if payload.learning_item_id is not None:
@@ -2389,11 +2397,12 @@ def create_read_aloud_event(
             db,
             current_user.id,
             learning_item,
-            READ_ALOUD_REVIEW_MODE,
+            READ_ALOUD_REVIEW_MODE if payload.source == "speak-mode" else ECHO_READ_REVIEW_MODE,
             3 if payload.passed else 1,
             response_text=(payload.transcript or "").strip() or None,
             duration_ms=min(int(payload.duration_seconds * 1000), 5 * 60 * 1000) or 10_000,
             is_correct=payload.passed,
+            fallback_english_text=payload.english_text,
         )
     except Exception as exc:
         logger.warning("Failed to record read-aloud learning event: %s", exc)

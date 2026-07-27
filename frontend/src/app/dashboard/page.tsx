@@ -1287,12 +1287,12 @@ export default function DashboardPage() {
               <StatCard
                 label="今日朗读次数"
                 value={`${dashboard.today_read_aloud_count ?? 0} 次`}
-                hint="语音练习中每读一句（读对或 5 次放弃）算一次"
+                hint="每道题读完后的跟读都算（读对或 5 次放弃），含语音练习"
               />
               <StatCard
-                label="累计朗读"
-                value={`${(dashboard.total_reviews ?? 0).toLocaleString()} 题`}
-                hint="所有复习题总数（含拼写、选择、句意回顾）"
+                label="每周朗读次数"
+                value={`${dashboard.week_read_aloud_count ?? 0} 次`}
+                hint="本周一至今的朗读总次数，口径与今日朗读一致"
               />
             </div>
 
