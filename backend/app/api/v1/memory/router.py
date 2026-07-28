@@ -319,7 +319,16 @@ def record_study_time(
         if course is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Course not found")
 
-    db.add(StudyTimeLog(user_id=current_user.id, course_id=payload.course_id, duration_seconds=payload.duration_seconds))
+    db.add(StudyTimeLog(
+        user_id=current_user.id,
+        course_id=payload.course_id,
+        # Defense-in-depth against timer runaways (2026-07-28 incident: a
+        # frontend idle-watchdog exemption counted 69 min while the child was
+        # away). Heartbeats flush every 10s and the idle watchdog pauses at
+        # 10s/90s, so legit values never exceed ~100s. Clamp (not reject) so
+        # a buggy/cached client stays bounded instead of 422-looping.
+        duration_seconds=min(payload.duration_seconds, 180),
+    ))
     db.commit()
     # Daily study reward (once per local day) — the heartbeat is the only
     # reliable "child studied today" signal, so the award is wired here.

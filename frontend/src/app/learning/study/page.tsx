@@ -71,6 +71,14 @@ const itemTypeLabels: Record<LearningItem["item_type"], string> = {
 };
 
 const STUDY_IDLE_TIMEOUT_MS = 10_000;
+// While the echo card (听音跟读) is up the child listens + reads aloud and
+// produces no key/pointer events, so the normal 10s watchdog must not pause
+// the timer. But the exemption must stay BOUNDED: a child who walks away
+// with the card open (real incident 2026-07-28: 69 idle minutes counted)
+// would otherwise rack up unlimited "study time". 90s comfortably covers a
+// full read cycle (3-pass slow TTS ≤ ~45s + one attempt) and echo status
+// transitions keep refreshing the activity clock while genuinely engaged.
+const ECHO_STUDY_IDLE_TIMEOUT_MS = 90_000;
 const STUDY_TIME_FLUSH_SECONDS = 10;
 // Cap per-review wall-clock duration. startedAt is set when an item appears
 // and is NOT paused on visibilitychange (unlike the study-time heartbeat),
@@ -695,6 +703,9 @@ function StudyContent() {
   const echoManualModeRef = useRef(false);
   const echoGateActiveRef = useRef(false);
   const echoPromptRef = useRef<{ text: string; translation: string } | null>(null);
+  // Stable handle so echo lifecycle code (declared outside the study-timer
+  // effect) can refresh the activity clock — see the echoStatus effect below.
+  const markStudyActivityRef = useRef<() => void>(() => {});
   // Speak-mode (read_aloud) telemetry: when the echo card opened and the
   // last transcript the ASR heard — sent to /learning/read-aloud-events when
   // the exercise finishes (pass or 5-attempt giveup).
@@ -1793,11 +1804,13 @@ function StudyContent() {
       lastStudyTickAtRef.current = now;
       // An active echo card (听音跟读) IS study activity: the child listens to
       // the model pronunciation then reads aloud — neither produces keydown /
-      // pointer events, so without this exemption the timer auto-paused 10s
-      // into every read-aloud (most visibly in 语音练习, which looked like it
-      // "没有计时" at all).
-      const echoActive = echoPromptRef.current !== null;
-      if (!echoActive && now - lastStudyActivityAtRef.current > STUDY_IDLE_TIMEOUT_MS) {
+      // pointer events, so the bare 10s watchdog paused mid-read-aloud (the
+      // "语音练习没有计时" bug). Use a longer-but-FINITE 90s timeout instead:
+      // echo status transitions bump the activity clock while the child is
+      // really cycling, but walking away with the card open pauses the timer
+      // after 90s instead of counting forever (the 57-minutes-for-1-题 bug).
+      const idleTimeoutMs = echoPromptRef.current !== null ? ECHO_STUDY_IDLE_TIMEOUT_MS : STUDY_IDLE_TIMEOUT_MS;
+      if (now - lastStudyActivityAtRef.current > idleTimeoutMs) {
         if (!isStudyPausedRef.current) {
           isStudyPausedRef.current = true;
           setIsStudyPaused(true);
@@ -1828,6 +1841,7 @@ function StudyContent() {
     window.addEventListener("touchstart", markStudyActivity, true);
     window.addEventListener("pagehide", flushWhenLeaving);
     document.addEventListener("visibilitychange", flushWhenLeaving);
+    markStudyActivityRef.current = markStudyActivity;
     const intervalId = window.setInterval(tickStudyTime, 1000);
 
     return () => {
@@ -3037,6 +3051,17 @@ function StudyContent() {
     // of ASR, but the advance still goes through completeEcho.
     echoGateActiveRef.current = echoPrompt !== null;
   }, [echoPrompt]);
+
+  useEffect(() => {
+    // Every echo lifecycle transition (prompt shown → TTS → listening →
+    // checking → retry/success/giveup) is proof the child is engaged, so it
+    // refreshes the study-timer activity clock. This is what lets the echo
+    // idle timeout stay finite (90s): a really-reading child bumps the clock
+    // every few seconds; an abandoned card goes quiet and the timer pauses.
+    if (echoPrompt) {
+      markStudyActivityRef.current();
+    }
+  }, [echoPrompt, echoStatus]);
 
   // Echo side-effects: play the model English TTS, then record the child and
   // score the pronunciation. Replays (再听一遍 / retry) retrigger this effect

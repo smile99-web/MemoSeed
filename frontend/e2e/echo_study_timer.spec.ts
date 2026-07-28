@@ -36,6 +36,63 @@ function parseDuration(text: string): number {
   return parts.reduce((acc, n) => acc * 60 + n, 0);
 }
 
+test("echo card abandoned: study timer pauses after 90s of quiet (no runaway)", async ({ page }) => {
+  test.skip(!TOKEN, "no token provided");
+  test.setTimeout(300000);
+
+  // SILENT mic — a MediaStream with no audio source, simulating the child
+  // having walked away (real incident 2026-07-28: an echo card left open
+  // counted 69 minutes / "1 题 · 57 分钟" on the replay page).
+  await page.addInitScript(() => {
+    const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = async (constraints) => {
+      if (!constraints || constraints.audio !== true) {
+        return original(constraints);
+      }
+      const ctx = new AudioContext();
+      const destination = ctx.createMediaStreamDestination();
+      return destination.stream; // no source connected → pure silence
+    };
+  });
+  await page.goto(`${BASE}/login`, { waitUntil: "domcontentloaded" });
+  await page.evaluate(
+    ({ token, user }) => {
+      window.localStorage.setItem("memoseed_access_token", token);
+      window.localStorage.setItem("memoseed_user", JSON.stringify(user));
+    },
+    { token: TOKEN, user: USER },
+  );
+
+  // Instant "no speech heard" → the echo card cycles its no-speech retries
+  // (3×) into manual mode, then sits quiet forever — the abandonment shape.
+  await page.route("**/api/v1/learning/pronunciation-check", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ transcript: "", score: 0, passed: false, heard_speech: false }),
+    });
+  });
+  await page.route("**/api/v1/learning/read-aloud-events", async (route) => {
+    await route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ learning_item_id: null }) });
+  });
+
+  await page.goto(`${BASE}/learning/study?mode=speak`, { waitUntil: "domcontentloaded" });
+  await expect(page).not.toHaveURL(/login/, { timeout: 15000 });
+  await expect(page.getByText("正在加载学习内容")).toBeHidden({ timeout: 60000 });
+  await expect(page.getByText("轮到你了！大声读出来")).toBeVisible({ timeout: 30000 });
+
+  // The no-speech retries + manual-mode TTS keep bumping the activity clock
+  // for the first ~40s; after the final quiet "listening" state the 90s
+  // echo idle timeout must fire — generously waited out here.
+  await expect(page.getByText("⏸ 已暂停")).toBeVisible({ timeout: 180000 });
+
+  // And once paused the clock must stay frozen.
+  const timer = page.locator("p.font-mono", { hasText: /^\d+:\d{2}/ }).first();
+  const frozenAt = (await timer.textContent()) ?? "";
+  await page.waitForTimeout(3000);
+  expect((await timer.textContent()) ?? "").toBe(frozenAt);
+});
+
 test("echo card active: study timer keeps counting through 15s of silence (no pause)", async ({ page }) => {
   test.skip(!TOKEN, "no token provided");
   test.setTimeout(180000);
