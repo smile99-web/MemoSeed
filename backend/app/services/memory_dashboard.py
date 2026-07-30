@@ -334,7 +334,16 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
     total_reviews = db.scalar(review_base) or 0
     correct_reviews = db.scalar(review_base.where(ReviewLog.is_correct.is_(True))) or 0
     total_mistakes = db.scalar(mistake_base) or 0
-    unresolved_mistakes = db.scalar(mistake_base.where(MistakeLog.is_resolved.is_(False))) or 0
+    # Unresolved = distinct open mistakes (item + expected answer), matching
+    # the 今日学习进度 card — repeat failures share one open row since the
+    # 2026-07-30 dedup, but historical duplicates may still linger.
+    unresolved_mistakes = db.scalar(
+        select(func.count(func.distinct(MistakeLog.learning_item_id, MistakeLog.expected_answer))).where(
+            MistakeLog.user_id == user_id,
+            MistakeLog.is_resolved.is_(False),
+            *((MistakeLog.learning_item_id.in_(course_item_ids),) if course_id is not None else ()),
+        )
+    ) or 0
 
     try:
         stored_settings = db.scalar(select(UserModelSettings).where(UserModelSettings.user_id == user_id))
@@ -1052,7 +1061,7 @@ def build_today_plan(db: Session, user_id: UUID) -> dict[str, object]:
     ) or 0
 
     unresolved_mistake_count = db.scalar(
-        select(func.count(MistakeLog.id))
+        select(func.count(func.distinct(MistakeLog.learning_item_id, MistakeLog.expected_answer)))
         .where(MistakeLog.user_id == user_id, MistakeLog.is_resolved.is_(False))
     ) or 0
 
@@ -1614,19 +1623,30 @@ def build_today_progress(db: Session, user_id: UUID) -> dict[str, object]:
         )
     ) or 0
 
-    # Mistake practice
-    planned_mistakes = db.scalar(
-        select(func.count(MistakeLog.id)).where(
+    # Mistake practice. The card tracks DISTINCT open mistakes (one per
+    # learning item + expected answer), not raw MistakeLog rows — repeat
+    # failures of the same word bump a single open row (see
+    # memory_scheduler.schedule_memory_review dedup, 2026-07-30), and raw
+    # row counting is what showed a scary "还剩 1696" for 314 real words.
+    #
+    # planned  = open mistakes now + mistakes resolved today (today's debt)
+    # completed = mistakes resolved today (via resolved_at — historical rows
+    #             resolved before 2026-07-30 have resolved_at=NULL and simply
+    #             don't count toward any day)
+    # remaining = open mistakes now — the identity remaining = planned -
+    #             completed holds by construction.
+    open_mistakes = db.scalar(
+        select(func.count(func.distinct(MistakeLog.learning_item_id, MistakeLog.expected_answer))).where(
             MistakeLog.user_id == user_id,
             MistakeLog.is_resolved.is_(False),
         )
     ) or 0
 
-    completed_mistakes = db.scalar(
-        select(func.count(MistakeLog.id)).where(
+    resolved_today = db.scalar(
+        select(func.count(func.distinct(MistakeLog.learning_item_id, MistakeLog.expected_answer))).where(
             MistakeLog.user_id == user_id,
             MistakeLog.is_resolved.is_(True),
-            MistakeLog.occurred_at >= today_start,
+            MistakeLog.resolved_at >= today_start,
         )
     ) or 0
 
@@ -1643,8 +1663,8 @@ def build_today_progress(db: Session, user_id: UUID) -> dict[str, object]:
             "remaining": max(0, planned_new - completed_new),
         },
         "mistakes": {
-            "planned": planned_mistakes,
-            "completed": completed_mistakes,
-            "remaining": max(0, planned_mistakes - completed_mistakes),
+            "planned": open_mistakes + resolved_today,
+            "completed": resolved_today,
+            "remaining": open_mistakes,
         },
     }

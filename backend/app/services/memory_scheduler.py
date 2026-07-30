@@ -1322,6 +1322,11 @@ def schedule_memory_review(
             ).all()
             for mistake in unresolved_mistakes:
                 mistake.is_resolved = True
+                # Stamp the resolution time — the 今日学习进度 card counts
+                # "mistakes resolved today" via resolved_at. Until 2026-07-30
+                # this path never set it, leaving all 11,777 historical
+                # resolutions with resolved_at=NULL.
+                mistake.resolved_at = now
     else:
         # Do NOT reset repetition_count to 0 on a single error.
         # The previous code `repetition_count = 0` caused FSRS to
@@ -1526,15 +1531,36 @@ def schedule_memory_review(
         else:
             expected_answer = learning_item.english_text
             actual_answer = response_text or ""
-        mistake_log = MistakeLog(
-            user_id=user_id,
-            learning_item_id=learning_item.id,
-            mistake_type=review_mode,
-            error_type=error_type,
-            expected_answer=expected_answer,
-            actual_answer=actual_answer,
-            is_resolved=False,
+        # Dedup: an OPEN mistake for the same (item, expected answer) is ONE
+        # open issue, not N. Previously every failed attempt inserted a new
+        # unresolved row — the word "us" accumulated 59 open rows and the
+        # dashboard showed a 1,724-row backlog for what was really 314
+        # distinct words (parent report 2026-07-30). Per-attempt history is
+        # already preserved in review_logs, so a repeated failure just bumps
+        # the existing open row (fresh occurred_at / latest answers).
+        mistake_log = db.scalar(
+            select(MistakeLog).where(
+                MistakeLog.user_id == user_id,
+                MistakeLog.learning_item_id == learning_item.id,
+                MistakeLog.expected_answer == expected_answer,
+                MistakeLog.is_resolved.is_(False),
+            )
         )
+        if mistake_log is not None:
+            mistake_log.occurred_at = now
+            mistake_log.actual_answer = actual_answer
+            mistake_log.mistake_type = review_mode
+            mistake_log.error_type = error_type
+        else:
+            mistake_log = MistakeLog(
+                user_id=user_id,
+                learning_item_id=learning_item.id,
+                mistake_type=review_mode,
+                error_type=error_type,
+                expected_answer=expected_answer,
+                actual_answer=actual_answer,
+                is_resolved=False,
+            )
         db.add(mistake_log)
 
     # Dynamic difficulty estimation — updates learning_item.difficulty_level
