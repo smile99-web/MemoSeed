@@ -27,6 +27,13 @@ export interface ModelSettings {
   cosyvoiceChineseSpeaker: string;
   llmApiKeyConfigured?: boolean;
   volcengineTtsApiKeyConfigured?: boolean;
+  // 火山方舟 Agent Plan（LLM 优先通道）。填了专属 API Key 后，所有 LLM
+  // 调用（翻译/动态句子/鼓励语/日报/听力故事）优先走套餐额度，失败时
+  // 自动回退上方 llm* 配置。TTS 语音合成不在 Agent Plan 范围内。
+  agentPlanApiKey: string;
+  agentPlanBaseUrl: string;
+  agentPlanModel: string;
+  agentPlanApiKeyConfigured?: boolean;
   useSlowLearnerProfile?: boolean;
 }
 
@@ -59,6 +66,9 @@ export const defaultModelSettings: ModelSettings = {
   cosyvoiceBaseUrl: "",
   cosyvoiceEnglishSpeaker: "英文女",
   cosyvoiceChineseSpeaker: "中文女",
+  agentPlanApiKey: "",
+  agentPlanBaseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+  agentPlanModel: "deepseek-v4-flash-modelhub",
   useSlowLearnerProfile: false,
 };
 
@@ -164,7 +174,7 @@ export async function loadPersistedModelSettings(accessToken = getAccessToken())
 
   try {
     const response = await apiRequest<{ settings: PublicModelSettings }>("/settings/model", { accessToken });
-    const settings = normalizeModelSettings({ ...localSettings, ...response.settings, llmApiKey: "", volcengineTtsApiKey: "" });
+    const settings = normalizeModelSettings({ ...localSettings, ...response.settings, llmApiKey: "", volcengineTtsApiKey: "", agentPlanApiKey: "" });
     saveLocalModelSettings(settings);
     return settings;
   } catch (error) {
@@ -178,7 +188,7 @@ export async function loadPersistedModelSettings(accessToken = getAccessToken())
 
     try {
       const response = await apiRequest<{ settings: PublicModelSettings }>("/settings/model", { accessToken: refreshedAccessToken });
-      const settings = normalizeModelSettings({ ...localSettings, ...response.settings, llmApiKey: "", volcengineTtsApiKey: "" });
+      const settings = normalizeModelSettings({ ...localSettings, ...response.settings, llmApiKey: "", volcengineTtsApiKey: "", agentPlanApiKey: "" });
       saveLocalModelSettings(settings);
       return settings;
     } catch {
@@ -222,7 +232,7 @@ export async function savePersistedModelSettings(settings: ModelSettings, access
 }
 
 function stripSecretSettings(settings: ModelSettings): ModelSettings {
-  return { ...settings, llmApiKey: "", volcengineTtsApiKey: "" };
+  return { ...settings, llmApiKey: "", volcengineTtsApiKey: "", agentPlanApiKey: "" };
 }
 
 function isUnauthorizedError(error: unknown): boolean {

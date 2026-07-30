@@ -12,10 +12,11 @@ from app.core.config import settings as app_settings
 from app.models.user_model_settings import UserModelSettings
 
 ENCRYPTED_VALUE_PREFIX = "enc:v1:"
-SECRET_SETTING_KEYS = {"llmApiKey", "volcengineTtsApiKey"}
+SECRET_SETTING_KEYS = {"llmApiKey", "volcengineTtsApiKey", "agentPlanApiKey"}
 SECRET_CONFIGURED_KEYS = {
     "llmApiKey": "llmApiKeyConfigured",
     "volcengineTtsApiKey": "volcengineTtsApiKeyConfigured",
+    "agentPlanApiKey": "agentPlanApiKeyConfigured",
 }
 
 

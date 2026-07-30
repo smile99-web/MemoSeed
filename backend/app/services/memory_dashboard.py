@@ -961,7 +961,7 @@ def _generate_llm_summary(
     db: Session,
     user_id: UUID,
 ) -> str | None:
-    from app.services.llm_translation import LlmTranslationSettings, call_llm_generate
+    from app.services.llm_translation import LlmTranslationSettings, call_llm_generate, with_agent_plan_primary
     from app.services.secure_model_settings import get_private_model_settings
 
     settings = get_private_model_settings(db, user_id)
@@ -973,11 +973,14 @@ def _generate_llm_summary(
     if not base_url or not model:
         return None
 
-    llm_settings = LlmTranslationSettings(
-        provider=provider,
-        base_url=base_url,
-        model=model,
-        api_key=api_key,
+    llm_settings = with_agent_plan_primary(
+        LlmTranslationSettings(
+            provider=provider,
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+        ),
+        settings,
     )
 
     struggling_detail = ""

@@ -33,6 +33,16 @@ class Settings(BaseSettings):
     ai_api_key: str | None = Field(default=None, alias="AI_API_KEY")
     ai_model: str | None = Field(default=None, alias="AI_MODEL")
 
+    # System-level LLM fallback, tried when the per-user primary LLM call
+    # fails (quota exhausted, provider outage, bad key...). Lives in env so
+    # it survives settings-page saves (which replace the whole per-user
+    # settings blob). 2026-07-30: primary = Agent Plan (ark runtime), this
+    # fallback = the previous DeepSeek direct config.
+    ai_fallback_provider: str | None = Field(default=None, alias="AI_FALLBACK_PROVIDER")
+    ai_fallback_base_url: str | None = Field(default=None, alias="AI_FALLBACK_BASE_URL")
+    ai_fallback_api_key: str | None = Field(default=None, alias="AI_FALLBACK_API_KEY")
+    ai_fallback_model: str | None = Field(default=None, alias="AI_FALLBACK_MODEL")
+
     tts_provider: str | None = Field(default=None, alias="TTS_PROVIDER")
     volcengine_tts_endpoint: str | None = Field(default=None, alias="VOLCENGINE_TTS_ENDPOINT")
     volcengine_tts_api_key: str | None = Field(default=None, alias="VOLCENGINE_TTS_API_KEY")

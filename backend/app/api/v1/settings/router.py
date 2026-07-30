@@ -88,11 +88,16 @@ def sanitize_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "cosyvoiceChineseSpeaker",
         "llmApiKeyConfigured",
         "volcengineTtsApiKeyConfigured",
+        "agentPlanApiKey",
+        "agentPlanBaseUrl",
+        "agentPlanModel",
+        "agentPlanApiKeyConfigured",
         "useSlowLearnerProfile",
     }
     boolean_keys = {
         "llmApiKeyConfigured",
         "volcengineTtsApiKeyConfigured",
+        "agentPlanApiKeyConfigured",
         "useSlowLearnerProfile",
     }
     sanitized: dict[str, Any] = {}

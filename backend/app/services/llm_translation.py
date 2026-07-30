@@ -1,8 +1,11 @@
 import json
+import logging
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse, urlunparse
 from urllib.request import Request, urlopen
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -11,9 +14,56 @@ class LlmTranslationSettings:
     base_url: str
     model: str
     api_key: str | None = None
+    # Optional backup tried when the primary call raises. When unset,
+    # call_llm_generate falls back to the system-level AI_FALLBACK_* env
+    # config (see _env_fallback_settings), so every LLM feature inherits
+    # the safety net without per-call-site changes.
+    fallback: "LlmTranslationSettings | None" = None
 
 
 DEFAULT_LLM_TRANSLATION_SETTINGS = LlmTranslationSettings(provider="ollama", base_url="http://localhost:11434", model="ali6parmak/hy-mt1.5:latest")
+
+# Volcengine Agent Plan (LLM subscription) as the PRIMARY channel: when the
+# parent pastes the plan's dedicated API key in 模型设置, every LLM feature
+# (translations, dynamic sentences, encouragement, reports, listening
+# stories) bills the plan quota instead of pay-per-token, and the previous
+# per-user LLM config (DeepSeek direct) becomes the automatic fallback.
+# NOTE: Agent Plan covers TEXT models only — the TTS speech service
+# (openspeech seed-tts) is a separate product and stays untouched.
+AGENT_PLAN_DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+AGENT_PLAN_DEFAULT_MODEL = "deepseek-v4-flash-modelhub"
+
+
+def with_agent_plan_primary(
+    base: LlmTranslationSettings,
+    stored_settings: dict[str, object] | None,
+    *,
+    overrides_given: bool = False,
+) -> LlmTranslationSettings:
+    """Wrap `base` with the Agent Plan as primary when a plan key exists.
+
+    `base` (the legacy per-user LLM config) becomes the fallback. Explicit
+    per-request overrides (cache-rebuild tooling picking a provider) skip
+    the wrap so the operator's choice is respected exactly.
+    """
+    if overrides_given:
+        return base
+    stored_settings = stored_settings or {}
+
+    def _str(key: str) -> str:
+        value = stored_settings.get(key)
+        return value.strip() if isinstance(value, str) else ""
+
+    api_key = _str("agentPlanApiKey")
+    if not api_key:
+        return base
+    return LlmTranslationSettings(
+        provider="openai",
+        base_url=_str("agentPlanBaseUrl") or AGENT_PLAN_DEFAULT_BASE_URL,
+        model=_str("agentPlanModel") or AGENT_PLAN_DEFAULT_MODEL,
+        api_key=api_key,
+        fallback=base,
+    )
 
 
 def needs_translation(chinese_text: str) -> bool:
@@ -60,12 +110,68 @@ def generate_learning_text(prompt: str, settings: LlmTranslationSettings) -> str
 
 
 def call_llm_generate(settings: LlmTranslationSettings, prompt: str) -> str:
+    """Generate with the primary LLM, transparently retrying with a fallback.
+
+    Any primary failure (HTTP error, timeout, bad response, unsupported
+    provider) retries once with `settings.fallback`, or with the env-level
+    AI_FALLBACK_* config when no per-settings fallback is attached. Without
+    a fallback the original exception propagates unchanged.
+    """
+    fallback = settings.fallback if settings.fallback is not None else _env_fallback_settings()
+    try:
+        return _dispatch_llm_generate(settings, prompt)
+    except Exception:
+        if fallback is None:
+            raise
+        logger.warning(
+            "Primary LLM %s/%s failed — falling back to %s/%s",
+            settings.provider, settings.model, fallback.provider, fallback.model,
+            exc_info=True,
+        )
+        return _dispatch_llm_generate(fallback, prompt)
+
+
+def _dispatch_llm_generate(settings: LlmTranslationSettings, prompt: str) -> str:
     provider = settings.provider.strip().lower()
     if provider in {"ollama", "local"}:
         return call_ollama_generate(settings.base_url, settings.model, prompt)
     if provider in {"deepseek", "openai", "qwen"}:
         return call_openai_chat_completion(settings.base_url, settings.model, settings.api_key, prompt)
     raise ValueError(f"Unsupported LLM provider: {settings.provider}")
+
+
+_ENV_FALLBACK_UNSET = object()
+_env_fallback_cache: object = _ENV_FALLBACK_UNSET
+
+
+def _env_fallback_settings() -> LlmTranslationSettings | None:
+    """System-level fallback from AI_FALLBACK_* env vars (cached).
+
+    Lazy-imports app config so this module stays import-light and test
+    monkeypatching of app.core.config.settings works per-call when the
+    cache is cleared.
+    """
+    global _env_fallback_cache
+    if _env_fallback_cache is not _ENV_FALLBACK_UNSET:
+        return _env_fallback_cache  # type: ignore[return-value]
+    try:
+        from app.core.config import settings as app_settings
+    except Exception:
+        _env_fallback_cache = None
+        return None
+    provider = (app_settings.ai_fallback_provider or "").strip()
+    base_url = (app_settings.ai_fallback_base_url or "").strip()
+    model = (app_settings.ai_fallback_model or "").strip()
+    if not (provider and base_url and model):
+        _env_fallback_cache = None
+        return None
+    _env_fallback_cache = LlmTranslationSettings(
+        provider=provider,
+        base_url=base_url,
+        model=model,
+        api_key=(app_settings.ai_fallback_api_key or "").strip() or None,
+    )
+    return _env_fallback_cache  # type: ignore[return-value]
 
 
 def call_ollama_generate(base_url: str, model: str, prompt: str) -> str:

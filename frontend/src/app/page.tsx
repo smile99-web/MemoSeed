@@ -193,10 +193,12 @@ export default function HomePage() {
           ...current,
           llmApiKey: "",
           volcengineTtsApiKey: "",
+          agentPlanApiKey: "",
           llmApiKeyConfigured: current.llmApiKey.trim() ? true : current.llmApiKeyConfigured,
           volcengineTtsApiKeyConfigured: current.volcengineTtsApiKey.trim()
             ? true
             : current.volcengineTtsApiKeyConfigured,
+          agentPlanApiKeyConfigured: current.agentPlanApiKey.trim() ? true : current.agentPlanApiKeyConfigured,
         }));
         setSettingsMessage("模型设置已保存。");
         setIsSettingsOpen(false);
@@ -396,6 +398,44 @@ export default function HomePage() {
                   />
                 </div>
               ) : null}
+
+              <div className="border-t pt-5 md:col-span-2">
+                <h3 className="text-base font-semibold">火山方舟 Agent Plan（LLM 优先通道）</h3>
+                <p className="text-xs text-muted-foreground">
+                  填入 Agent Plan 专属 API Key 后，全部 LLM 调用（翻译、动态句子、鼓励语、学习报告、听力故事）优先消耗套餐额度；
+                  调用失败时自动回退上方的 LLM 配置作为备用。TTS 语音合成不在套餐范围内，保持下方 TTS 设置不变。
+                </p>
+              </div>
+              <div className="space-y-2 md:col-span-2">
+                <label className="text-sm font-medium" htmlFor="agent-plan-api-key">Agent Plan 专属 API Key</label>
+                <input
+                  autoComplete="off"
+                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                  id="agent-plan-api-key"
+                  placeholder={modelSettings.agentPlanApiKeyConfigured ? savedSecretPlaceholder : "在火山方舟控制台 Agent Plan 页面复制，粘贴到这里"}
+                  type="password"
+                  value={modelSettings.agentPlanApiKey}
+                  onChange={(event) => handleModelSettingsChange("agentPlanApiKey", event.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium" htmlFor="agent-plan-model">Agent Plan 模型</label>
+                <input
+                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                  id="agent-plan-model"
+                  value={modelSettings.agentPlanModel}
+                  onChange={(event) => handleModelSettingsChange("agentPlanModel", event.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium" htmlFor="agent-plan-base-url">Agent Plan Base URL</label>
+                <input
+                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                  id="agent-plan-base-url"
+                  value={modelSettings.agentPlanBaseUrl}
+                  onChange={(event) => handleModelSettingsChange("agentPlanBaseUrl", event.target.value)}
+                />
+              </div>
 
               <div className="border-t pt-5 md:col-span-2">
                 <h3 className="text-base font-semibold">

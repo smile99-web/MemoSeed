@@ -200,7 +200,7 @@ def _resolve_user_llm_settings(db: Session, user_id) -> LlmTranslationSettings:
     learning router (see build_llm_translation_settings).
     """
     from app.core.config import settings as app_settings
-    from app.services.llm_translation import DEFAULT_LLM_TRANSLATION_SETTINGS
+    from app.services.llm_translation import DEFAULT_LLM_TRANSLATION_SETTINGS, with_agent_plan_primary
     from app.utils import string_setting
 
     stored = get_private_model_settings(db, user_id)
@@ -221,9 +221,11 @@ def _resolve_user_llm_settings(db: Session, user_id) -> LlmTranslationSettings:
     )
     api_key = string_setting(stored, "llmApiKey") or app_settings.ai_api_key
 
-    return LlmTranslationSettings(
+    base = LlmTranslationSettings(
         provider=str(provider),
         base_url=str(base_url),
         model=str(model),
         api_key=api_key,
     )
+    # Agent Plan as primary (plan quota), legacy config as its fallback.
+    return with_agent_plan_primary(base, stored)
