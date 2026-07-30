@@ -285,78 +285,152 @@ def _increment_minute_stat(db: Session, event: LearningEvent) -> None:
     stat.updated_at = datetime.now(UTC)
 
 
-def _study_seconds_grid(db: Session, user_id: UUID, day: date) -> dict[tuple[int, int], float]:
-    """Sum StudyTimeLog duration_seconds per (local hour, minute) for a day.
+# ---------- 学习时长"真实有效"口径（2026-07-30） ----------
+# 心跳（StudyTimeLog）只有在"学习会话窗口"内才计入学习时长：
+# - 相邻两个学习事件间隔 <300s → 同一段连续学习，间隙（读题/思考/听音/
+#   拼读/打字修改）全部计入；
+# - 间隔 ≥300s → 视为已离开或计时卡死，间隙内心跳全部剔除
+#   （与 2026-07-28 数据清洗同一条判定规则："事件间隔 ≥300s 且心跳仍在 = 丢弃"）；
+# - 每段会话首尾各放宽 150s（进入状态的读题时间 + 收尾）。
+#
+# 背景：2026-07-29 20 点档心跳连续跑了 46 分钟，但其中 8.7 / 11.2 分钟的
+# 长区间零学习事件——回声卡状态迁移（TTS→录音→ASR→重试）每次都刷新前端
+# 活动时钟，重试循环空转时计时器永不停；任何按键/触摸也能在零提交的情况下
+# 无限续命。事件是"真实学习行为"的唯一硬证据，所以时长必须锚定在事件上。
+STUDY_SESSION_GAP_SECONDS = 300
+STUDY_SESSION_EDGE_GRACE_SECONDS = 150
 
-    StudyTimeLog is the authoritative source for study time: the frontend
-    heartbeat pauses after 10s of inactivity and flushes on visibilitychange,
-    so it reflects real active learning. Event-level duration_ms is a wall-clock
-    span (Date.now() - startedAt) that includes time the tab was hidden - one
-    cloze event logged 48 minutes - and summing it across events in the same
-    minute produced per-minute study_duration_ms of 113 minutes. Replay hour /
-    minute study time must come from here, not from learning_minute_stats.
-    """
-    day_start = datetime.combine(day, datetime.min.time(), tzinfo=LOCAL_TIMEZONE)
-    day_end = day_start + timedelta(days=1)
-    rows = db.execute(
-        select(
-            func.extract("hour", func.timezone("Asia/Shanghai", StudyTimeLog.recorded_at)).label("h"),
-            func.extract("minute", func.timezone("Asia/Shanghai", StudyTimeLog.recorded_at)).label("m"),
-            func.sum(StudyTimeLog.duration_seconds).label("secs"),
-        )
+# 事件查询的边界外扩：会话可能跨天/跨查询区间，边界外一个窗口宽度内的事件
+# 会影响区间内会话的归属判定
+_SESSION_PAD = timedelta(
+    seconds=STUDY_SESSION_GAP_SECONDS + STUDY_SESSION_EDGE_GRACE_SECONDS,
+)
+
+
+def _event_times(db: Session, user_id: UUID, start_utc: datetime, end_utc: datetime) -> list[datetime]:
+    """All learning-event timestamps in [start_utc, end_utc), ascending."""
+    rows = db.scalars(
+        select(LearningEvent.occurred_at)
         .where(
-            StudyTimeLog.user_id == user_id,
-            StudyTimeLog.recorded_at >= day_start,
-            StudyTimeLog.recorded_at < day_end,
+            LearningEvent.user_id == user_id,
+            LearningEvent.occurred_at >= start_utc,
+            LearningEvent.occurred_at < end_utc,
+            LearningEvent.occurred_at.isnot(None),
         )
-        .group_by("h", "m")
+        .order_by(LearningEvent.occurred_at.asc())
     ).all()
-    return {(int(h), int(m)): float(s or 0) for h, m, s in rows}
+    return list(rows)
 
 
-def _active_study_seconds(db: Session, user_id: UUID, start_utc: datetime, end_utc: datetime) -> int:
-    """StudyTimeLog seconds in [start_utc, end_utc), but ONLY for (date, hour)
-    pairs that have at least one learning event (a learning_minute_stats row
-    with total_events > 0).
+def _build_study_windows(event_times: list[datetime]) -> list[tuple[datetime, datetime]]:
+    """Merge event timestamps into study-session windows.
 
-    This is the product decision "没做题就不记录时间": a hour where the child was
-    online (heartbeat sent) but answered nothing does not count as study time.
-    Used by build_day_detail (implicitly, via hours_map), build_heatmap and
-    build_study_time_summary so every "study time" number across the dashboard
-    shares one definition.
+    Events closer than STUDY_SESSION_GAP_SECONDS belong to the same session;
+    each session is then widened by STUDY_SESSION_EDGE_GRACE_SECONDS on both
+    ends. Returns a sorted, non-overlapping list of (start, end) windows.
     """
-    if end_utc <= start_utc:
-        return 0
-    start_local = start_utc.astimezone(LOCAL_TIMEZONE)
-    end_local = end_utc.astimezone(LOCAL_TIMEZONE)
-    # (date, hour) keys that have at least one answered event.
-    event_hour_rows = db.execute(
-        select(LearningMinuteStat.stat_date, LearningMinuteStat.stat_hour)
-        .where(
-            LearningMinuteStat.user_id == user_id,
-            LearningMinuteStat.total_events > 0,
-            LearningMinuteStat.stat_date >= start_local.date(),
-            LearningMinuteStat.stat_date < end_local.date() + timedelta(days=1),
-        )
-        .distinct()
-    ).all()
-    event_hours = {(d, int(h)) for d, h in event_hour_rows}
-    if not event_hours:
-        return 0
+    gap = timedelta(seconds=STUDY_SESSION_GAP_SECONDS)
+    grace = timedelta(seconds=STUDY_SESSION_EDGE_GRACE_SECONDS)
+    sessions: list[list[datetime]] = []
+    for t in event_times:
+        if sessions and t - sessions[-1][1] < gap:
+            sessions[-1][1] = t
+        else:
+            sessions.append([t, t])
+    windows = [(s - grace, e + grace) for s, e in sessions]
+    # Edge grace can make adjacent windows overlap — merge them so the
+    # two-pointer filter stays correct.
+    merged: list[list[datetime]] = []
+    for start, end in windows:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(s, e) for s, e in merged]
+
+
+def _fetch_heartbeats(db: Session, user_id: UUID, start_utc: datetime, end_utc: datetime) -> list[tuple[datetime, float]]:
+    """Raw StudyTimeLog rows (recorded_at, duration_seconds) in range, ascending."""
     rows = db.execute(
-        select(
-            func.date(func.timezone("Asia/Shanghai", StudyTimeLog.recorded_at)).label("d"),
-            func.extract("hour", func.timezone("Asia/Shanghai", StudyTimeLog.recorded_at)).label("h"),
-            func.sum(StudyTimeLog.duration_seconds).label("s"),
-        )
+        select(StudyTimeLog.recorded_at, StudyTimeLog.duration_seconds)
         .where(
             StudyTimeLog.user_id == user_id,
             StudyTimeLog.recorded_at >= start_utc,
             StudyTimeLog.recorded_at < end_utc,
         )
-        .group_by("d", "h")
+        .order_by(StudyTimeLog.recorded_at.asc())
     ).all()
-    return int(sum(s for d, h, s in rows if (d, int(h)) in event_hours) or 0)
+    return [(ts, float(dur or 0)) for ts, dur in rows if ts is not None]
+
+
+def _filter_heartbeats_by_windows(
+    heartbeats: list[tuple[datetime, float]],
+    windows: list[tuple[datetime, datetime]],
+) -> list[tuple[datetime, float]]:
+    """Keep only heartbeats that fall inside a study-session window.
+
+    Both inputs must be sorted ascending; two-pointer, O(n+m).
+    """
+    kept: list[tuple[datetime, float]] = []
+    wi = 0
+    for ts, dur in heartbeats:
+        while wi < len(windows) and ts > windows[wi][1]:
+            wi += 1
+        if wi < len(windows) and windows[wi][0] <= ts <= windows[wi][1]:
+            kept.append((ts, dur))
+    return kept
+
+
+def _study_seconds_grid(db: Session, user_id: UUID, day: date) -> dict[tuple[int, int], float]:
+    """Sum StudyTimeLog duration_seconds per (local hour, minute) for a day,
+    filtered to study-session windows (see STUDY_SESSION_GAP_SECONDS).
+
+    StudyTimeLog is the authoritative source for study time: the frontend
+    heartbeat pauses after 10s of inactivity and flushes on visibilitychange.
+    But activity alone is not proof of study (echo retry churn / idle tapping
+    keep the clock alive with zero answers), so heartbeats only count when
+    anchored to real learning events. Event-level duration_ms is never used:
+    it is a wall-clock span (Date.now() - startedAt) that includes time the
+    tab was hidden - one cloze event logged 48 minutes.
+    """
+    day_start = datetime.combine(day, datetime.min.time(), tzinfo=LOCAL_TIMEZONE)
+    day_end = day_start + timedelta(days=1)
+    windows = _build_study_windows(
+        _event_times(db, user_id, day_start - _SESSION_PAD, day_end + _SESSION_PAD),
+    )
+    grid: dict[tuple[int, int], float] = {}
+    if not windows:
+        return grid
+    for ts, dur in _filter_heartbeats_by_windows(
+        _fetch_heartbeats(db, user_id, day_start, day_end),
+        windows,
+    ):
+        local = ts.astimezone(LOCAL_TIMEZONE)
+        key = (local.hour, local.minute)
+        grid[key] = grid.get(key, 0.0) + dur
+    return grid
+
+
+def _active_study_seconds(db: Session, user_id: UUID, start_utc: datetime, end_utc: datetime) -> int:
+    """StudyTimeLog seconds in [start_utc, end_utc) that fall inside
+    study-session windows (see STUDY_SESSION_GAP_SECONDS).
+
+    This is the product decision "没做题就不记录时间", tightened 2026-07-30:
+    not just hours-with-events, but heartbeats must be near an actual learning
+    event (<300s gaps merged, ±150s edge grace). Used by build_heatmap and
+    build_study_time_summary so every "study time" number across the dashboard
+    shares one definition (build_day_detail/build_hour_detail use the same
+    filter via _study_seconds_grid).
+    """
+    if end_utc <= start_utc:
+        return 0
+    windows = _build_study_windows(
+        _event_times(db, user_id, start_utc - _SESSION_PAD, end_utc + _SESSION_PAD),
+    )
+    if not windows:
+        return 0
+    heartbeats = _fetch_heartbeats(db, user_id, start_utc, end_utc)
+    return int(sum(dur for _ts, dur in _filter_heartbeats_by_windows(heartbeats, windows)))
 
 
 def build_heatmap(db: Session, user_id: UUID, year: int | None = None) -> dict:
@@ -379,42 +453,24 @@ def build_heatmap(db: Session, user_id: UUID, year: int | None = None) -> dict:
         .group_by(LearningMinuteStat.stat_date)
     ).all()
 
-    # Also get StudyTimeLog data for accurate daily study minutes.
-    # Bucket by Asia/Shanghai (same as LearningMinuteStat.stat_date) —
-    # func.date() alone uses UTC and pushes evening sessions to the wrong day.
-    # Only count (date, hour) pairs that have at least one answered event -
-    # "没做题就不记录时间" (see _active_study_seconds).
-    event_hour_rows = db.execute(
-        select(LearningMinuteStat.stat_date, LearningMinuteStat.stat_hour)
-        .where(
-            LearningMinuteStat.user_id == user_id,
-            LearningMinuteStat.total_events > 0,
-            LearningMinuteStat.stat_date >= start,
-            LearningMinuteStat.stat_date <= end,
-        )
-        .distinct()
-    ).all()
-    event_hours = {(d, int(h)) for d, h in event_hour_rows}
-
-    local_date_expr = func.date(func.timezone("Asia/Shanghai", StudyTimeLog.recorded_at))
-    local_hour_expr = func.extract("hour", func.timezone("Asia/Shanghai", StudyTimeLog.recorded_at))
-    study_rows = db.execute(
-        select(
-            local_date_expr.label("d"),
-            local_hour_expr.label("h"),
-            func.sum(StudyTimeLog.duration_seconds).label("secs"),
-        )
-        .where(
-            StudyTimeLog.user_id == user_id,
-            local_date_expr >= start,
-            local_date_expr <= end,
-        )
-        .group_by("d", "h")
-    ).all()
+    # StudyTimeLog daily minutes, filtered to study-session windows (same
+    # definition as _active_study_seconds / _study_seconds_grid): heartbeats
+    # only count when anchored to real learning events. Fetched raw and
+    # filtered in Python because session windows can't be expressed as a
+    # simple SQL GROUP BY.
+    year_start_utc = datetime.combine(start, datetime.min.time(), tzinfo=LOCAL_TIMEZONE).astimezone(UTC)
+    year_end_utc = datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=LOCAL_TIMEZONE).astimezone(UTC)
+    windows = _build_study_windows(
+        _event_times(db, user_id, year_start_utc - _SESSION_PAD, year_end_utc + _SESSION_PAD),
+    )
     study_by_date: dict[str, float] = {}
-    for d, h, secs in study_rows:
-        if (d, int(h)) in event_hours:
-            study_by_date[str(d)] = study_by_date.get(str(d), 0) + float(secs or 0)
+    if windows:
+        for ts, dur in _filter_heartbeats_by_windows(
+            _fetch_heartbeats(db, user_id, year_start_utc, year_end_utc),
+            windows,
+        ):
+            d = ts.astimezone(LOCAL_TIMEZONE).date().isoformat()
+            study_by_date[d] = study_by_date.get(d, 0.0) + dur
 
     event_by_date: dict[str, tuple[float, int]] = {}
     for d, ms, events in rows:
@@ -487,11 +543,9 @@ def build_day_detail(db: Session, user_id: UUID, day: date) -> dict:
             "study_seconds": round(study_grid.get((r.stat_hour, r.stat_minute), 0), 1),
         })
 
-    # Study time only counts hours that have at least one learning event.
-    # Hours where the child was online (heartbeat) but answered nothing are
-    # excluded per product decision ("没做题就不记录时间"): the child may have
-    # left the tab open or been browsing without answering, and that idle
-    # presence should not inflate study time.
+    # study_grid 已按"学习会话窗口"过滤（见 STUDY_SESSION_GAP_SECONDS），
+    # 无事件小时的心跳基本已被剔除；这里再按有事件小时收敛一次，保证
+    # 全天总时长 = 展示出来的各小时之和（跨小时 ±150s 宽限的零头不悬空）。
     study_secs_by_hour: dict[int, float] = {}
     for (h, _m), secs in study_grid.items():
         if h in hours_map:

@@ -393,8 +393,8 @@ def build_study_time_summary(db: Session, user_id: UUID) -> StudyTimeSummary:
     month_start = today_start.replace(day=1)
     year_start = today_start.replace(month=1, day=1)
 
-    # Study time only counts hours that have at least one answered event
-    # ("没做题就不记录时间"). See _active_study_seconds in learning_replay.
+    # Study time only counts heartbeats inside study-session windows anchored
+    # to real learning events ("没做题就不记录时间"). See _active_study_seconds.
     def active_since(start_local: datetime | None) -> int:
         start_utc = start_local.astimezone(UTC) if start_local is not None else datetime(2000, 1, 1, tzinfo=UTC)
         return _active_study_seconds(db, user_id, start_utc, now_utc)
