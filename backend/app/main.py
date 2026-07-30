@@ -9,6 +9,7 @@ from app.api.v1.router import api_router
 from app.core.config import settings
 from app.db.session import engine
 from app.models.course_completion_log import CourseCompletionLog
+from app.models.listening_story import ListeningStory
 from app.models.speech_asset import SpeechAsset
 from app.models.word_memory_state import WordMemoryState
 from app.models.word_review_task import WordReviewTask
@@ -118,6 +119,7 @@ async def lifespan(app: FastAPI):
     WordMemoryState.__table__.create(bind=engine, checkfirst=True)
     WordReviewTask.__table__.create(bind=engine, checkfirst=True)
     WordTranslation.__table__.create(bind=engine, checkfirst=True)
+    ListeningStory.__table__.create(bind=engine, checkfirst=True)
     ensure_lightweight_schema_upgrades()
     yield
 

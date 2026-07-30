@@ -5,6 +5,7 @@ from app.api.v1.courses.router import router as courses_router
 from app.api.v1.grammar.router import router as grammar_router
 from app.api.v1.learning.router import router as learning_router
 from app.api.v1.learning_replay.router import router as learning_replay_router
+from app.api.v1.listening.router import router as listening_router
 from app.api.v1.memory.router import router as memory_router
 from app.api.v1.reports.router import router as reports_router
 from app.api.v1.review.router import router as review_router
@@ -24,3 +25,4 @@ api_router.include_router(reports_router, prefix="/reports", tags=["reports"])
 api_router.include_router(settings_router, prefix="/settings", tags=["settings"])
 api_router.include_router(tts_router, prefix="/tts", tags=["tts"])
 api_router.include_router(grammar_router, prefix="/grammar", tags=["grammar"])
+api_router.include_router(listening_router, prefix="/listening", tags=["listening"])
