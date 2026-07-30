@@ -34,7 +34,7 @@ export default function ListeningPage() {
 
   const [currentStory, setCurrentStory] = useState<ListeningStoryPayload | null>(null);
   const [sentenceIndex, setSentenceIndex] = useState(0);
-  const [phase, setPhase] = useState<"en" | "zh">("en");
+  const [phase, setPhase] = useState<"en1" | "en2" | "zh">("en1");
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -117,7 +117,18 @@ export default function ListeningPage() {
         return;
       }
       setSentenceIndex(i);
-      setPhase("en");
+      // 英文读两遍、中文读一遍（家长要求：多听英文，中文只作对照）。
+      setPhase("en1");
+      try {
+        await playCachedAudio(story.sentences[i].en_audio_url);
+        failures = 0;
+      } catch {
+        failures += 1;
+      }
+      if (sessionRef.current !== session || stopRef.current) {
+        return;
+      }
+      setPhase("en2");
       try {
         await playCachedAudio(story.sentences[i].en_audio_url);
         failures = 0;
@@ -193,7 +204,7 @@ export default function ListeningPage() {
       }
       setCurrentStory(payload);
       setSentenceIndex(startIndex);
-      setPhase("en");
+      setPhase("en1");
       await playStoryLoop(payload, startIndex, session);
     } catch (error) {
       if (sessionRef.current === session) {
@@ -273,7 +284,7 @@ export default function ListeningPage() {
         <div className="flex flex-wrap items-center justify-between gap-3 glass-card px-4 py-3">
           <div>
             <h1 className="text-2xl font-bold tracking-tight ipad:text-3xl">🎧 听力故事</h1>
-            <p className="text-sm text-muted-foreground">用你练过的单词编成的英文小故事，先听英文，再听中文。</p>
+            <p className="text-sm text-muted-foreground">用你练过的单词编成的英文小故事，英文读两遍、中文读一遍。</p>
           </div>
           <Button asChild variant="outline">
             <Link href="/">返回首页</Link>
@@ -307,7 +318,7 @@ export default function ListeningPage() {
                 <div className="rounded-2xl border border-slate-200 bg-white/70 p-6 text-center">
                   <p
                     className={`text-2xl font-bold leading-relaxed transition-colors ipad:text-3xl ${
-                      phase === "en" && isPlaying && !isPaused ? "text-cyan-600" : "text-slate-800"
+                      phase !== "zh" && isPlaying && !isPaused ? "text-cyan-600" : "text-slate-800"
                     }`}
                   >
                     {currentSentence.en}
@@ -329,7 +340,7 @@ export default function ListeningPage() {
                   ) : null}
                   {isPlaying && !isPaused ? (
                     <p className="mt-3 text-sm text-muted-foreground">
-                      {phase === "en" ? "🔊 正在读英文…" : "🔊 正在读中文…"}
+                      {phase === "zh" ? "🔊 正在读中文…" : phase === "en1" ? "🔊 正在读英文（第 1 遍）…" : "🔊 正在读英文（第 2 遍）…"}
                     </p>
                   ) : null}
                 </div>
