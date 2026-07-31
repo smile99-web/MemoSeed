@@ -34,6 +34,9 @@ export interface ModelSettings {
   agentPlanBaseUrl: string;
   agentPlanModel: string;
   agentPlanApiKeyConfigured?: boolean;
+  // 手写听写的 AI 批改视觉模型（走 Agent Plan 通道，需多模态模型；
+  // tingxie 同款 doubao-seed-2-1-turbo，thinking disabled 后 2-4 秒出结果）。
+  handwritingVisionModel: string;
   useSlowLearnerProfile?: boolean;
 }
 
@@ -69,6 +72,7 @@ export const defaultModelSettings: ModelSettings = {
   agentPlanApiKey: "",
   agentPlanBaseUrl: "https://ark.cn-beijing.volces.com/api/v3",
   agentPlanModel: "deepseek-v4-flash-modelhub",
+  handwritingVisionModel: "doubao-seed-2-1-turbo",
   useSlowLearnerProfile: false,
 };
 

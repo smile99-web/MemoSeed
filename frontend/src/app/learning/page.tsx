@@ -296,6 +296,21 @@ export default function LearningStartPage() {
               开口
             </span>
           </Link>
+
+          <Link
+            className="hover-lift flex items-center justify-between gap-3 rounded-2xl border border-violet-300/70 bg-violet-50/70 px-5 py-4 shadow-soft backdrop-blur-xl transition-colors hover:border-violet-400 ipad:px-6 ipad:py-5"
+            href="/learning/study?mode=handwrite"
+          >
+            <div>
+              <p className="text-base font-bold text-violet-700 ipad:text-lg">✍️ 手写听写</p>
+              <p className="mt-1 text-xs text-slate-600 ipad:text-sm">
+                听音写英文、看词写中文，AI 老师批改你的字
+              </p>
+            </div>
+            <span className="shrink-0 rounded-full bg-violet-500 px-3 py-1 text-sm font-bold text-white ipad:text-base">
+              动笔
+            </span>
+          </Link>
         </div>
 
         {errorMessage ? <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 ipad:px-6 ipad:py-4 ipad:text-base">{errorMessage}</p> : null}

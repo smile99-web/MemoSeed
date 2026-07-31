@@ -92,6 +92,7 @@ def sanitize_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "agentPlanBaseUrl",
         "agentPlanModel",
         "agentPlanApiKeyConfigured",
+        "handwritingVisionModel",
         "useSlowLearnerProfile",
     }
     boolean_keys = {

@@ -436,6 +436,16 @@ export default function HomePage() {
                   onChange={(event) => handleModelSettingsChange("agentPlanBaseUrl", event.target.value)}
                 />
               </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium" htmlFor="handwriting-vision-model">手写听写批改模型（视觉）</label>
+                <input
+                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                  id="handwriting-vision-model"
+                  value={modelSettings.handwritingVisionModel}
+                  onChange={(event) => handleModelSettingsChange("handwritingVisionModel", event.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">手写听写用的多模态模型（走 Agent Plan 通道），默认 doubao-seed-2-1-turbo</p>
+              </div>
 
               <div className="border-t pt-5 md:col-span-2">
                 <h3 className="text-base font-semibold">

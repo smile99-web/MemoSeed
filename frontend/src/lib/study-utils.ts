@@ -174,6 +174,9 @@ export function getReviewTaskModeLabel(taskType: string | undefined): string {
     cloze_sentence: "短句填空",
     hidden_recall: "隐藏重拼",
     read_aloud: "🎤 语音练习",
+    voice_practice: "🎤 主动发音",
+    handwriting_dictation: "✍️ 手写听写",
+    handwriting_translation: "✍️ 手写翻译",
   };
   return taskType ? labels[taskType] ?? "专项复习" : "";
 }

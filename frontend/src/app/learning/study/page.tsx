@@ -10,7 +10,7 @@ import { getAccessToken } from "@/lib/auth";
 import { useRouter, usePathname } from "next/navigation";
 import { addCourseCompletion } from "@/lib/course-progress";
 import { Course, listCoursePackages, listCourses } from "@/lib/courses";
-import { generateDynamicSentence, generateLearningEncouragement, getWordTranslations, LearningItem, listDueReviewItems, listLearningItems, listSpeakItems, logReadAloudEvent, logWordMistake, logWordReview, translateLearningText } from "@/lib/learning";
+import { generateDynamicSentence, generateLearningEncouragement, getWordTranslations, LearningItem, listDueReviewItems, listHandwritingItems, listLearningItems, listSpeakItems, logReadAloudEvent, logWordMistake, logWordReview, translateLearningText, checkHandwriting, type HandwritingTaskType } from "@/lib/learning";
 import { fetchWithAuth, parseApiError } from "@/lib/api";
 import { getApiBaseUrl } from "@/lib/api-base-url";
 import { recordCourseCompletion, recordStudyTime, rotateFocusWord, scheduleMemoryReview, getReviewAdvice, generateReviewAdvice, awardPoints } from "@/lib/memory";
@@ -63,6 +63,7 @@ import { WORD_DICTIONARY } from "@/lib/word-dictionary";
 import MiniCelebrationConfetti from "./components/MiniCelebrationConfetti";
 import CelebrationModal, { type CelebrationSummary, type NextCourseTarget } from "./components/CelebrationModal";
 import WordInput from "./components/WordInput";
+import HandwritingCanvas, { type HandwritingCanvasHandle } from "@/components/handwriting-canvas";
 
 const itemTypeLabels: Record<LearningItem["item_type"], string> = {
   word: "单词",
@@ -95,6 +96,7 @@ const WORD_TRANSLATION_TIMEOUT_MS = 2500;
 const DIFFICULT_WORD_CONFIRMATION_COUNT = 3;
 const INITIAL_REVIEW_QUEUE_LIMIT = 200;
 const INITIAL_SPEAK_QUEUE_LIMIT = 20;
+const INITIAL_HANDWRITE_QUEUE_LIMIT = 12;
 const REFILL_REVIEW_QUEUE_LIMIT = 50;
 const SPELLING_REVIEW_TASK_TYPES = new Set(["listen_spell", "chinese_to_english", "missing_letter", "hidden_recall"]);
 const BASIC_WORD_MEANINGS: Record<string, string> = {
@@ -128,10 +130,10 @@ type AnswerState = "typing" | "mistake-word-practice" | "mistake-meaning-quiz" |
 type EncodingStage = "meaning_intro" | "listen" | "chunk_trace" | "whole_recall";
 type WordStatus = "idle" | "correct" | "incorrect" | "skipped";
 type MistakePracticeStatus = "idle" | "incorrect";
-type StudyMode = "mix" | "review" | "learn" | "speak";
+type StudyMode = "mix" | "review" | "learn" | "speak" | "handwrite";
 
 function normalizeStudyMode(value: string | null | undefined): StudyMode {
-  if (value === "review" || value === "learn" || value === "mix" || value === "speak") {
+  if (value === "review" || value === "learn" || value === "mix" || value === "speak" || value === "handwrite") {
     return value;
   }
   return "mix";
@@ -491,6 +493,18 @@ function StudyContent() {
   const [echoManualMode, setEchoManualMode] = useState(false);
   const [echoVolume, setEchoVolume] = useState(0);
   const [echoCountToday, setEchoCountToday] = useState(0);
+  // 手写听写 (handwrite mode): handwriting_* items run ENTIRELY on their own
+  // card — hear/see the prompt, handwrite the answer on the canvas, AI vision
+  // judges it. Same short-circuit pattern as read_aloud echo items.
+  const [handwritingVerdict, setHandwritingVerdict] = useState<{
+    recognized: string;
+    correct: boolean;
+    comment: string;
+  } | null>(null);
+  const [handwritingChecking, setHandwritingChecking] = useState(false);
+  const [handwritingError, setHandwritingError] = useState<string | null>(null);
+  const handwritingCanvasRef = useRef<HandwritingCanvasHandle | null>(null);
+  const handwritingStartedAtRef = useRef<number>(0);
   const [previewMistakePracticeWord, setPreviewMistakePracticeWord] = useState(false);
   const [mistakenWords, setMistakenWords] = useState<string[]>([]);
   const [mistakePracticeWords, setMistakePracticeWords] = useState<string[]>([]);
@@ -703,6 +717,9 @@ function StudyContent() {
   const echoManualModeRef = useRef(false);
   const echoGateActiveRef = useRef(false);
   const echoPromptRef = useRef<{ text: string; translation: string } | null>(null);
+  // Mirrors "is a handwriting card on screen" for the study-timer effect
+  // (declared outside it) — the id of the handwriting item being written.
+  const handwritingActiveRef = useRef<string | null>(null);
   // Stable handle so echo lifecycle code (declared outside the study-timer
   // effect) can refresh the activity clock — see the echoStatus effect below.
   const markStudyActivityRef = useRef<() => void>(() => {});
@@ -811,6 +828,14 @@ function StudyContent() {
 
   const reviewTaskInstruction = buildReviewTaskInstruction(currentItem?.review_task_type, currentFocusedReviewWord);
   const reviewTaskModeLabel = getReviewTaskModeLabel(currentItem?.review_task_type);
+  const isHandwritingItem = currentItem?.review_task_type === "handwriting_dictation" || currentItem?.review_task_type === "handwriting_translation";
+  // 米字格 cell count for the translation canvas: primary meaning length + 2
+  // spare cells (a valid synonym may be longer than the first dictionary
+  // meaning), bounded so the cells stay finger-sized.
+  const handwritingChineseCells = (() => {
+    const primary = (currentItem?.chinese_text || "").split(/[；;]/)[0].trim();
+    return Math.min(10, Math.max(3, [...primary].length + 2));
+  })();
   const progressPercent = items.length > 0 ? ((currentIndex + 1) / items.length) * 100 : 0;
   const packageId = packageIdFromUrl || resolvedPackageId;
   const nextCourse = useMemo<NextCourseTarget | null>(() => {
@@ -1726,7 +1751,7 @@ function StudyContent() {
     } else {
       params.set("mode", targetMode);
     }
-    if (targetMode === "review" || targetMode === "speak") {
+    if (targetMode === "review" || targetMode === "speak" || targetMode === "handwrite") {
       // Global modes — drop course-specific params so backend returns items
       // from all courses.
       params.delete("course_id");
@@ -1809,7 +1834,13 @@ function StudyContent() {
       // echo status transitions bump the activity clock while the child is
       // really cycling, but walking away with the card open pauses the timer
       // after 90s instead of counting forever (the 57-minutes-for-1-题 bug).
-      const idleTimeoutMs = echoPromptRef.current !== null ? ECHO_STUDY_IDLE_TIMEOUT_MS : STUDY_IDLE_TIMEOUT_MS;
+      // Same for the handwriting card (手写听写): the child listens to the TTS
+      // then writes on the canvas — canvas strokes bump the activity clock
+      // (onDraw), but thinking/listening stretches produce no events, so the
+      // card gets the same bounded 90s exemption.
+      const idleTimeoutMs = echoPromptRef.current !== null || handwritingActiveRef.current !== null
+        ? ECHO_STUDY_IDLE_TIMEOUT_MS
+        : STUDY_IDLE_TIMEOUT_MS;
       if (now - lastStudyActivityAtRef.current > idleTimeoutMs) {
         if (!isStudyPausedRef.current) {
           isStudyPausedRef.current = true;
@@ -1996,6 +2027,89 @@ function StudyContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentItem?.id]);
 
+  // 手写听写 (handwrite mode): handwriting_* items run ENTIRELY on their own
+  // card — same short-circuit pattern as the echo card above. Dictation:
+  // hear the TTS, write the English on the canvas. Translation: see/hear the
+  // English, write the Chinese meaning. The AI vision model judges; the
+  // backend records a real review (FSRS) with its verdict.
+  useEffect(() => {
+    const taskType = currentItem?.review_task_type;
+    if (taskType !== "handwriting_dictation" && taskType !== "handwriting_translation") {
+      handwritingActiveRef.current = null;
+      return;
+    }
+    updateAnswerState("sentence-complete");
+    setHandwritingVerdict(null);
+    setHandwritingError(null);
+    setHandwritingChecking(false);
+    handwritingCanvasRef.current?.clear(); // strokes persist across items otherwise
+    handwritingActiveRef.current = currentItem.id;
+    handwritingStartedAtRef.current = Date.now();
+    markStudyActivityRef.current();
+    // Auto-play the prompt when the main item-load effect would not (it only
+    // plays the Chinese+English intro when a Chinese gloss exists).
+    if (!currentItem.chinese_text && currentItem.english_text) {
+      void speakClearEnglish(startVoiceSequence(), currentItem.english_text, modelSettingsRef.current, false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentItem?.id]);
+
+  async function submitHandwriting() {
+    const item = currentItemRef.current;
+    const canvas = handwritingCanvasRef.current;
+    const taskType = item?.review_task_type;
+    if (!item || !canvas || (taskType !== "handwriting_dictation" && taskType !== "handwriting_translation")) {
+      return;
+    }
+    if (canvas.isEmpty()) {
+      setFeedback("先写一写再提交哦 ✍️");
+      return;
+    }
+    const accessToken = getAccessToken();
+    if (!accessToken) {
+      return;
+    }
+    const image = canvas.exportImage();
+    if (!image) {
+      setFeedback("画板出了点问题，请刷新页面");
+      return;
+    }
+    setHandwritingChecking(true);
+    setHandwritingError(null);
+    markStudyActivityRef.current();
+    try {
+      const result = await checkHandwriting(accessToken, {
+        image,
+        task_type: taskType as HandwritingTaskType,
+        learning_item_id: getSourceLearningItemId(item) ?? undefined,
+        expected_english: (item.english_text || "").trim(),
+        expected_chinese: (item.chinese_text || "").trim(),
+        duration_seconds: Math.max(1, Math.round((Date.now() - handwritingStartedAtRef.current) / 1000)),
+      });
+      markStudyActivityRef.current();
+      setHandwritingVerdict({ recognized: result.recognized, correct: result.correct, comment: result.comment });
+      if (result.correct) {
+        setFeedback("🌟 写对啦！真棒！", "success");
+        setCelebrationTrigger((value) => value + 1);
+        // Parent's global rule: EVERY exercise ends with the read-aloud
+        // gate. The echo card takes over the advance (pass or 5-attempt
+        // giveup), so no auto-advance timer here.
+        startEchoPrompt(item.english_text, item.chinese_text || "");
+      } else {
+        setFeedback(result.comment || "差一点点，看看正确答案吧", "error");
+      }
+    } catch (error) {
+      setHandwritingError(error instanceof Error ? error.message : "AI 老师暂时不在，请稍后再试");
+    } finally {
+      setHandwritingChecking(false);
+    }
+  }
+
+  function advanceFromHandwriting() {
+    answerStateRef.current = "typing";
+    handleNextItem({ completedCurrentItem: true });
+  }
+
   useEffect(() => {
     if (answerState === "mistake-word-practice") {
       window.setTimeout(() => mistakePracticeInputRef.current?.focus(), 0);
@@ -2019,7 +2133,7 @@ function StudyContent() {
         setIsLoading(false);
         return;
       }
-      if (studyMode !== "review" && studyMode !== "speak" && !courseId) {
+      if (studyMode !== "review" && studyMode !== "speak" && studyMode !== "handwrite" && !courseId) {
         setErrorMessage("缺少课程信息，请从课程目录选择课程后开始学习");
         setIsLoading(false);
         return;
@@ -2030,7 +2144,12 @@ function StudyContent() {
         let dueReviewItems: LearningItem[] = [];
         let nextItems: LearningItem[] = [];
 
-        if (studyMode === "speak") {
+        if (studyMode === "handwrite") {
+          // 手写听写: weakest studied words/sentences, alternating dictation
+          // (write the English you hear) and translation (write the Chinese
+          // meaning). Judged by the AI vision model on the backend.
+          mergedItems = await listHandwritingItems(accessToken, INITIAL_HANDWRITE_QUEUE_LIMIT).catch(() => [] as LearningItem[]);
+        } else if (studyMode === "speak") {
           // 语音练习: familiar sentences/phrases served as pronunciation-gated
           // read-aloud echo cards. The whole exercise is "see the sentence →
           // hear the model → read it aloud correctly" — no typing, no choices.
@@ -2152,10 +2271,11 @@ function StudyContent() {
         }
 
         queuedReviewItemIdsRef.current = new Set(dueReviewItems.map((item) => item.id));
-        // Speak mode always starts at 0: its queue is re-ordered by
-        // least-recently-spoken on every fetch, and already-spoken-today
-        // items drop out — a saved numeric index would skip fresh items.
-        const savedIndex = studyMode === "speak"
+        // Speak/handwrite mode always starts at 0: their queues are re-ordered
+        // on every fetch (least-recently-spoken / weakest-first), and
+        // already-practiced-today items drop out — a saved numeric index
+        // would skip fresh items.
+        const savedIndex = studyMode === "speak" || studyMode === "handwrite"
           ? 0
           : Number(window.localStorage.getItem(getStudyProgressKey(courseId || "global")) ?? "0");
         // Restore saved progress across all modes. The previous version
@@ -2175,7 +2295,9 @@ function StudyContent() {
             : 0;
         setItems(mergedItems);
         setCurrentIndex(safeIndex);
-        if (studyMode === "speak") {
+        if (studyMode === "handwrite") {
+          setFeedback(mergedItems.length > 0 ? `今天写 ${mergedItems.length} 个听写，听一听再动手写！` : "今天的听写都写完啦，明天再来吧！");
+        } else if (studyMode === "speak") {
           setFeedback(mergedItems.length > 0 ? `今天练 ${mergedItems.length} 句口语，跟着示范大声读出来！` : "今天没有可练的句子啦，先去复习或学习新内容吧！");
         } else if (studyMode === "review") {
           setFeedback(mergedItems.length > 0 ? `开始复习 ${mergedItems.length} 条到期单词。` : "目前没有需要复习的单词，太棒了！");
@@ -2500,11 +2622,11 @@ function StudyContent() {
       // getStudyProgressKey("global") — the two never matched, so review
       // mode silently lost progress between sessions.
       const wrappedIndex = nextIndex % items.length;
-      // Speak mode never writes progress: its queue is re-ordered by
-      // least-recently-spoken on every load (and shrinks as items are spoken
-      // today), so a saved index is meaningless — and writing one under the
-      // shared key would clobber review/learn progress.
-      if (studyMode !== "speak") {
+      // Speak/handwrite modes never write progress: their queues are
+      // re-ordered on every load (and shrink as items are practiced today),
+      // so a saved index is meaningless — and writing one under the shared
+      // key would clobber review/learn progress.
+      if (studyMode !== "speak" && studyMode !== "handwrite") {
         window.localStorage.setItem(
           getStudyProgressKey(courseId || "global"),
           String(wrappedIndex),
@@ -4253,6 +4375,13 @@ function StudyContent() {
 	          setFeedback("大声读出来就能前进哦 🎤");
 	          return;
 	        }
+	        // Handwriting card: writing + AI verdict + follow-up read-aloud all
+	        // happen on the card — Enter/Space cannot skip any of it. The
+	        // escape hatches are the card's own buttons and the echo giveup.
+	        if (handwritingActiveRef.current !== null) {
+	          setFeedback("跟着卡片一步一步来哦 ✍️");
+	          return;
+	        }
 	        if (pendingMistakePracticeWordsRef.current.length > 0) {
 	          void beginPendingMistakePractice();
 	          return;
@@ -4291,7 +4420,13 @@ function StudyContent() {
   const actionButtonClass = isStudyFullscreen
     ? "min-w-28 ipad:min-w-32 ipad:px-5 ipad:text-base ipad-lg:min-w-36 ipad-lg:text-lg"
     : "min-w-32 ipad:min-w-32 ipad:text-sm ipad-lg:min-w-36 ipad-lg:text-base";
-  const displayChinesePrompt = isStudyFullscreen && answerState === "mistake-word-practice"
+  const displayChinesePrompt = isHandwritingItem
+    // Translation task: showing the Chinese gloss would leak the answer the
+    // child must write. Dictation keeps the gloss as the "which word" hint.
+    ? currentItem?.review_task_type === "handwriting_translation"
+      ? "写出这个英文的中文意思"
+      : (hasChineseText(currentItem?.chinese_text) ? currentItem.chinese_text : "听发音，写出英文")
+    : isStudyFullscreen && answerState === "mistake-word-practice"
     ? currentMistakePracticeTranslation || currentItem?.chinese_text || ""
     : isFocusedWordReview && currentItem?.source?.startsWith("聚焦 ") && hasChineseText(currentItem?.chinese_text)
       ? currentItem.chinese_text
@@ -4370,9 +4505,16 @@ function StudyContent() {
             bg: "bg-emerald-50/70 backdrop-blur-xl",
             border: "border-emerald-300/60",
           },
+          handwrite: {
+            label: "✍️ 手写听写",
+            description: "听音写英文、看词写中文，AI 老师批改",
+            color: "text-violet-700",
+            bg: "bg-violet-50/70 backdrop-blur-xl",
+            border: "border-violet-300/60",
+          },
         };
         const current = modeConfig[studyMode];
-        const otherModes = (["review", "learn", "mix", "speak"] as StudyMode[]).filter((m) => m !== studyMode);
+        const otherModes = (["review", "learn", "mix", "speak", "handwrite"] as StudyMode[]).filter((m) => m !== studyMode);
         return (
           <>
           {timeSuggestion ? (
@@ -4497,7 +4639,7 @@ function StudyContent() {
       <section className={isStudyFullscreen ? "flex min-h-0 flex-1 items-center justify-center overflow-visible px-4 py-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] ipad:px-8 ipad:py-6 ipad-lg:px-10 ipad-lg:py-8" : "flex min-h-0 flex-1 items-start justify-center overflow-visible px-4 py-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] ipad:px-5 ipad:py-4 ipad-lg:px-6 ipad-lg:py-5"}>
         {isLoading ? <p className="text-lg font-bold text-muted-foreground ipad:text-xl">正在加载学习内容...</p> : null}
         {!isLoading && errorMessage ? <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 ipad:px-6 ipad:py-4 ipad:text-base">{errorMessage}</p> : null}
-        {!isLoading && !errorMessage && !currentItem ? <p className="text-lg font-bold text-muted-foreground ipad:text-xl">{studyMode === "speak" ? "今天没有可练的口语句子啦，先去复习或学习新内容吧！" : "当前课程还没有导入内容。"}</p> : null}
+        {!isLoading && !errorMessage && !currentItem ? <p className="text-lg font-bold text-muted-foreground ipad:text-xl">{studyMode === "speak" ? "今天没有可练的口语句子啦，先去复习或学习新内容吧！" : studyMode === "handwrite" ? "今天的听写都写完啦，明天再来吧！" : "当前课程还没有导入内容。"}</p> : null}
 
         {!isLoading && !errorMessage && currentItem ? (
           <div className={isStudyFullscreen ? "w-full max-w-7xl text-center" : "w-full max-w-6xl rounded-2xl border border-white/70 bg-white/75 px-5 py-5 text-center shadow-soft backdrop-blur-xl ipad:px-6 ipad:py-5 ipad-lg:px-8 ipad-lg:py-6"}>
@@ -4694,6 +4836,12 @@ function StudyContent() {
                     })}
                   </div>
                 </div>
+              ) : isHandwritingItem ? (
+                // Handwriting items run entirely on their own card (below).
+                // The word-input row would render the item's English words
+                // as visible text (sentence-complete recap) — leaking the
+                // dictation answer before the child writes it.
+                null
               ) : (
                 <div className={isStudyFullscreen ? "flex flex-wrap items-end justify-center gap-x-5 gap-y-7 ipad:gap-x-7 ipad:gap-y-8 ipad-lg:gap-x-8 ipad-lg:gap-y-10" : "flex flex-wrap items-end justify-center gap-x-4 gap-y-5 ipad:gap-x-4 ipad:gap-y-5 ipad-lg:gap-x-5 ipad-lg:gap-y-6"}>
                   {currentWords.map((word, index) => {
@@ -4806,6 +4954,105 @@ function StudyContent() {
                   <p className="text-xs font-bold text-emerald-700">今天已开口 {echoCountToday} 次</p>
                 </div>
               ) : null}
+              {isHandwritingItem && !echoPrompt && answerState === "sentence-complete" ? (
+                <div className="mx-auto flex w-full max-w-2xl flex-col items-center gap-3 rounded-2xl border-2 border-violet-300 bg-violet-50/90 px-5 py-4 shadow-soft">
+                  <p className="text-lg font-bold text-violet-800">
+                    {currentItem?.review_task_type === "handwriting_translation" ? "✍️ 看一看，写出中文意思" : "✍️ 听一听，写出英文"}
+                  </p>
+                  {currentItem?.review_task_type === "handwriting_translation" ? (
+                    <p className="max-w-full break-words text-center text-2xl font-bold text-slate-900 ipad:text-3xl">{currentItem.english_text}</p>
+                  ) : null}
+                  <div className="flex flex-wrap items-center justify-center gap-3">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className={actionButtonClass}
+                      onClick={() => {
+                        if (currentItem?.english_text) {
+                          void speakClearEnglish(startVoiceSequence(), currentItem.english_text, modelSettingsRef.current, false);
+                        }
+                      }}
+                    >
+                      🔊 {currentItem?.review_task_type === "handwriting_translation" ? "听发音" : "再听一遍"}
+                    </Button>
+                    {handwritingVerdict ? (
+                      <div className={`rounded-full px-4 py-2 text-sm font-bold ${handwritingVerdict.correct ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                        {handwritingVerdict.correct ? "🌟 写对啦！真棒！" : "💪 差一点点，继续加油！"}
+                      </div>
+                    ) : (
+                      <>
+                        <Button type="button" variant="outline" className={actionButtonClass} onClick={() => handwritingCanvasRef.current?.undo()}>
+                          ↩️ 撤销
+                        </Button>
+                        <Button type="button" variant="outline" className={actionButtonClass} onClick={() => handwritingCanvasRef.current?.clear()}>
+                          🧽 重写
+                        </Button>
+                        <Button
+                          type="button"
+                          className={actionButtonClass}
+                          disabled={handwritingChecking}
+                          onClick={() => { void submitHandwriting(); }}
+                        >
+                          {handwritingChecking ? "⏳ AI 老师批改中…" : "📝 提交给老师"}
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                  <HandwritingCanvas
+                    ref={handwritingCanvasRef}
+                    gridStyle={currentItem?.review_task_type === "handwriting_translation" ? "chinese" : "english"}
+                    cells={handwritingChineseCells}
+                    onDraw={() => markStudyActivityRef.current()}
+                  />
+                  {handwritingChecking ? <p className="text-sm font-bold text-violet-700">⏳ AI 老师正在认真看你的字…</p> : null}
+                  {handwritingError ? (
+                    <div className="flex flex-col items-center gap-2">
+                      <p className="text-sm font-bold text-red-600">😅 {handwritingError}</p>
+                      <div className="flex gap-3">
+                        <Button type="button" variant="secondary" className={actionButtonClass} onClick={() => { void submitHandwriting(); }}>
+                          🔁 重试
+                        </Button>
+                        <Button type="button" variant="outline" className={actionButtonClass} onClick={advanceFromHandwriting}>
+                          跳过此题
+                        </Button>
+                      </div>
+                    </div>
+                  ) : null}
+                  {handwritingVerdict ? (
+                    <div className="flex flex-col items-center gap-2">
+                      {handwritingVerdict.recognized ? (
+                        <p className="text-sm text-slate-600">AI 老师看到的是：<span className="font-bold text-slate-800">{handwritingVerdict.recognized}</span></p>
+                      ) : null}
+                      {handwritingVerdict.comment ? <p className="text-sm font-bold text-violet-700">{handwritingVerdict.comment}</p> : null}
+                      {!handwritingVerdict.correct ? (
+                        <>
+                          <p className="text-base font-bold text-emerald-700">
+                            {currentItem?.review_task_type === "handwriting_translation"
+                              ? `参考意思：${currentItem?.chinese_text || ""}`
+                              : `正确写法：${currentItem?.english_text || ""}`}
+                          </p>
+                          <Button
+                            type="button"
+                            className={actionButtonClass}
+                            onClick={() => {
+                              // Parent's global rule: every exercise ends
+                              // with the read-aloud gate — read the correct
+                              // answer aloud once, then the echo advances.
+                              if (currentItem?.english_text) {
+                                startEchoPrompt(currentItem.english_text, currentItem.chinese_text || "");
+                              } else {
+                                advanceFromHandwriting();
+                              }
+                            }}
+                          >
+                            知道了，读一遍正确答案 🎤
+                          </Button>
+                        </>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               <div className={isStudyFullscreen ? "mx-auto flex w-full max-w-5xl flex-wrap items-center justify-center gap-4 px-0 py-0 ipad:gap-5 ipad-lg:gap-6" : "mx-auto flex w-full max-w-3xl flex-col items-center gap-4 rounded-2xl border border-white/70 bg-white/60 px-4 py-4 shadow-soft backdrop-blur-xl ipad:max-w-3xl ipad:flex-col ipad:justify-center ipad:gap-4 ipad:px-5 ipad-lg:max-w-4xl ipad-lg:flex-row ipad-lg:gap-6 ipad-lg:px-6"}>
                 <div className="flex flex-wrap justify-center gap-3 ipad:gap-3 ipad-lg:gap-4">
                   {answerState === "mistake-word-practice" ? (
@@ -4836,6 +5083,12 @@ function StudyContent() {
                             setFeedback("大声读出来就能前进哦 🎤");
                             return;
                           }
+                          // Handwriting card: writing + verdict + read-aloud
+                          // all happen on the card — no skipping steps.
+                          if (handwritingActiveRef.current !== null) {
+                            setFeedback("跟着卡片一步一步来哦 ✍️");
+                            return;
+                          }
                           if (pendingMistakePracticeWordsRef.current.length > 0) {
                             return beginPendingMistakePractice();
                           }
@@ -4848,7 +5101,7 @@ function StudyContent() {
                       {pendingMistakePracticeWords.length > 0 ? "进入错词复习" : "下一句"}
                     </Button>
                   ) : null}
-                  {currentItem?.review_task_type !== "read_aloud" && currentItem?.review_task_type !== "voice_practice" ? (
+                  {currentItem?.review_task_type !== "read_aloud" && currentItem?.review_task_type !== "voice_practice" && !isHandwritingItem ? (
                     <Button className={actionButtonClass} onClick={() => runStudyButtonAction(resetAnswer)} onMouseDown={keepStudyInputFocus} type="button" variant="secondary">
                       再来一次
                     </Button>
@@ -4856,6 +5109,13 @@ function StudyContent() {
                   <Button className={actionButtonClass} onClick={() => runStudyButtonAction(() => {
                     if (echoGateActiveRef.current) {
                       setFeedback("大声读出来就能前进哦 🎤");
+                      return;
+                    }
+                    // Handwriting card: writing + verdict + read-aloud all
+                    // happen on the card — a skip here would quietly drop
+                    // the exercise.
+                    if (handwritingActiveRef.current !== null) {
+                      setFeedback("跟着卡片一步一步来哦 ✍️");
                       return;
                     }
                     handleNextItem();

@@ -227,3 +227,22 @@ class ReadAloudEventRequest(BaseModel):
 
 class ReadAloudEventResponse(BaseModel):
     learning_item_id: UUID | None = None
+
+
+class HandwritingCheckRequest(BaseModel):
+    # Canvas PNG as a data URL (the tingxie pattern — no multipart needed,
+    # the image never touches disk). Bounded in the endpoint.
+    image: str
+    task_type: Literal["handwriting_dictation", "handwriting_translation"]
+    learning_item_id: UUID | None = None
+    expected_english: str = Field(default="", max_length=200)
+    expected_chinese: str = Field(default="", max_length=200)
+    duration_seconds: int = Field(default=0, ge=0, le=600)
+
+
+class HandwritingCheckResponse(BaseModel):
+    recognized: str
+    correct: bool
+    comment: str
+    expected: str
+    learning_item_id: UUID | None = None

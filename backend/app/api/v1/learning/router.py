@@ -36,6 +36,8 @@ from app.schemas.learning import (
     DynamicSentenceCandidate,
     DynamicSentenceRequest,
     DynamicSentenceResponse,
+    HandwritingCheckRequest,
+    HandwritingCheckResponse,
     LearningEncouragementRequest,
     LearningEncouragementResponse,
     LearningImportResponse,
@@ -55,7 +57,7 @@ from app.schemas.learning import (
 )
 from app.services.dynamic_sentence import generate_dynamic_review_sentence
 from app.services.learning_import import SUPPORTED_IMPORT_EXTENSIONS, import_learning_items, parse_txt_import, parse_xlsx_import
-from app.services.llm_translation import DEFAULT_LLM_TRANSLATION_SETTINGS, LlmTranslationSettings, generate_learning_text, needs_translation, translate_english_to_chinese, with_agent_plan_primary
+from app.services.llm_translation import AGENT_PLAN_DEFAULT_BASE_URL, DEFAULT_LLM_TRANSLATION_SETTINGS, LlmTranslationSettings, generate_learning_text, needs_translation, translate_english_to_chinese, with_agent_plan_primary
 from app.services.memory_dashboard import calculate_word_priority
 from app.services.memory_scheduler import (
     ASSISTED_REVIEW_MODES,
@@ -76,6 +78,17 @@ from app.services.memory_scheduler import (
 )
 from app.services.pronunciation import recognize_speech_flash, score_pronunciation
 from app.services.secure_model_settings import get_private_model_settings
+from app.services.handwriting import (
+    DEFAULT_VISION_MODEL,
+    HANDWRITING_DAILY_CAP,
+    HANDWRITING_DICTATION_REVIEW_MODE,
+    HANDWRITING_REVIEW_MODES,
+    HANDWRITING_TRANSLATION_REVIEW_MODE,
+    HANDWRITING_TRANSLATION_TASK_TYPE,
+    MAX_IMAGE_DATA_URL_CHARS,
+    judge_handwriting,
+    select_handwriting_items,
+)
 from app.services.speak_practice import (
     READ_ALOUD_REVIEW_MODE,
     ECHO_READ_REVIEW_MODE,
@@ -2415,6 +2428,185 @@ def create_read_aloud_event(
         logger.warning("Failed to record read-aloud learning event: %s", exc)
     db.commit()
     return ReadAloudEventResponse(learning_item_id=(learning_item.id if learning_item else None))
+
+
+@router.get("/handwriting-items", response_model=list[LearningItemRead])
+def list_handwriting_items(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: int = 12,
+) -> list[LearningItemRead]:
+    """Today's handwriting-dictation queue (手写听写 mode).
+
+    Studied content only (MemoryState.repetition_count > 0) — same rule as
+    speak mode: practice rehearses known material, never ambushes the child.
+    Weakest items first (memory strength ascending), each item at most once
+    per day, small daily cap. Words with a Chinese gloss alternate between
+    dictation (write the English) and translation (write the Chinese
+    meaning); sentences are dictation-only.
+    """
+    capped_limit = max(1, min(limit, 30))
+    now = datetime.now(UTC)
+    today_start = now.astimezone(LOCAL_TIMEZONE).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).astimezone(UTC)
+
+    tested_today_ids = {
+        row_id
+        for row_id in db.scalars(
+            select(LearningEvent.learning_item_id).where(
+                LearningEvent.user_id == current_user.id,
+                LearningEvent.review_mode.in_(HANDWRITING_REVIEW_MODES),
+                LearningEvent.occurred_at >= today_start,
+                LearningEvent.learning_item_id.is_not(None),
+            )
+        ).all()
+        if row_id is not None
+    }
+    daily_remaining = max(HANDWRITING_DAILY_CAP - len(tested_today_ids), 0)
+    if daily_remaining == 0:
+        return []
+
+    last_tested = (
+        select(
+            LearningEvent.learning_item_id.label("item_id"),
+            func.max(LearningEvent.occurred_at).label("last_tested_at"),
+        )
+        .where(
+            LearningEvent.user_id == current_user.id,
+            LearningEvent.review_mode.in_(HANDWRITING_REVIEW_MODES),
+        )
+        .group_by(LearningEvent.learning_item_id)
+        .subquery()
+    )
+    statement = (
+        select(LearningItem, MemoryState.memory_strength, last_tested.c.last_tested_at)
+        .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
+        .outerjoin(last_tested, last_tested.c.item_id == LearningItem.id)
+        .where(
+            LearningItem.user_id == current_user.id,
+            LearningItem.item_type.in_(["word", "sentence", "phrase"]),
+            MemoryState.repetition_count > 0,
+        )
+    )
+    rows = [(item, strength, tested_at) for item, strength, tested_at in db.execute(statement).all()]
+    selected = select_handwriting_items(
+        rows,
+        tested_today_ids=tested_today_ids,
+        limit=min(capped_limit, daily_remaining),
+    )
+    return [
+        LearningItemRead.model_validate(item).model_copy(update={"review_task_type": task_type})
+        for item, task_type in selected
+    ]
+
+
+@router.post("/handwriting-check", response_model=HandwritingCheckResponse)
+async def check_handwriting(
+    payload: HandwritingCheckRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> HandwritingCheckResponse:
+    """Judge a handwritten answer with the vision LLM AND record the review.
+
+    One atomic call (the client cannot talk to the vision model directly, so
+    letting it submit the verdict separately would let a buggy/playing client
+    mark itself correct): judge → real review_log (score 4/1, feeds FSRS) →
+    word-memory sync → points → replay event (which anchors the study-time
+    session windows, so handwriting minutes show up on the dashboard).
+    """
+    if not payload.image.startswith("data:image/") or len(payload.image) > MAX_IMAGE_DATA_URL_CHARS:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid image")
+    expected_english = payload.expected_english.strip()
+    if not expected_english:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="expected_english is required")
+
+    stored_settings = get_private_model_settings(db, current_user.id)
+    # The vision judge runs on the Agent Plan channel (the plan includes the
+    # multimodal doubao models; the legacy DeepSeek-direct LLM is text-only).
+    api_key = string_setting(stored_settings, "agentPlanApiKey")
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="手写识别需要先配置 Agent Plan API Key（请家长在模型设置中填写）",
+        )
+    base_url = string_setting(stored_settings, "agentPlanBaseUrl") or AGENT_PLAN_DEFAULT_BASE_URL
+    vision_model = string_setting(stored_settings, "handwritingVisionModel") or DEFAULT_VISION_MODEL
+
+    try:
+        verdict = await run_in_threadpool(
+            judge_handwriting,
+            payload.image,
+            payload.task_type,
+            expected_english=expected_english,
+            expected_chinese=payload.expected_chinese.strip(),
+            base_url=base_url,
+            api_key=api_key,
+            model=vision_model,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    learning_item: LearningItem | None = None
+    if payload.learning_item_id is not None:
+        learning_item = db.scalar(
+            select(LearningItem).where(
+                LearningItem.id == payload.learning_item_id,
+                LearningItem.user_id == current_user.id,
+            )
+        )
+    if learning_item is None:
+        # Same never-lost rule as /word-reviews: resolve by text.
+        learning_item = db.scalar(
+            select(LearningItem).where(
+                LearningItem.user_id == current_user.id,
+                LearningItem.english_text == expected_english,
+            ).limit(1)
+        )
+
+    review_mode = (
+        HANDWRITING_TRANSLATION_REVIEW_MODE
+        if payload.task_type == HANDWRITING_TRANSLATION_TASK_TYPE
+        else HANDWRITING_DICTATION_REVIEW_MODE
+    )
+    error_type = None if verdict.correct else ("meaning" if payload.task_type == HANDWRITING_TRANSLATION_TASK_TYPE else "spelling")
+    word_item = get_or_create_word_memory_item(db, current_user.id, expected_english, learning_item)
+    result = schedule_memory_review(
+        db=db,
+        user_id=current_user.id,
+        learning_item_id=word_item.id,
+        score=4 if verdict.correct else 1,
+        review_mode=review_mode,
+        response_text=verdict.recognized[:200],
+        duration_seconds=max(int(payload.duration_seconds or 0), 0),
+        error_type=error_type,
+    )
+    sync_word_memory_from_review(
+        db, current_user.id, word_item.english_text, result.memory_state, review_mode,
+        result.review_log.is_correct, error_type,
+    )
+    try:
+        from app.services.points_service import POINTS_CORRECT_NO_HINT, POINTS_WRONG, award_points
+        if result.review_log.is_correct:
+            award_points(db, current_user.id, POINTS_CORRECT_NO_HINT, "handwriting_correct", f"手写正确 +{POINTS_CORRECT_NO_HINT}", word_item.id)
+        else:
+            award_points(db, current_user.id, POINTS_WRONG, "handwriting_wrong", f"手写错误 {POINTS_WRONG}", word_item.id)
+    except Exception:
+        pass  # points failure should never block learning
+    try:
+        from app.services.learning_replay import record_learning_event
+        duration_ms = min(max(int(payload.duration_seconds or 0), 0) * 1000, 5 * 60 * 1000) or 30_000
+        record_learning_event(db, current_user.id, result.review_log, word_item, duration_ms=duration_ms)
+    except Exception as exc:
+        logger.warning("Failed to record learning replay event for handwriting review: %s", exc)
+    db.commit()
+    return HandwritingCheckResponse(
+        recognized=verdict.recognized,
+        correct=verdict.correct,
+        comment=verdict.comment,
+        expected=expected_english,
+        learning_item_id=word_item.id,
+    )
 
 
 @router.post("/word-mistakes", response_model=WordMistakeLogResponse, status_code=status.HTTP_201_CREATED)

@@ -644,6 +644,60 @@ export async function logReadAloudEvent(accessToken: string, payload: ReadAloudE
   }
 }
 
+export async function listHandwritingItems(accessToken: string, limit = 12): Promise<LearningItem[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/learning/handwriting-items?${params.toString()}`,
+    {
+      cache: "no-store",
+    },
+    accessToken,
+  );
+
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+
+  return (await response.json()) as LearningItem[];
+}
+
+export type HandwritingTaskType = "handwriting_dictation" | "handwriting_translation";
+
+export interface HandwritingCheckPayload {
+  image: string;
+  task_type: HandwritingTaskType;
+  learning_item_id?: string;
+  expected_english: string;
+  expected_chinese?: string;
+  duration_seconds: number;
+}
+
+export interface HandwritingCheckResult {
+  recognized: string;
+  correct: boolean;
+  comment: string;
+  expected: string;
+  learning_item_id: string | null;
+}
+
+export async function checkHandwriting(accessToken: string, payload: HandwritingCheckPayload): Promise<HandwritingCheckResult> {
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/learning/handwriting-check`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    accessToken,
+  );
+
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+
+  return (await response.json()) as HandwritingCheckResult;
+}
+
 export async function listDueReviewItems(
   accessToken: string,
   excludeCourseId?: string,
