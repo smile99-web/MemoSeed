@@ -628,17 +628,6 @@ function StudyContent() {
   const isAiReview = searchParams.get("ai") === "1";
   const [aiRecommendedWords, setAiRecommendedWords] = useState<string[]>([]);
   const [aiReasoning, setAiReasoning] = useState("");
-  useEffect(() => {
-    if (!isAiReview) return;
-    const token = getAccessToken();
-    if (!token) return;
-    getReviewAdvice(token).then((advice) => {
-      if (advice?.recommended_words?.length > 0) {
-        setAiRecommendedWords(advice.recommended_words);
-        setAiReasoning(advice.reasoning || "");
-      }
-    }).catch(() => {});
-  }, [isAiReview]);
   const [celebrationSummary, setCelebrationSummary] = useState<CelebrationSummary | null>(null);
   // Immersive (沉浸) mode defaults OFF — user must click the "沉浸模式"
   // button to enable it. Previously this defaulted ON, but the forced
@@ -4517,28 +4506,6 @@ function StudyContent() {
         const otherModes = (["review", "learn", "mix", "speak", "handwrite"] as StudyMode[]).filter((m) => m !== studyMode);
         return (
           <>
-          {timeSuggestion && studyMode !== "handwrite" ? (
-            <div className="mx-4 mt-3 rounded-2xl border border-blue-300/60 bg-blue-50/70 px-4 py-2.5 shadow-soft backdrop-blur-xl ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3">
-              <p className="text-xs font-bold text-blue-700 ipad:text-sm">{timeSuggestion}</p>
-            </div>
-          ) : null}
-          {isPhonics && studyMode !== "handwrite" ? (
-            <div className="mx-4 mt-3 rounded-2xl border border-emerald-300/60 bg-emerald-50/70 px-4 py-2.5 shadow-soft backdrop-blur-xl ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3">
-              <p className="text-sm font-bold text-emerald-700">🔤 自然拼读模式</p>
-              <p className="mt-1 text-xs text-emerald-600">同音组词一起练,先听发音拆音节再拼写,通过声音规律记忆单词</p>
-            </div>
-          ) : null}
-          {aiRecommendedWords.length > 0 && studyMode !== "handwrite" ? (
-            <div className="mx-4 mt-3 rounded-2xl border border-amber-300/60 bg-amber-50/70 px-4 py-2.5 shadow-soft backdrop-blur-xl ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3">
-              <p className="text-sm font-bold text-amber-700">🤖 AI 推荐复习 · {aiRecommendedWords.length} 个重点词优先</p>
-              <p className="mt-1 text-xs text-amber-600">{aiReasoning || "基于最近7天学习数据,以下单词需要更多练习:"}</p>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {aiRecommendedWords.map((w) => (
-                  <span key={w} className="rounded-full bg-amber-200 px-2.5 py-0.5 text-xs font-semibold text-amber-900">{w}</span>
-                ))}
-              </div>
-            </div>
-          ) : null}
           <div className={`mx-4 mt-3 flex flex-wrap items-center justify-between gap-3 rounded-2xl border ${current.border} ${current.bg} px-4 py-2.5 shadow-soft ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3`}>
             <div className="flex items-center gap-3">
               <span className={`text-sm font-bold ipad:text-base ${current.color}`}>{current.label}</span>
