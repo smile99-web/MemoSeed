@@ -30,7 +30,7 @@ DEFAULT_LLM_TRANSLATION_SETTINGS = LlmTranslationSettings(provider="ollama", bas
 # per-user LLM config (DeepSeek direct) becomes the automatic fallback.
 # NOTE: Agent Plan covers TEXT models only — the TTS speech service
 # (openspeech seed-tts) is a separate product and stays untouched.
-AGENT_PLAN_DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+AGENT_PLAN_DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/plan/v3"
 AGENT_PLAN_DEFAULT_MODEL = "deepseek-v4-flash-modelhub"
 
 

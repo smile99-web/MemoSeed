@@ -70,7 +70,7 @@ export const defaultModelSettings: ModelSettings = {
   cosyvoiceEnglishSpeaker: "英文女",
   cosyvoiceChineseSpeaker: "中文女",
   agentPlanApiKey: "",
-  agentPlanBaseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+  agentPlanBaseUrl: "https://ark.cn-beijing.volces.com/api/plan/v3",
   agentPlanModel: "deepseek-v4-flash-modelhub",
   handwritingVisionModel: "doubao-seed-2-1-turbo",
   useSlowLearnerProfile: false,
@@ -253,6 +253,11 @@ export function normalizeModelSettings(settings: Partial<ModelSettings>): ModelS
   const ttsProvider: TtsProvider = mergedSettings.ttsProvider === "volcark" ? "volcark" : mergedSettings.ttsProvider === "cosyvoice" ? "cosyvoice" : "kokoro";
   const modelMode: ModelMode = mergedSettings.modelMode === "online" ? "online" : "local";
   const normalizedSettings = { ...mergedSettings, modelMode, llmProvider, ttsProvider };
+  // Agent Plan 密钥走专属套餐端点 /api/plan/v3；早期默认的 /api/v3 会 401，
+  // 已保存旧地址的本地存储/服务器设置统一迁移。
+  if (normalizedSettings.agentPlanBaseUrl === "https://ark.cn-beijing.volces.com/api/v3") {
+    normalizedSettings.agentPlanBaseUrl = defaultModelSettings.agentPlanBaseUrl;
+  }
   if (ttsProvider === "volcark" && normalizedSettings.volcengineTtsResourceId === "seed-tts-2.0") {
     if (!normalizedSettings.ttsEnglishVoice.endsWith("_uranus_bigtts")) {
       normalizedSettings.ttsEnglishVoice = volcarkTtsModelSettings.ttsEnglishVoice;

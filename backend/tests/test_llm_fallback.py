@@ -19,7 +19,7 @@ from app.services.llm_translation import LlmTranslationSettings, call_llm_genera
 
 PRIMARY = LlmTranslationSettings(
     provider="openai",
-    base_url="https://ark.cn-beijing.volces.com/api/v3",
+    base_url="https://ark.cn-beijing.volces.com/api/plan/v3",
     model="deepseek-v4-flash-modelhub",
     api_key="plan-key",
 )
@@ -48,7 +48,7 @@ class TestFallback:
 
         monkeypatch.setattr(llm_translation, "_dispatch_llm_generate", fake_dispatch)
         assert call_llm_generate(PRIMARY, "hi") == "你好"
-        assert calls == [("https://ark.cn-beijing.volces.com/api/v3", "deepseek-v4-flash-modelhub")]
+        assert calls == [("https://ark.cn-beijing.volces.com/api/plan/v3", "deepseek-v4-flash-modelhub")]
 
     def test_primary_failure_retries_with_attached_fallback(self, monkeypatch):
         calls: list[str] = []
@@ -142,7 +142,7 @@ class TestAgentPlanPrimary:
         stored = {"agentPlanApiKey": "sk-plan-123"}
         wrapped = with_agent_plan_primary(FALLBACK, stored)
         assert wrapped.provider == "openai"
-        assert wrapped.base_url == "https://ark.cn-beijing.volces.com/api/v3"
+        assert wrapped.base_url == "https://ark.cn-beijing.volces.com/api/plan/v3"
         assert wrapped.model == "deepseek-v4-flash-modelhub"
         assert wrapped.api_key == "sk-plan-123"
         assert wrapped.fallback is FALLBACK
@@ -150,11 +150,11 @@ class TestAgentPlanPrimary:
     def test_stored_base_url_and_model_win_over_defaults(self):
         stored = {
             "agentPlanApiKey": "sk-plan-123",
-            "agentPlanBaseUrl": "https://ark.cn-beijing.volces.com/api/v3/",
+            "agentPlanBaseUrl": "https://ark.cn-beijing.volces.com/api/plan/v3/",
             "agentPlanModel": "doubao-seed-2-0-lite-260215",
         }
         wrapped = with_agent_plan_primary(FALLBACK, stored)
-        assert wrapped.base_url == "https://ark.cn-beijing.volces.com/api/v3/"
+        assert wrapped.base_url == "https://ark.cn-beijing.volces.com/api/plan/v3/"
         assert wrapped.model == "doubao-seed-2-0-lite-260215"
 
     def test_explicit_overrides_skip_the_wrap(self):
