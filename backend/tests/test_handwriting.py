@@ -20,9 +20,12 @@ from app.services import handwriting
 from app.services.handwriting import (
     HANDWRITING_DICTATION_TASK_TYPE,
     HANDWRITING_TRANSLATION_TASK_TYPE,
+    compose_daily_handwriting_queue,
     is_dictation_candidate,
     judge_handwriting,
-    select_handwriting_items,
+    parse_lesson_number,
+    pick_course_dictation_tasks,
+    pick_review_word_tasks,
 )
 
 
@@ -50,7 +53,7 @@ class TestIsDictationCandidate:
         assert is_dictation_candidate(_item("word", "", "空")) is False
 
 
-class TestSelectHandwritingItems:
+class TestPickReviewWordTasks:
     def test_weakest_first_and_never_tested_first(self):
         weak = _item(english="weak")
         strong = _item(english="strong")
@@ -60,59 +63,99 @@ class TestSelectHandwritingItems:
             (weak, 0.2, datetime(2026, 7, 1)),
             (never, 0.5, None),
         ]
-        selected = select_handwriting_items(rows, tested_today_ids=set(), limit=10)
+        selected = pick_review_word_tasks(rows, tested_today_ids=set(), limit=10)
         assert [item.english_text for item, _ in selected] == ["weak", "never", "strong"]
 
     def test_today_tested_items_excluded(self):
         done = _item(english="done")
         fresh = _item(english="fresh")
         rows = [(done, 0.1, None), (fresh, 0.9, None)]
-        selected = select_handwriting_items(rows, tested_today_ids={done.id}, limit=10)
+        selected = pick_review_word_tasks(rows, tested_today_ids={done.id}, limit=10)
         assert [item.english_text for item, _ in selected] == ["fresh"]
 
-    def test_word_tasks_alternate_and_sentences_are_dictation(self):
+    def test_word_tasks_alternate_dictation_translation(self):
         words = [_item(english=f"w{i}") for i in range(4)]
-        sentence = _item("sentence", "I like it.", "我喜欢它。")
-        rows = [(w, 0.5, None) for w in words] + [(sentence, 0.5, None)]
-        selected = select_handwriting_items(rows, tested_today_ids=set(), limit=10)
-        task_by_english = {item.english_text: task for item, task in selected}
-        assert task_by_english["I like it."] == HANDWRITING_DICTATION_TASK_TYPE
-        word_tasks = [task_by_english[w.english_text] for w in words]
-        assert word_tasks == [
+        rows = [(w, 0.5, None) for w in words]
+        selected = pick_review_word_tasks(rows, tested_today_ids=set(), limit=10)
+        assert [task for _, task in selected] == [
             HANDWRITING_DICTATION_TASK_TYPE,
             HANDWRITING_TRANSLATION_TASK_TYPE,
             HANDWRITING_DICTATION_TASK_TYPE,
             HANDWRITING_TRANSLATION_TASK_TYPE,
         ]
 
-    def test_words_and_sentences_are_mixed_not_globally_sorted(self):
-        # Production bug (first deploy): sentence memory strengths are
-        # systematically lower, so a global weakness sort served 12
-        # sentences and ZERO words/translation tasks.
-        sentences = [_item("sentence", f"S number {i}.", "句子") for i in range(12)]
-        words = [_item(english=f"w{i}") for i in range(12)]
-        rows = [(s, 0.1, None) for s in sentences] + [(w, 0.9, None) for w in words]
-        selected = select_handwriting_items(rows, tested_today_ids=set(), limit=12)
-        types = [item.item_type for item, _ in selected]
-        assert types.count("word") == 8
-        assert types.count("sentence") == 4
-        assert types[0] == "word"  # words lead
-
-    def test_sentence_pool_dry_tops_up_from_words(self):
-        words = [_item(english=f"w{i}") for i in range(12)]
-        rows = [(w, 0.5, None) for w in words]
-        selected = select_handwriting_items(rows, tested_today_ids=set(), limit=12)
-        assert len(selected) == 12
-        assert all(item.item_type == "word" for item, _ in selected)
-
     def test_word_without_chinese_is_dictation_only(self):
         word = _item(english="mystery", chinese="")
-        selected = select_handwriting_items([(word, 0.5, None)], tested_today_ids=set(), limit=10)
+        selected = pick_review_word_tasks([(word, 0.5, None)], tested_today_ids=set(), limit=10)
         assert selected == [(word, HANDWRITING_DICTATION_TASK_TYPE)]
+
+    def test_non_word_rows_ignored(self):
+        sentence = _item("sentence", "I like it.", "我喜欢它。")
+        selected = pick_review_word_tasks([(sentence, 0.5, None)], tested_today_ids=set(), limit=10)
+        assert selected == []
 
     def test_limit_respected(self):
         rows = [(_item(english=f"w{i}"), 0.5, None) for i in range(10)]
-        assert len(select_handwriting_items(rows, tested_today_ids=set(), limit=3)) == 3
+        assert len(pick_review_word_tasks(rows, tested_today_ids=set(), limit=3)) == 3
+
+
+class TestParseLessonNumber:
+    def test_basic(self):
+        assert parse_lesson_number("第1课") == 1
+        assert parse_lesson_number("第10课") == 10
+
+    def test_unparseable_sorts_last(self):
+        assert parse_lesson_number("") == 999
+        assert parse_lesson_number("入门单元") == 999
+
+
+class TestPickCourseDictationTasks:
+    def test_preserves_given_order_and_dictation_only(self):
+        sentences = [_item("sentence", f"S number {i}.", "句子") for i in range(5)]
+        selected = pick_course_dictation_tasks(sentences, tested_today_ids=set(), limit=3)
+        assert [item.english_text for item, _ in selected] == ["S number 0.", "S number 1.", "S number 2."]
+        assert all(task == HANDWRITING_DICTATION_TASK_TYPE for _, task in selected)
+
+    def test_skips_tested_today_and_long_sentences(self):
+        done = _item("sentence", "Done one.", "完了")
+        long_sentence = _item("sentence", " ".join(["word"] * 12), "长句")
+        fresh = _item("sentence", "Fresh one.", "新的")
+        selected = pick_course_dictation_tasks(
+            [done, long_sentence, fresh], tested_today_ids={done.id}, limit=5,
+        )
+        assert [item.english_text for item, _ in selected] == ["Fresh one."]
+
+
+class TestComposeDailyHandwritingQueue:
+    def test_words_first_then_course_in_order(self):
+        words = [(_item(english=f"w{i}"), 0.5, None) for i in range(12)]
+        course = [_item("sentence", f"Lesson sentence {i}.", "课文句") for i in range(10)]
+        queue = compose_daily_handwriting_queue(words, course, tested_today_ids=set(), limit=12)
+        types = [item.item_type for item, _ in queue]
+        assert types.count("word") == 8
+        assert types.count("sentence") == 4
+        assert types[:8] == ["word"] * 8  # 单词复习全部在前
+        assert [item.english_text for item, _ in queue[8:]] == [
+            f"Lesson sentence {i}." for i in range(4)
+        ]
+
+    def test_course_tops_up_when_words_dry(self):
+        words = [(_item(english="only"), 0.5, None)]
+        course = [_item("sentence", f"S {i}.", "句") for i in range(20)]
+        queue = compose_daily_handwriting_queue(words, course, tested_today_ids=set(), limit=12)
+        assert len(queue) == 12
+        assert queue[0][0].english_text == "only"
+        assert sum(1 for item, _ in queue if item.item_type == "sentence") == 11
+
+    def test_words_top_up_when_course_dry(self):
+        words = [(_item(english=f"w{i}"), 0.5, None) for i in range(20)]
+        course = [_item("sentence", "Only one.", "唯一")]
+        queue = compose_daily_handwriting_queue(words, course, tested_today_ids=set(), limit=12)
+        assert len(queue) == 12
+        assert sum(1 for item, _ in queue if item.item_type == "sentence") == 1
+
+    def test_empty_both_pools_gives_empty_queue(self):
+        assert compose_daily_handwriting_queue([], [], tested_today_ids=set(), limit=12) == []
 
 
 class _FakeHttpResponse(io.BytesIO):

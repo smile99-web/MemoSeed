@@ -55,6 +55,10 @@ MAX_SENTENCE_WORDS = 8  # handwriting a long sentence is slow — keep it short
 MAX_SENTENCE_CHARS = 120
 MAX_IMAGE_DATA_URL_CHARS = 9 * 1024 * 1024  # same bound as tingxie
 
+# 手写听写队列的课程来源（家长指定）：先出单词复习，再按课次出中考英语
+# 第1课→第10课的句子。包名容忍 "中考英语"/"中考英文" 两种写法。
+HANDWRITING_COURSE_PACKAGE_NAMES = ("中考英语", "中考英文")
+
 _EPOCH = datetime(1970, 1, 1)
 
 
@@ -82,77 +86,99 @@ def is_dictation_candidate(item: Any) -> bool:
     return False
 
 
-def select_handwriting_items(
+def parse_lesson_number(course_name: str) -> int:
+    """"第N课" → N；解析不了的排到最后。"""
+    match = re.search(r"第\s*(\d+)\s*课", course_name or "")
+    return int(match.group(1)) if match else 999
+
+
+def pick_review_word_tasks(
     rows: list[tuple[Any, float | None, datetime | None]],
     *,
     tested_today_ids: set[UUID],
     limit: int,
 ) -> list[tuple[Any, str]]:
-    """Pick today's handwriting queue: (item, task_type) pairs.
+    """单词复习部分：学过的词（调用方保证 repetition_count > 0）最弱优先。
 
-    rows: (learning_item, memory_strength, last_handwriting_at) triples of
-    studied items (the caller enforces MemoryState.repetition_count > 0).
-
-    Words and sentences are selected from SEPARATE pools (~2:1) — a raw
-    global weakness sort returned 12 sentences in production (sentence
-    strengths are systematically lower), which meant zero dictation words
-    and zero translation tasks. Within each pool: weakest first, and
-    never-handwritten before practiced ones. Words with a Chinese gloss
-    alternate dictation/translation so both directions get trained;
-    sentences are dictation-only (writing a full Chinese sentence
-    translation is a 语文 exercise, not ours).
+    今日已测的排除；有中文释义的词交替 听写/翻译（两个方向都练），
+    无释义只听写。
     """
-    word_pool: list[tuple[Any, float, datetime | None]] = []
-    sentence_pool: list[tuple[Any, float, datetime | None]] = []
+    pool: list[tuple[Any, float, datetime | None]] = []
     for item, strength, last_tested_at in rows:
         if getattr(item, "id", None) in tested_today_ids:
             continue
+        if getattr(item, "item_type", None) != "word":
+            continue
         if not is_dictation_candidate(item):
             continue
-        entry = (item, strength if strength is not None else -1.0, last_tested_at)
-        if item.item_type == "word":
-            word_pool.append(entry)
-        else:
-            sentence_pool.append(entry)
-    sort_key = lambda row: (  # noqa: E731
+        pool.append((item, strength if strength is not None else -1.0, last_tested_at))
+    pool.sort(key=lambda row: (
         row[1],  # weakest first
         row[2] is not None,  # never-handwritten before practiced
         (row[2] or _EPOCH).replace(tzinfo=None),  # then oldest-practiced
-    )
-    word_pool.sort(key=sort_key)
-    sentence_pool.sort(key=sort_key)
+    ))
 
-    word_quota = max(1, limit - limit // 3)
-    sentence_quota = limit - word_quota
-    picked_words = word_pool[:word_quota]
-    picked_sentences = sentence_pool[:sentence_quota]
-    # A pool may run dry — top up from the other so the queue stays full.
-    if len(picked_words) < word_quota:
-        topup = [e for e in sentence_pool if e not in picked_sentences]
-        picked_words += topup[: word_quota - len(picked_words)]
-    if len(picked_sentences) < sentence_quota:
-        topup = [e for e in word_pool if e not in picked_words]
-        picked_sentences += topup[: sentence_quota - len(picked_sentences)]
-
-    selected: list[tuple[Any, str]] = []
+    tasks: list[tuple[Any, str]] = []
     word_toggle = False
-    word_tasks: list[tuple[Any, str]] = []
-    for item, _strength, _tested in picked_words:
-        if item.item_type == "word" and (item.chinese_text or "").strip():
+    for item, _strength, _tested in pool[:limit]:
+        if (item.chinese_text or "").strip():
             task_type = HANDWRITING_TRANSLATION_TASK_TYPE if word_toggle else HANDWRITING_DICTATION_TASK_TYPE
             word_toggle = not word_toggle
         else:
             task_type = HANDWRITING_DICTATION_TASK_TYPE
-        word_tasks.append((item, task_type))
-    sentence_tasks = [(item, HANDWRITING_DICTATION_TASK_TYPE) for item, _s, _t in picked_sentences]
-    # Interleave sentences between words (words first) so the child isn't
-    # hit with a wall of slow sentence dictations.
-    for index, task in enumerate(word_tasks):
-        selected.append(task)
-        if index < len(sentence_tasks):
-            selected.append(sentence_tasks[index])
-    selected.extend(sentence_tasks[len(word_tasks):])
-    return selected[:limit]
+        tasks.append((item, task_type))
+    return tasks
+
+
+def pick_course_dictation_tasks(
+    rows: list[Any],
+    *,
+    tested_today_ids: set[UUID],
+    limit: int,
+) -> list[tuple[Any, str]]:
+    """课程句子部分（中考英语 第1课→第10课）：全部听写。
+
+    rows 由调用方按 (课次, sort_order) 排好序传入——这里不重复排序，
+    只过滤 今日已测 / 不适合手写（过长），顺序取前 limit 个。
+    课程句子是"学习内容"，不要求学过（repetition_count 可为 0）。
+    """
+    tasks: list[tuple[Any, str]] = []
+    for item in rows:
+        if len(tasks) >= limit:
+            break
+        if getattr(item, "id", None) in tested_today_ids:
+            continue
+        if not is_dictation_candidate(item):
+            continue
+        tasks.append((item, HANDWRITING_DICTATION_TASK_TYPE))
+    return tasks
+
+
+def compose_daily_handwriting_queue(
+    word_rows: list[tuple[Any, float | None, datetime | None]],
+    course_rows: list[Any],
+    *,
+    tested_today_ids: set[UUID],
+    limit: int,
+) -> list[tuple[Any, str]]:
+    """今日手写队列 = 单词复习在前（约 2/3）+ 中考课程句子按课次在后。
+
+    一侧不足时另一侧补齐，保证队列不空（课程句子写完 10 课后，
+    队列自然回到纯单词复习）。
+    """
+    word_quota = max(1, limit - limit // 3)
+    course_quota = limit - word_quota
+    words = pick_review_word_tasks(word_rows, tested_today_ids=tested_today_ids, limit=word_quota)
+    course = pick_course_dictation_tasks(course_rows, tested_today_ids=tested_today_ids, limit=course_quota)
+    if len(words) < word_quota:
+        # 复习词不足 → 课程句子多补
+        course = pick_course_dictation_tasks(
+            course_rows, tested_today_ids=tested_today_ids, limit=course_quota + (word_quota - len(words)),
+        )
+    if len(course) < course_quota:
+        # 课程句子不足 → 复习词多补（取 limit 个最弱的即可，含前面已选的）
+        words = pick_review_word_tasks(word_rows, tested_today_ids=tested_today_ids, limit=limit - len(course))
+    return (words + course)[:limit]
 
 
 # --------------------------------------------------------------------------

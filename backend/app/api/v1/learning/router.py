@@ -17,6 +17,7 @@ from app.api.deps import get_current_user
 from app.core.config import settings as app_settings
 from app.db.session import get_db
 from app.models.course import Course
+from app.models.course_package import CoursePackage
 from app.models.learning_event import LearningEvent
 from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
@@ -80,14 +81,16 @@ from app.services.pronunciation import recognize_speech_flash, score_pronunciati
 from app.services.secure_model_settings import get_private_model_settings
 from app.services.handwriting import (
     DEFAULT_VISION_MODEL,
+    HANDWRITING_COURSE_PACKAGE_NAMES,
     HANDWRITING_DAILY_CAP,
     HANDWRITING_DICTATION_REVIEW_MODE,
     HANDWRITING_REVIEW_MODES,
     HANDWRITING_TRANSLATION_REVIEW_MODE,
     HANDWRITING_TRANSLATION_TASK_TYPE,
     MAX_IMAGE_DATA_URL_CHARS,
+    compose_daily_handwriting_queue,
     judge_handwriting,
-    select_handwriting_items,
+    parse_lesson_number,
 )
 from app.services.speak_practice import (
     READ_ALOUD_REVIEW_MODE,
@@ -2438,12 +2441,9 @@ def list_handwriting_items(
 ) -> list[LearningItemRead]:
     """Today's handwriting-dictation queue (手写听写 mode).
 
-    Studied content only (MemoryState.repetition_count > 0) — same rule as
-    speak mode: practice rehearses known material, never ambushes the child.
-    Weakest items first (memory strength ascending), each item at most once
-    per day, small daily cap. Words with a Chinese gloss alternate between
-    dictation (write the English) and translation (write the Chinese
-    meaning); sentences are dictation-only.
+    家长指定的取材顺序：先是单词复习内容（学过的词最弱优先，听写/翻译
+    交替），再按课次出中考英语 第1课→第10课 的句子（学习内容，不要求
+    学过，全部听写）。每个条目每天最多一次，日上限小批量。
     """
     capped_limit = max(1, min(limit, 30))
     now = datetime.now(UTC)
@@ -2479,19 +2479,53 @@ def list_handwriting_items(
         .group_by(LearningEvent.learning_item_id)
         .subquery()
     )
-    statement = (
+    # 第一部分：单词复习（学过的词，最弱优先）
+    word_statement = (
         select(LearningItem, MemoryState.memory_strength, last_tested.c.last_tested_at)
         .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
         .outerjoin(last_tested, last_tested.c.item_id == LearningItem.id)
         .where(
             LearningItem.user_id == current_user.id,
-            LearningItem.item_type.in_(["word", "sentence", "phrase"]),
+            LearningItem.item_type == "word",
             MemoryState.repetition_count > 0,
         )
     )
-    rows = [(item, strength, tested_at) for item, strength, tested_at in db.execute(statement).all()]
-    selected = select_handwriting_items(
-        rows,
+    word_rows = [(item, strength, tested_at) for item, strength, tested_at in db.execute(word_statement).all()]
+
+    # 第二部分：中考英语 第1课→第10课 的句子（学习内容，不要求学过）。
+    # 按 (课次数字, sort_order) 排序后交给 compose 顺序挑选。
+    course_items: list[LearningItem] = []
+    package_id = db.scalar(
+        select(CoursePackage.id).where(
+            CoursePackage.user_id == current_user.id,
+            CoursePackage.name.in_(HANDWRITING_COURSE_PACKAGE_NAMES),
+        )
+    )
+    if package_id is not None:
+        course_rows = db.execute(
+            select(LearningItem, Course.name)
+            .join(Course, Course.id == LearningItem.course_id)
+            .where(
+                LearningItem.user_id == current_user.id,
+                Course.package_id == package_id,
+                LearningItem.item_type.in_(["sentence", "phrase"]),
+            )
+        ).all()
+        course_items = [
+            item
+            for item, _course_name in sorted(
+                course_rows,
+                key=lambda row: (
+                    parse_lesson_number(row[1]),
+                    row[0].sort_order,
+                    str(row[0].id),
+                ),
+            )
+        ]
+
+    selected = compose_daily_handwriting_queue(
+        word_rows,
+        course_items,
         tested_today_ids=tested_today_ids,
         limit=min(capped_limit, daily_remaining),
     )
