@@ -489,8 +489,15 @@ function StudyContent() {
   const [echoPrompt, setEchoPrompt] = useState<{ text: string; translation: string } | null>(null);
   const [echoStatus, setEchoStatus] = useState<"idle" | "listening" | "checking" | "success" | "retry" | "giveup">("idle");
   // Degraded mode: mic denied / ASR repeatedly failing / too much silence —
-  // fall back to the pre-ASR behavior (manual 我读完了 button, no gate).
+  // fall back to loudness detection + the manual 我读完了 button (no ASR
+  // correctness check, but still gated — see echoManualReady below).
   const [echoManualMode, setEchoManualMode] = useState(false);
+  // Anti-skip gate for the manual button: it stays DISABLED until the card
+  // has played the model TTS AND one loudness listen window has completed
+  // undetected — so clicking through without ever making a sound costs more
+  // time than just reading aloud. (When manual mode is entered mid-prompt
+  // after full attempt cycles, the button is enabled immediately instead.)
+  const [echoManualReady, setEchoManualReady] = useState(false);
   const [echoVolume, setEchoVolume] = useState(0);
   const [echoCountToday, setEchoCountToday] = useState(0);
   // 手写听写 (handwrite mode): handwriting_* items run ENTIRELY on their own
@@ -3065,6 +3072,10 @@ function StudyContent() {
     }
     echoManualModeRef.current = true;
     setEchoManualMode(true);
+    // Degrading mid-prompt means the child already sat through the model TTS
+    // plus full record/silence cycles — the mic had its chance, so the manual
+    // button must be usable immediately (otherwise the card becomes a trap).
+    setEchoManualReady(true);
     if (hint) {
       setFeedback(hint);
     }
@@ -3110,36 +3121,43 @@ function StudyContent() {
     if (!echo || echoStatus === "success") {
       return;
     }
+    // A manual 我读完了 click is the broken-mic escape hatch, NOT a verified
+    // read-aloud: no points, no 开口 count, and the timeline records it as
+    // not-passed (same honesty as the 5-attempt giveup) so the parent's
+    // dashboard shows the skip. Only voice-detected passes earn rewards.
+    const isManualSkip = source === "manual";
     echoListenGenerationRef.current += 1; // cancel any listen window
     cancelActiveRecording();
     setEchoStatus("success");
     setEchoVolume(0);
-    logReadAloudCompletion(true);
+    logReadAloudCompletion(!isManualSkip);
     // Voice practice task: submit a real review_log so FSRS learns from
     // the read-aloud outcome. Pass score=4 (production, no hint).
     if (source === "voice" && currentItemRef.current?.review_task_type === "voice_practice") {
       recordVoicePracticeReview(true);
     }
-    const nextCount = incrementEchoCountToday();
-    setEchoCountToday(nextCount);
-    const earnsPoints = (nextCount - 1) * ECHO_POINTS_PER_READ < ECHO_DAILY_POINTS_CAP;
-    if (earnsPoints) {
-      const token = getAccessToken();
-      if (token) {
-        void awardPoints(token, ECHO_POINTS_PER_READ, "read-aloud", echo.text.slice(0, 80)).catch(() => undefined);
+    if (!isManualSkip) {
+      const nextCount = incrementEchoCountToday();
+      setEchoCountToday(nextCount);
+      const earnsPoints = (nextCount - 1) * ECHO_POINTS_PER_READ < ECHO_DAILY_POINTS_CAP;
+      if (earnsPoints) {
+        const token = getAccessToken();
+        if (token) {
+          void awardPoints(token, ECHO_POINTS_PER_READ, "read-aloud", echo.text.slice(0, 80)).catch(() => undefined);
+        }
       }
-    }
-    if (nextCount > 0 && nextCount % 10 === 0) {
-      playLevelUpSound();
+      if (nextCount > 0 && nextCount % 10 === 0) {
+        playLevelUpSound();
+      } else {
+        playCorrectDing();
+      }
+      setFeedback(
+        `听到了！声音真响亮！🌟 开口跟读 ${earnsPoints ? "+2 分" : "完成"}（今天第 ${nextCount} 次）`,
+        "success",
+      );
     } else {
-      playCorrectDing();
+      setFeedback("没听到声音，这次不计分哦 — 下次大声读出来！🎤");
     }
-    setFeedback(
-      source === "voice"
-        ? `听到了！声音真响亮！🌟 开口跟读 ${earnsPoints ? "+2 分" : "完成"}（今天第 ${nextCount} 次）`
-        : `跟读完成，真棒！${earnsPoints ? "+2 分 " : ""}（今天第 ${nextCount} 次）`,
-      "success",
-    );
     // Reading aloud IS the confirmation — advance automatically in both ASR
     // and manual (degraded) mode. The gate is always on, so dismissing the
     // prompt without advancing would just force a second click.
@@ -3190,16 +3208,28 @@ function StudyContent() {
     const isManual = echoManualModeRef.current || !isPronunciationCheckSupported();
     if (isManual) {
       // Degraded path: pre-ASR behavior — loudness detection auto-completes,
-      // manual button stays available.
+      // manual button stays available. The button starts DISABLED: it only
+      // unlocks after the model TTS has played AND one listen window finished
+      // without detecting a voice, so a silent one-click skip takes longer
+      // than just reading the text aloud.
+      setEchoManualReady(false);
       void (async () => {
         await speakClearEnglish(sequenceId, echoPrompt.text, settings, true);
         if (!isCurrent()) return;
         stopAudioPlayback();
         await wait(300);
         if (!isCurrent()) return;
-        if (!isVoiceEchoSupported()) return;
+        if (!isVoiceEchoSupported()) {
+          // No mic at all — the listen window can never complete, so unlock
+          // the button now (the TTS delay already forced the child to wait).
+          setEchoManualReady(true);
+          return;
+        }
         const micReady = await initVoiceEcho();
           if (!micReady || !isCurrent()) {
+            if (!micReady && isCurrent()) {
+              setEchoManualReady(true);
+            }
             return;
           }
           setEchoStatus("listening");
@@ -3216,6 +3246,8 @@ function StudyContent() {
           } else {
             setEchoStatus("idle");
             setEchoVolume(0);
+            // Mic had its chance and heard nothing — unlock 我读完了.
+            setEchoManualReady(true);
           }
         })();
       return () => {
@@ -4892,10 +4924,10 @@ function StudyContent() {
                         type="button"
                         className={actionButtonClass}
                         onMouseDown={keepStudyInputFocus}
-                        disabled={echoStatus === "success"}
+                        disabled={echoStatus === "success" || !echoManualReady}
                         onClick={() => completeEcho("manual")}
                       >
-                        {echoStatus === "success" ? "🌟 真棒！" : echoStatus === "listening" ? "🎧 正在听…读出来！" : "🎤 我读完了！"}
+                        {echoStatus === "success" ? "🌟 真棒！" : echoStatus === "listening" ? "🎧 正在听…读出来！" : echoManualReady ? "🎤 我读完了！" : "🎧 先仔细听示范…"}
                       </Button>
                     ) : (
                       <div className="rounded-full bg-white/80 px-4 py-2 text-sm font-bold text-emerald-700">
