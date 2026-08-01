@@ -50,7 +50,8 @@ HANDWRITING_DICTATION_REVIEW_MODE = "handwriting-dictation"
 HANDWRITING_TRANSLATION_REVIEW_MODE = "handwriting-translation"
 HANDWRITING_REVIEW_MODES = (HANDWRITING_DICTATION_REVIEW_MODE, HANDWRITING_TRANSLATION_REVIEW_MODE)
 
-HANDWRITING_DAILY_CAP = 12
+HANDWRITING_DAILY_CAP = 16  # 12 个复习词 + 4 句课程 = 一天一次完整手写练习
+HANDWRITING_WORD_DAILY_QUOTA = 12  # 与"单词复习"模式一次会话的题量一致
 MAX_SENTENCE_WORDS = 8  # handwriting a long sentence is slow — keep it short
 MAX_SENTENCE_CHARS = 120
 MAX_IMAGE_DATA_URL_CHARS = 9 * 1024 * 1024  # same bound as tingxie
@@ -93,26 +94,29 @@ def parse_lesson_number(course_name: str) -> int:
 
 
 def pick_review_word_tasks(
-    rows: list[tuple[Any, float | None, datetime | None]],
+    rows: list[tuple[Any, float | None, datetime | None, bool]],
     *,
     tested_today_ids: set[UUID],
     limit: int,
 ) -> list[tuple[Any, str]]:
-    """单词复习部分：学过的词（调用方保证 repetition_count > 0）最弱优先。
+    """单词复习部分：到期复习词优先（与"单词复习"模式同源的 next_review_at
+    到期口径，由调用方以 is_due 标记传入），不足时学过的最弱词补齐——补的
+    也仍是复习内容，只是暂未到期。
 
     今日已测的排除；有中文释义的词交替 听写/翻译（两个方向都练），
-    无释义只听写。
+    无释义只听写。到期词内部按最弱优先排序（手写专攻打不牢的词）。
     """
-    pool: list[tuple[Any, float, datetime | None]] = []
-    for item, strength, last_tested_at in rows:
+    pool: list[tuple[Any, float, datetime | None, bool]] = []
+    for item, strength, last_tested_at, is_due in rows:
         if getattr(item, "id", None) in tested_today_ids:
             continue
         if getattr(item, "item_type", None) != "word":
             continue
         if not is_dictation_candidate(item):
             continue
-        pool.append((item, strength if strength is not None else -1.0, last_tested_at))
+        pool.append((item, strength if strength is not None else -1.0, last_tested_at, is_due))
     pool.sort(key=lambda row: (
+        not row[3],  # 到期复习词排在前面
         row[1],  # weakest first
         row[2] is not None,  # never-handwritten before practiced
         (row[2] or _EPOCH).replace(tzinfo=None),  # then oldest-practiced
@@ -120,7 +124,7 @@ def pick_review_word_tasks(
 
     tasks: list[tuple[Any, str]] = []
     word_toggle = False
-    for item, _strength, _tested in pool[:limit]:
+    for item, _strength, _tested, _due in pool[:limit]:
         if (item.chinese_text or "").strip():
             task_type = HANDWRITING_TRANSLATION_TASK_TYPE if word_toggle else HANDWRITING_DICTATION_TASK_TYPE
             word_toggle = not word_toggle
@@ -155,28 +159,24 @@ def pick_course_dictation_tasks(
 
 
 def compose_daily_handwriting_queue(
-    word_rows: list[tuple[Any, float | None, datetime | None]],
+    word_rows: list[tuple[Any, float | None, datetime | None, bool]],
     course_rows: list[Any],
     *,
     tested_today_ids: set[UUID],
     limit: int,
+    word_quota: int = HANDWRITING_WORD_DAILY_QUOTA,
 ) -> list[tuple[Any, str]]:
-    """今日手写队列 = 单词复习在前（约 2/3）+ 中考课程句子按课次在后。
+    """今日手写队列 = 单词复习在前（固定 12 个，与单词复习模式一次会话等量）
+    + 中考课程句子按课次在后（填满剩余名额，通常 4 句）。
 
     一侧不足时另一侧补齐，保证队列不空（课程句子写完 10 课后，
-    队列自然回到纯单词复习）。
+    队列自然回到纯单词复习；到期词不足时最弱学过词补齐）。
     """
-    word_quota = max(1, limit - limit // 3)
-    course_quota = limit - word_quota
+    word_quota = max(0, min(word_quota, limit))
     words = pick_review_word_tasks(word_rows, tested_today_ids=tested_today_ids, limit=word_quota)
-    course = pick_course_dictation_tasks(course_rows, tested_today_ids=tested_today_ids, limit=course_quota)
-    if len(words) < word_quota:
-        # 复习词不足 → 课程句子多补
-        course = pick_course_dictation_tasks(
-            course_rows, tested_today_ids=tested_today_ids, limit=course_quota + (word_quota - len(words)),
-        )
-    if len(course) < course_quota:
-        # 课程句子不足 → 复习词多补（取 limit 个最弱的即可，含前面已选的）
+    course = pick_course_dictation_tasks(course_rows, tested_today_ids=tested_today_ids, limit=limit - len(words))
+    if len(course) < limit - len(words):
+        # 课程句子不足 → 复习词多补（含前面已选的，顺序保持一致）
         words = pick_review_word_tasks(word_rows, tested_today_ids=tested_today_ids, limit=limit - len(course))
     return (words + course)[:limit]
 

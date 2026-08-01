@@ -2437,13 +2437,15 @@ def create_read_aloud_event(
 def list_handwriting_items(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
-    limit: int = 12,
+    limit: int = 16,
 ) -> list[LearningItemRead]:
     """Today's handwriting-dictation queue (手写听写 mode).
 
-    家长指定的取材顺序：先是单词复习内容（学过的词最弱优先，听写/翻译
-    交替），再按课次出中考英语 第1课→第10课 的句子（学习内容，不要求
-    学过，全部听写）。每个条目每天最多一次，日上限小批量。
+    家长指定的取材顺序：先是单词复习内容——与"单词复习"模式同源的到期
+    复习词（next_review_at 到期，最弱优先，听写/翻译交替），不足 12 个
+    时用学过的最弱词补齐；再按课次出中考英语 第1课→第10课 的句子
+    （学习内容，不要求学过，全部听写）。每个条目每天最多一次，
+    日上限 = 12 词 + 4 句。
     """
     capped_limit = max(1, min(limit, 30))
     now = datetime.now(UTC)
@@ -2479,9 +2481,9 @@ def list_handwriting_items(
         .group_by(LearningEvent.learning_item_id)
         .subquery()
     )
-    # 第一部分：单词复习（学过的词，最弱优先）
+    # 第一部分：单词复习（到期复习词优先 + 学过的最弱词补齐）
     word_statement = (
-        select(LearningItem, MemoryState.memory_strength, last_tested.c.last_tested_at)
+        select(LearningItem, MemoryState.memory_strength, last_tested.c.last_tested_at, MemoryState.next_review_at)
         .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
         .outerjoin(last_tested, last_tested.c.item_id == LearningItem.id)
         .where(
@@ -2490,7 +2492,10 @@ def list_handwriting_items(
             MemoryState.repetition_count > 0,
         )
     )
-    word_rows = [(item, strength, tested_at) for item, strength, tested_at in db.execute(word_statement).all()]
+    word_rows = [
+        (item, strength, tested_at, next_review_at is not None and next_review_at <= now)
+        for item, strength, tested_at, next_review_at in db.execute(word_statement).all()
+    ]
 
     # 第二部分：中考英语 第1课→第10课 的句子（学习内容，不要求学过）。
     # 按 (课次数字, sort_order) 排序后交给 compose 顺序挑选。

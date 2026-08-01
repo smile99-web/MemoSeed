@@ -59,23 +59,37 @@ class TestPickReviewWordTasks:
         strong = _item(english="strong")
         never = _item(english="never")
         rows = [
-            (strong, 0.9, None),
-            (weak, 0.2, datetime(2026, 7, 1)),
-            (never, 0.5, None),
+            (strong, 0.9, None, False),
+            (weak, 0.2, datetime(2026, 7, 1), False),
+            (never, 0.5, None, False),
         ]
         selected = pick_review_word_tasks(rows, tested_today_ids=set(), limit=10)
         assert [item.english_text for item, _ in selected] == ["weak", "never", "strong"]
 
+    def test_due_words_come_before_not_yet_due(self):
+        """到期复习词（is_due=True）永远排在未到期词前面，即使未到期词更弱——
+        手写队列的词部分要与"单词复习"模式当天服务的内容一致。"""
+        due_strong = _item(english="due_strong")
+        due_weak = _item(english="due_weak")
+        not_due_weakest = _item(english="not_due_weakest")
+        rows = [
+            (not_due_weakest, 0.1, None, False),
+            (due_strong, 0.9, datetime(2026, 7, 1), True),
+            (due_weak, 0.3, None, True),
+        ]
+        selected = pick_review_word_tasks(rows, tested_today_ids=set(), limit=10)
+        assert [item.english_text for item, _ in selected] == ["due_weak", "due_strong", "not_due_weakest"]
+
     def test_today_tested_items_excluded(self):
         done = _item(english="done")
         fresh = _item(english="fresh")
-        rows = [(done, 0.1, None), (fresh, 0.9, None)]
+        rows = [(done, 0.1, None, True), (fresh, 0.9, None, True)]
         selected = pick_review_word_tasks(rows, tested_today_ids={done.id}, limit=10)
         assert [item.english_text for item, _ in selected] == ["fresh"]
 
     def test_word_tasks_alternate_dictation_translation(self):
         words = [_item(english=f"w{i}") for i in range(4)]
-        rows = [(w, 0.5, None) for w in words]
+        rows = [(w, 0.5, None, True) for w in words]
         selected = pick_review_word_tasks(rows, tested_today_ids=set(), limit=10)
         assert [task for _, task in selected] == [
             HANDWRITING_DICTATION_TASK_TYPE,
@@ -86,16 +100,16 @@ class TestPickReviewWordTasks:
 
     def test_word_without_chinese_is_dictation_only(self):
         word = _item(english="mystery", chinese="")
-        selected = pick_review_word_tasks([(word, 0.5, None)], tested_today_ids=set(), limit=10)
+        selected = pick_review_word_tasks([(word, 0.5, None, True)], tested_today_ids=set(), limit=10)
         assert selected == [(word, HANDWRITING_DICTATION_TASK_TYPE)]
 
     def test_non_word_rows_ignored(self):
         sentence = _item("sentence", "I like it.", "我喜欢它。")
-        selected = pick_review_word_tasks([(sentence, 0.5, None)], tested_today_ids=set(), limit=10)
+        selected = pick_review_word_tasks([(sentence, 0.5, None, True)], tested_today_ids=set(), limit=10)
         assert selected == []
 
     def test_limit_respected(self):
-        rows = [(_item(english=f"w{i}"), 0.5, None) for i in range(10)]
+        rows = [(_item(english=f"w{i}"), 0.5, None, True) for i in range(10)]
         assert len(pick_review_word_tasks(rows, tested_today_ids=set(), limit=3)) == 3
 
 
@@ -128,34 +142,38 @@ class TestPickCourseDictationTasks:
 
 class TestComposeDailyHandwritingQueue:
     def test_words_first_then_course_in_order(self):
-        words = [(_item(english=f"w{i}"), 0.5, None) for i in range(12)]
+        """16 题 = 12 个复习词（与单词复习一次会话等量）+ 4 句课程，词全部在前。"""
+        words = [(_item(english=f"w{i}"), 0.5, None, True) for i in range(14)]
         course = [_item("sentence", f"Lesson sentence {i}.", "课文句") for i in range(10)]
-        queue = compose_daily_handwriting_queue(words, course, tested_today_ids=set(), limit=12)
+        queue = compose_daily_handwriting_queue(words, course, tested_today_ids=set(), limit=16)
         types = [item.item_type for item, _ in queue]
-        assert types.count("word") == 8
+        assert types.count("word") == 12
         assert types.count("sentence") == 4
-        assert types[:8] == ["word"] * 8  # 单词复习全部在前
-        assert [item.english_text for item, _ in queue[8:]] == [
+        assert types[:12] == ["word"] * 12  # 单词复习全部在前
+        assert [item.english_text for item, _ in queue[12:]] == [
             f"Lesson sentence {i}." for i in range(4)
         ]
 
     def test_course_tops_up_when_words_dry(self):
-        words = [(_item(english="only"), 0.5, None)]
+        words = [(_item(english="only"), 0.5, None, True)]
         course = [_item("sentence", f"S {i}.", "句") for i in range(20)]
-        queue = compose_daily_handwriting_queue(words, course, tested_today_ids=set(), limit=12)
-        assert len(queue) == 12
+        queue = compose_daily_handwriting_queue(words, course, tested_today_ids=set(), limit=16)
+        assert len(queue) == 16
         assert queue[0][0].english_text == "only"
-        assert sum(1 for item, _ in queue if item.item_type == "sentence") == 11
+        assert sum(1 for item, _ in queue if item.item_type == "sentence") == 15
 
     def test_words_top_up_when_course_dry(self):
-        words = [(_item(english=f"w{i}"), 0.5, None) for i in range(20)]
+        words = [(_item(english=f"w{i}"), 0.5, None, True) for i in range(20)]
         course = [_item("sentence", "Only one.", "唯一")]
-        queue = compose_daily_handwriting_queue(words, course, tested_today_ids=set(), limit=12)
-        assert len(queue) == 12
+        queue = compose_daily_handwriting_queue(words, course, tested_today_ids=set(), limit=16)
+        assert len(queue) == 16
         assert sum(1 for item, _ in queue if item.item_type == "sentence") == 1
+        # 课程只有 1 句 → 复习词补到 15 个，且词仍然全部排在课程句前面
+        types = [item.item_type for item, _ in queue]
+        assert types[:15] == ["word"] * 15
 
     def test_empty_both_pools_gives_empty_queue(self):
-        assert compose_daily_handwriting_queue([], [], tested_today_ids=set(), limit=12) == []
+        assert compose_daily_handwriting_queue([], [], tested_today_ids=set(), limit=16) == []
 
 
 class _FakeHttpResponse(io.BytesIO):
