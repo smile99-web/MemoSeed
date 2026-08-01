@@ -284,7 +284,7 @@ export default function ListeningPage() {
         <div className="flex flex-wrap items-center justify-between gap-3 glass-card px-4 py-3">
           <div>
             <h1 className="text-2xl font-bold tracking-tight ipad:text-3xl">🎧 听力故事</h1>
-            <p className="text-sm text-muted-foreground">用你练过的单词编成的英文小故事，英文读两遍、中文读一遍。</p>
+            <p className="text-sm text-muted-foreground">用你练过的单词编成的英文小故事和日常对话，英文读两遍、中文读一遍。</p>
           </div>
           <Button asChild variant="outline">
             <Link href="/">返回首页</Link>
@@ -316,6 +316,15 @@ export default function ListeningPage() {
             <CardContent className="flex flex-col gap-6">
               {currentSentence ? (
                 <div className="rounded-2xl border border-slate-200 bg-white/70 p-6 text-center">
+                  {currentSentence.speaker ? (
+                    <span
+                      className={`mb-3 inline-flex h-9 w-9 items-center justify-center rounded-full text-base font-black text-white shadow-sm ${
+                        currentSentence.speaker === "A" ? "bg-cyan-500" : "bg-violet-500"
+                      }`}
+                    >
+                      {currentSentence.speaker}
+                    </span>
+                  ) : null}
                   <p
                     className={`text-2xl font-bold leading-relaxed transition-colors ipad:text-3xl ${
                       phase !== "zh" && isPlaying && !isPaused ? "text-cyan-600" : "text-slate-800"
@@ -340,7 +349,11 @@ export default function ListeningPage() {
                   ) : null}
                   {isPlaying && !isPaused ? (
                     <p className="mt-3 text-sm text-muted-foreground">
-                      {phase === "zh" ? "🔊 正在读中文…" : phase === "en1" ? "🔊 正在读英文（第 1 遍）…" : "🔊 正在读英文（第 2 遍）…"}
+                      {phase === "zh"
+                        ? `🔊 ${currentSentence.speaker ? `${currentSentence.speaker} 正在读中文` : "正在读中文"}…`
+                        : phase === "en1"
+                          ? `🔊 ${currentSentence.speaker ? `${currentSentence.speaker} 正在读英文` : "正在读英文"}（第 1 遍）…`
+                          : `🔊 ${currentSentence.speaker ? `${currentSentence.speaker} 正在读英文` : "正在读英文"}（第 2 遍）…`}
                     </p>
                   ) : null}
                 </div>
@@ -423,9 +436,12 @@ export default function ListeningPage() {
                   onClick={() => void startPlayback(story.id)}
                   type="button"
                 >
-                  <p className="font-medium leading-snug">{story.title}</p>
+                  <p className="font-medium leading-snug">
+                    {story.kind === "dialogue" ? "💬 " : "📖 "}
+                    {story.title}
+                  </p>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {story.theme} · {story.sentence_count} 句
+                    {story.theme} · {story.sentence_count} {story.kind === "dialogue" ? "轮" : "句"}
                   </p>
                 </button>
               ))}

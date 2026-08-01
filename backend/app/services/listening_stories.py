@@ -31,6 +31,24 @@ logger = logging.getLogger("listening_stories")
 SENTENCES_PER_STORY_MIN = 16
 SENTENCES_PER_STORY_MAX = 22
 MAX_WORDS_PER_SENTENCE = 12
+# 日常对话：一问一答，A/B 轮流说话（speaker 字段），轮数比故事句数少
+# （每轮播放 英文×2 + 中文×1，与故事一致）。
+DIALOGUE_THEME = "日常对话"
+DIALOGUE_TURNS_MIN = 10
+DIALOGUE_TURNS_MAX = 16
+MAX_WORDS_PER_DIALOGUE_TURN = 10
+# B 角色音色（A 沿用孩子账号配置）。都从设置页音色白名单中选，保证可用。
+DIALOGUE_B_ENGLISH_VOICE = "en_male_tim_uranus_bigtts"
+DIALOGUE_B_CHINESE_VOICE = "zh_female_xiaohe_uranus_bigtts"
+# A 音色恰好等于 B 默认值时的备用（避免两人同声）。
+DIALOGUE_B_ENGLISH_FALLBACKS = [
+    "en_female_dacey_uranus_bigtts",
+    "en_female_stokie_uranus_bigtts",
+]
+DIALOGUE_B_CHINESE_FALLBACKS = [
+    "zh_female_vv_uranus_bigtts",
+    "zh_male_liufei_uranus_bigtts",
+]
 STORY_THEMES = [
     "在学校的一天",
     "我的家庭",
@@ -145,6 +163,62 @@ def validate_story(data: dict) -> dict | None:
     return {"title": title[:200], "sentences": sentences}
 
 
+def is_dialogue_sentences(sentences: list[dict]) -> bool:
+    """带 speaker 字段的条目 = 对话（A/B 一问一答），否则是普通故事。"""
+    return any(isinstance(s, dict) and s.get("speaker") in ("A", "B") for s in sentences)
+
+
+def validate_dialogue(data: dict) -> dict | None:
+    """校验并归一化日常对话；不合格返回 None（整篇丢弃）。
+
+    与故事的差异：每轮带 speaker（"A"/"B"），A 先开口、严格轮流；
+    单轮可以更短（1-10 词，对话短句如 "Sure!" 合法）；轮数 10-16。
+    """
+    if not isinstance(data, dict):
+        return None
+    title_en = str(data.get("title_en") or "").strip()
+    title_zh = str(data.get("title_zh") or "").strip()
+    raw_sentences = data.get("sentences")
+    if not title_en or not isinstance(raw_sentences, list):
+        return None
+
+    sentences: list[dict[str, str]] = []
+    expected_speaker = "A"
+    for item in raw_sentences:
+        if not isinstance(item, dict):
+            return None
+        speaker = str(item.get("speaker") or "").strip().upper()
+        en = re.sub(r"\s+", " ", str(item.get("en") or "").strip())
+        zh = re.sub(r"\s+", " ", str(item.get("zh") or "").strip())
+        if speaker not in ("A", "B") or not en or not zh:
+            return None
+        if speaker != expected_speaker:
+            return None  # 必须 A 先开口且严格轮流
+        if not re.search(r"[A-Za-z]", en) or re.search(r"[一-鿿]", en):
+            return None
+        word_count = len(en.split())
+        if word_count < 1 or word_count > MAX_WORDS_PER_DIALOGUE_TURN:
+            return None
+        sentences.append({"speaker": speaker, "en": en, "zh": zh})
+        expected_speaker = "B" if expected_speaker == "A" else "A"
+
+    if not (DIALOGUE_TURNS_MIN <= len(sentences) <= DIALOGUE_TURNS_MAX):
+        return None
+    title = title_en if not title_zh else f"{title_en} · {title_zh}"
+    return {"title": title[:200], "sentences": sentences}
+
+
+def resolve_dialogue_b_voices(en_voice_a: str, zh_voice_a: str) -> tuple[str, str]:
+    """B 角色音色：固定默认值，与 A 撞音色时按白名单顺延（两人不能同声）。"""
+    en_b = DIALOGUE_B_ENGLISH_VOICE
+    if en_b == en_voice_a:
+        en_b = next((v for v in DIALOGUE_B_ENGLISH_FALLBACKS if v != en_voice_a), en_b)
+    zh_b = DIALOGUE_B_CHINESE_VOICE
+    if zh_b == zh_voice_a:
+        zh_b = next((v for v in DIALOGUE_B_CHINESE_FALLBACKS if v != zh_voice_a), zh_b)
+    return en_b, zh_b
+
+
 def generate_stories(
     db: Session,
     user_id: UUID,
@@ -203,24 +277,43 @@ def story_summary(story: ListeningStory) -> dict:
         "title": story.title,
         "theme": story.theme,
         "sentence_count": len(story.sentences),
+        "kind": "dialogue" if is_dialogue_sentences(story.sentences) else "story",
     }
 
 
-def story_player_payload(story: ListeningStory, en_voice: str, zh_voice: str, speech_rate: int) -> dict:
-    """播放端载荷：每句带上英/中音频 URL（确定性 cache key，预热后 100% 命中）。"""
+def story_player_payload(
+    story: ListeningStory,
+    en_voice: str,
+    zh_voice: str,
+    speech_rate: int,
+    en_voice_b: str | None = None,
+    zh_voice_b: str | None = None,
+) -> dict:
+    """播放端载荷：每句带上英/中音频 URL（确定性 cache key，预热后 100% 命中）。
+
+    对话条目（speaker=="B"）的音频用 B 角色音色——A/B 各一个音色，
+    孩子能听出是两个人在说话。B 音色缺省时退回 A（向后兼容）。
+    """
+    sentences: list[dict] = []
+    for s in story.sentences:
+        is_b = s.get("speaker") == "B"
+        sentence_en_voice = en_voice_b if is_b and en_voice_b else en_voice
+        sentence_zh_voice = zh_voice_b if is_b and zh_voice_b else zh_voice
+        sentences.append(
+            {
+                "en": s["en"],
+                "zh": s["zh"],
+                "speaker": s.get("speaker"),
+                "en_audio_url": get_cache_url(s["en"], sentence_en_voice, speech_rate, suffix=AUDIO_SUFFIX),
+                "zh_audio_url": get_cache_url(s["zh"], sentence_zh_voice, speech_rate, suffix=AUDIO_SUFFIX),
+            }
+        )
     return {
         "id": str(story.id),
         "title": story.title,
         "theme": story.theme,
-        "sentences": [
-            {
-                "en": s["en"],
-                "zh": s["zh"],
-                "en_audio_url": get_cache_url(s["en"], en_voice, speech_rate, suffix=AUDIO_SUFFIX),
-                "zh_audio_url": get_cache_url(s["zh"], zh_voice, speech_rate, suffix=AUDIO_SUFFIX),
-            }
-            for s in story.sentences
-        ],
+        "kind": "dialogue" if is_dialogue_sentences(story.sentences) else "story",
+        "sentences": sentences,
     }
 
 
@@ -230,19 +323,25 @@ def warm_story_audio(
     zh_voice: str,
     speech_rate: int,
     tts_settings_factory,
+    en_voice_b: str | None = None,
+    zh_voice_b: str | None = None,
 ) -> dict[str, int]:
     """为整篇故事预生成 TTS 缓存（英文句 + 中文句）。
 
     tts_settings_factory(voice, language) -> VolcengineTtsSettings，由调用方
     注入（endpoint/api_key 涉及用户私密配置，service 层不直接碰）。
+    对话条目的 B 角色用 B 音色预热（与 story_player_payload 同一套路由）。
     返回 {"cached": n, "generated": n, "failed": n, "total": n}。
     """
     stats = {"cached": 0, "generated": 0, "failed": 0, "total": 0}
 
     jobs: list[tuple[str, str, str]] = []  # (text, voice, language)
     for s in story.sentences:
-        jobs.append((s["en"], en_voice, "en-US"))
-        jobs.append((s["zh"], zh_voice, "zh-CN"))
+        is_b = s.get("speaker") == "B"
+        sentence_en_voice = en_voice_b if is_b and en_voice_b else en_voice
+        sentence_zh_voice = zh_voice_b if is_b and zh_voice_b else zh_voice
+        jobs.append((s["en"], sentence_en_voice, "en-US"))
+        jobs.append((s["zh"], sentence_zh_voice, "zh-CN"))
 
     for text, voice, language in jobs:
         stats["total"] += 1

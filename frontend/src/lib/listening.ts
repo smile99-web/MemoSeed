@@ -14,11 +14,13 @@ export interface ListeningStorySummary {
   title: string;
   theme: string;
   sentence_count: number;
+  kind: "story" | "dialogue";
 }
 
 export interface ListeningStorySentence {
   en: string;
   zh: string;
+  speaker?: "A" | "B" | null;
   en_audio_url: string;
   zh_audio_url: string;
 }
@@ -27,6 +29,7 @@ export interface ListeningStoryPayload {
   id: string;
   title: string;
   theme: string;
+  kind: "story" | "dialogue";
   sentences: ListeningStorySentence[];
 }
 

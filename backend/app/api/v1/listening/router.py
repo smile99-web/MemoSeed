@@ -12,6 +12,7 @@ from app.db.session import get_db
 from app.models.listening_story import ListeningStory
 from app.models.user import User
 from app.services.listening_stories import (
+    resolve_dialogue_b_voices,
     story_player_payload,
     story_summary,
     warm_story_audio,
@@ -104,7 +105,8 @@ def get_story(
     if story is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="故事不存在")
     en_voice, zh_voice, speech_rate = _resolve_story_voices(db, current_user.id)
-    return story_player_payload(story, en_voice, zh_voice, speech_rate)
+    en_voice_b, zh_voice_b = resolve_dialogue_b_voices(en_voice, zh_voice)
+    return story_player_payload(story, en_voice, zh_voice, speech_rate, en_voice_b, zh_voice_b)
 
 
 @router.post("/stories/{story_id}/warm")
@@ -123,11 +125,14 @@ def warm_story(
     if story is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="故事不存在")
     en_voice, zh_voice, speech_rate = _resolve_story_voices(db, current_user.id)
+    en_voice_b, zh_voice_b = resolve_dialogue_b_voices(en_voice, zh_voice)
     stats = warm_story_audio(
         story,
         en_voice,
         zh_voice,
         speech_rate,
         _tts_settings_factory(db, current_user.id, speech_rate),
+        en_voice_b,
+        zh_voice_b,
     )
     return stats
