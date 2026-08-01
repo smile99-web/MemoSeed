@@ -291,7 +291,7 @@ export default function ListeningPage() {
           </Button>
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
+        <div className="flex flex-col gap-6">
           {/* 播放器主区 */}
           <Card className="min-h-[420px]">
             <CardHeader>
@@ -418,38 +418,55 @@ export default function ListeningPage() {
             </CardContent>
           </Card>
 
-          {/* 故事列表 */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">故事目录</CardTitle>
-              <CardDescription>点一篇直接播放</CardDescription>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-2">
-              {stories.map((story) => (
-                <button
-                  className={`rounded-xl border px-4 py-3 text-left transition-colors ${
-                    currentStory?.id === story.id
-                      ? "border-cyan-400 bg-cyan-50"
-                      : "border-slate-200 bg-white/60 hover:border-cyan-200 hover:bg-cyan-50/50"
-                  }`}
-                  key={story.id}
-                  onClick={() => void startPlayback(story.id)}
-                  type="button"
-                >
-                  <p className="font-medium leading-snug">
-                    {story.kind === "dialogue" ? "💬 " : "📖 "}
-                    {story.title}
-                  </p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {story.theme} · {story.sentence_count} {story.kind === "dialogue" ? "轮" : "句"}
-                  </p>
-                </button>
-              ))}
-              {stories.length === 0 && !listError ? (
-                <p className="text-sm text-muted-foreground">加载中…</p>
-              ) : null}
-            </CardContent>
-          </Card>
+          {/* 目录：对话与故事分成两个框，显示在播放器正下方 */}
+          <div className="grid gap-6 lg:grid-cols-2">
+            {[
+              {
+                key: "dialogue",
+                title: "💬 对话目录",
+                description: "A/B 一问一答，两个人两种音色",
+                items: stories.filter((s) => s.kind === "dialogue"),
+              },
+              {
+                key: "story",
+                title: "📖 故事目录",
+                description: "用练过的单词编成的双语小故事",
+                items: stories.filter((s) => s.kind !== "dialogue"),
+              },
+            ].map((group) => (
+              <Card key={group.key}>
+                <CardHeader>
+                  <CardTitle className="text-lg">{group.title}</CardTitle>
+                  <CardDescription>{group.description} · 点一篇直接播放</CardDescription>
+                </CardHeader>
+                <CardContent className="flex flex-col gap-2">
+                  {group.items.map((story) => (
+                    <button
+                      className={`rounded-xl border px-4 py-3 text-left transition-colors ${
+                        currentStory?.id === story.id
+                          ? "border-cyan-400 bg-cyan-50"
+                          : "border-slate-200 bg-white/60 hover:border-cyan-200 hover:bg-cyan-50/50"
+                      }`}
+                      key={story.id}
+                      onClick={() => void startPlayback(story.id)}
+                      type="button"
+                    >
+                      <p className="font-medium leading-snug">
+                        {story.kind === "dialogue" ? "💬 " : "📖 "}
+                        {story.title}
+                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {story.theme} · {story.sentence_count} {story.kind === "dialogue" ? "轮" : "句"}
+                      </p>
+                    </button>
+                  ))}
+                  {group.items.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">{stories.length === 0 && !listError ? "加载中…" : "暂无内容"}</p>
+                  ) : null}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
         </div>
       </div>
     </main>
