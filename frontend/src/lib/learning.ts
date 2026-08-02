@@ -667,6 +667,9 @@ export interface HandwritingCheckPayload {
   image: string;
   task_type: HandwritingTaskType;
   learning_item_id?: string;
+  // 复习队列微任务 id：键盘拼写微任务以手写形式出队（2026-08-02 手写化），
+  // 提交时带回此 id，后端据此结算 WordReviewTask。
+  review_task_id?: string;
   expected_english: string;
   expected_chinese?: string;
   duration_seconds: number;

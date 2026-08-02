@@ -125,8 +125,15 @@ async function completeFirstChoiceItem(page: Page, items: ReviewItem[]) {
         await clickCorrectChoice(page, matched.review_answer || matched.chinese_text);
         return matched;
       }
-      // Fallback pool: brute-force the options until one is correct.
+      // Fallback pool: brute-force the options until one is correct. A wrong
+      // click now locks the card behind "再来一次" (mistake recovery) — click
+      // it to re-arm the options before trying the next one.
       for (let i = 0; i < displayed.length; i += 1) {
+        const retryButton = page.getByRole("button", { name: "再来一次", exact: true });
+        if (await retryButton.isVisible().catch(() => false)) {
+          await retryButton.click();
+          await page.waitForTimeout(800);
+        }
         await optionButtons.nth(i).click();
         const correct = await page.getByText("选择正确").first().isVisible().catch(() => false);
         if (correct) {

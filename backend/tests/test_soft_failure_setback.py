@@ -29,6 +29,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from app.services.memory_scheduler import (
+    DAILY_REVIEW_ITEM_BUDGET,
     MIN_FAILURE_RETRY_MINUTES,
     schedule_memory_review,
     smooth_overdue_backlog,
@@ -304,14 +305,15 @@ class TestSmoothOverdueBacklog:
 
     def test_overflow_is_pushed_to_future(self):
         now = datetime.now(UTC)
-        states = self._overdue_states(95, now)  # budget 90 -> overflow 5
+        budget = DAILY_REVIEW_ITEM_BUDGET
+        states = self._overdue_states(budget + 5, now)  # overflow = 5
         db = _ScalarsAllMockDB(states)
 
         pushed = smooth_overdue_backlog(db, uuid4(), now)
 
         assert pushed == 5
-        untouched = states[:90]
-        overflow = states[90:]
+        untouched = states[:budget]
+        overflow = states[budget:]
         assert all(s.next_review_at < now for s in untouched), (
             "Highest-priority (oldest-due) items must keep their slot"
         )

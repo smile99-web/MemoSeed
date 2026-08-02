@@ -235,6 +235,9 @@ class HandwritingCheckRequest(BaseModel):
     image: str
     task_type: Literal["handwriting_dictation", "handwriting_translation"]
     learning_item_id: UUID | None = None
+    # 复习队列微任务 id（手写化后键盘拼写微任务以手写形式出队，提交时
+    # 带回此 id 才能结算 WordReviewTask）。
+    review_task_id: UUID | None = None
     expected_english: str = Field(default="", max_length=200)
     expected_chinese: str = Field(default="", max_length=200)
     duration_seconds: int = Field(default=0, ge=0, le=600)

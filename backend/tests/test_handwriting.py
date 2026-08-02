@@ -20,13 +20,35 @@ from app.services import handwriting
 from app.services.handwriting import (
     HANDWRITING_DICTATION_TASK_TYPE,
     HANDWRITING_TRANSLATION_TASK_TYPE,
+    KEYBOARD_SPELLING_TASK_TYPES,
     compose_daily_handwriting_queue,
+    handwriting_task_for,
     is_dictation_candidate,
     judge_handwriting,
     parse_lesson_number,
     pick_course_dictation_tasks,
     pick_review_word_tasks,
 )
+
+
+class TestHandwritingTaskFor:
+    """手写化（2026-08-02）：键盘拼写任务类型出队时统一改写为手写听写。"""
+
+    def test_all_keyboard_spelling_types_map_to_dictation(self):
+        for task_type in ("listen_spell", "chinese_to_english", "missing_letter", "hidden_recall"):
+            assert task_type in KEYBOARD_SPELLING_TASK_TYPES
+            assert handwriting_task_for(task_type) == HANDWRITING_DICTATION_TASK_TYPE
+
+    def test_recognition_types_pass_through(self):
+        for task_type in ("listen_choose_chinese", "english_to_chinese", "match_translation", "voice_practice"):
+            assert handwriting_task_for(task_type) == task_type
+
+    def test_handwriting_types_pass_through(self):
+        assert handwriting_task_for("handwriting_dictation") == "handwriting_dictation"
+        assert handwriting_task_for("handwriting_translation") == "handwriting_translation"
+
+    def test_none_passes_through(self):
+        assert handwriting_task_for(None) is None
 
 
 def _item(item_type="word", english="apple", chinese="苹果", item_id=None):

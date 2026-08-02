@@ -33,19 +33,24 @@ TASK_TYPE_LABELS = {
     "match_translation": "中英文配对",
     "missing_letter": "缺字母填空",
     "hidden_recall": "看 3 秒后隐藏重拼",
+    "handwriting_dictation": "手写听写",
+    "handwriting_translation": "手写翻译",
 }
 
+# 手写化（2026-08-02 家长决定）：产出类任务只有 handwriting_dictation。
+# 键盘拼写（chinese_to_english/listen_spell/missing_letter/hidden_recall）
+# 已全部下线 —— 识别类任务打前阵建立信心，手写听写负责产出检验。
 ERROR_TYPE_TASK_STRATEGIES = {
-    "first-letter": ["listen_choose_chinese", "english_to_chinese", "chinese_to_english", "listen_spell"],
-    "meaning": ["listen_choose_chinese", "english_to_chinese", "chinese_to_english", "match_translation"],
-    "middle": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell"],
-    "sequence": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell"],
-    "ending": ["english_to_chinese", "missing_letter", "hidden_recall", "chinese_to_english"],
-    "missing-letter": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell"],
-    "extra-letter": ["english_to_chinese", "missing_letter", "hidden_recall", "listen_spell"],
-    "unknown": ["english_to_chinese", "hidden_recall", "chinese_to_english", "listen_spell", "missing_letter"],
-    "spelling": ["english_to_chinese", "missing_letter", "listen_spell", "chinese_to_english"],
-    "spelling-spelling": ["english_to_chinese", "missing_letter", "listen_spell", "chinese_to_english"],
+    "first-letter": ["listen_choose_chinese", "english_to_chinese", "handwriting_dictation"],
+    "meaning": ["listen_choose_chinese", "english_to_chinese", "match_translation"],
+    "middle": ["english_to_chinese", "handwriting_dictation"],
+    "sequence": ["english_to_chinese", "handwriting_dictation"],
+    "ending": ["english_to_chinese", "handwriting_dictation"],
+    "missing-letter": ["english_to_chinese", "handwriting_dictation"],
+    "extra-letter": ["english_to_chinese", "handwriting_dictation"],
+    "unknown": ["listen_choose_chinese", "english_to_chinese", "handwriting_dictation"],
+    "spelling": ["english_to_chinese", "handwriting_dictation"],
+    "spelling-spelling": ["english_to_chinese", "handwriting_dictation"],
 }
 
 TEACHING_TIPS = {
@@ -548,15 +553,7 @@ def get_decayed_error_weights(word_state: WordMemoryState, now: datetime) -> dic
 
 def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[str]:
     now_utc = datetime.now(UTC)
-    base_sequence = ERROR_TYPE_TASK_STRATEGIES.get(error_type, ["chinese_to_english", "listen_spell", "missing_letter"])
-    # Check the WHOLE base_sequence for hidden_recall, not just [:2]. The
-    # previous `[:2]` check missed e.g. error_type="unknown" whose strategy
-    # places hidden_recall at index 1, producing
-    # ["hidden_recall", "english_to_chinese", "hidden_recall", ...] — the
-    # later dedup loop strips the duplicate but in doing so shifts the
-    # intended strategy order. Now we simply don't add a duplicate.
-    if word_state.consecutive_error_count >= 3 and "hidden_recall" not in base_sequence:
-        base_sequence = ["hidden_recall", *base_sequence]
+    base_sequence = ERROR_TYPE_TASK_STRATEGIES.get(error_type, ["english_to_chinese", "handwriting_dictation"])
 
     # --- Demote underperforming words to an easier mode ---
     # Two triggers compete, with R2 (first-failure) taking priority:
@@ -584,7 +581,7 @@ def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[s
     local_hour = now_utc.astimezone(LOCAL_TIMEZONE).hour
     low_efficiency = local_hour in (8, 9, 10, 14, 15)
     peak_hour = local_hour in (22, 23)
-    easy_modes = ("listen_choose_chinese", "english_to_chinese", "match_translation", "hidden_recall")
+    easy_modes = ("listen_choose_chinese", "english_to_chinese", "match_translation")
 
     task_counts = {str(key): int(value or 0) for key, value in (word_state.task_type_counts or {}).items()}
     decayed_errors = get_decayed_error_weights(word_state, now_utc)
@@ -593,7 +590,7 @@ def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[s
     for task_type in base_sequence:
         if task_type not in deduped_sequence:
             deduped_sequence.append(task_type)
-    fallback_tasks = ["listen_choose_chinese", "english_to_chinese", "chinese_to_english", "listen_spell", "missing_letter"]
+    fallback_tasks = ["listen_choose_chinese", "english_to_chinese", "match_translation", "handwriting_dictation"]
     for task_type in fallback_tasks:
         if task_type not in deduped_sequence:
             deduped_sequence.append(task_type)
@@ -604,11 +601,11 @@ def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[s
     error_map = {
         "listen_choose_chinese": ["meaning", "first-letter"],
         "english_to_chinese": ["first-letter", "meaning"],
-        "chinese_to_english": ["first-letter", "meaning"],
         "match_translation": ["meaning"],
-        "listen_spell": ["first-letter", "middle", "sequence", "missing-letter", "extra-letter"],
-        "missing_letter": ["middle", "sequence", "missing-letter", "extra-letter", "ending"],
-        "hidden_recall": ["middle", "sequence", "ending", "unknown"],
+        "handwriting_dictation": [
+            "first-letter", "middle", "sequence", "missing-letter",
+            "extra-letter", "ending", "unknown", "spelling",
+        ],
     }
     task_error_weight: dict[str, float] = {}
     for t in deduped_sequence[:4]:
@@ -638,6 +635,10 @@ def choose_task_sequence(word_state: WordMemoryState, error_type: str) -> list[s
 
 
 def build_task_prompt(task_type: str, word: str, fallback_prompt: str) -> str:
+    if task_type == "handwriting_dictation":
+        return "听发音，在画板上手写这个单词"
+    if task_type == "handwriting_translation":
+        return "看英文，在画板上手写中文意思"
     if task_type == "listen_spell":
         return f"听英文发音，拼写这个单词：{word}"
     if task_type == "listen_choose_chinese":

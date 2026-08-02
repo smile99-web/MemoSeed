@@ -84,11 +84,15 @@ from app.services.handwriting import (
     HANDWRITING_COURSE_PACKAGE_NAMES,
     HANDWRITING_DAILY_CAP,
     HANDWRITING_DICTATION_REVIEW_MODE,
+    HANDWRITING_DICTATION_TASK_TYPE,
     HANDWRITING_REVIEW_MODES,
     HANDWRITING_TRANSLATION_REVIEW_MODE,
     HANDWRITING_TRANSLATION_TASK_TYPE,
     MAX_IMAGE_DATA_URL_CHARS,
+    MAX_SENTENCE_WORDS,
+    SENTENCE_HANDWRITING_REVIEW_MODE,
     compose_daily_handwriting_queue,
+    handwriting_task_for,
     judge_handwriting,
     parse_lesson_number,
 )
@@ -102,6 +106,7 @@ from app.services.speak_practice import (
 from app.services.speech_asset_cache import build_learning_speech_targets, ensure_volcengine_speech_asset, precache_learning_speech_assets
 from app.services.tts_cache import build_cache_key, get_cached_audio
 from app.services.word_memory import (
+    TASK_TYPE_LABELS,
     build_task_choices,
     build_task_prompt,
     choose_task_sequence,
@@ -185,8 +190,13 @@ def build_micro_task_learning_item(
     # empty so the LLM call in _enrich_review_choices fills it later.
     cached_translation = (word_translations or {}).get(task.word.strip().lower(), "")
     chinese_text = cached_translation  # may be empty
-    review_prompt = task.prompt_text
-    source = f"微型任务：{task.task_type}：{task.word}"
+    # 手写化（2026-08-02）：键盘拼写微任务统一改写为手写听写（听发音+
+    # 看中文→画板手写）。手写卡片不消费 review_prompt，键盘题遗留的
+    # 提示文案（如"补全缺失字母：a _ p _ e"）对孩子是噪音，置空。
+    served_task_type = handwriting_task_for(task.task_type)
+    is_handwriting_served = served_task_type == HANDWRITING_DICTATION_TASK_TYPE
+    review_prompt = None if is_handwriting_served else task.prompt_text
+    source = f"微型任务：{TASK_TYPE_LABELS.get(served_task_type or '', served_task_type)}：{task.word}"
     item_type = "word"
     raw_choices = [str(choice) for choice in task.choices]
     review_answer = raw_choices[0] if raw_choices else task.expected_answer
@@ -215,7 +225,7 @@ def build_micro_task_learning_item(
         difficulty_level=source_item.difficulty_level if source_item is not None else 3,
         source=source,
         review_task_id=task.id,
-        review_task_type=task.task_type,
+        review_task_type=served_task_type,
         review_prompt=review_prompt,
         review_choices=raw_choices,
         review_answer=review_answer,
@@ -1339,39 +1349,40 @@ def list_due_review_items(
         pool = sentence_review_items[:min(REVIEW_WORD_COUNT * 3, len(sentence_review_items))]
         random.shuffle(pool)
         sentence_review_items = pool + sentence_review_items[len(pool):]
-        # Mixed mode set: 2 recognition tasks first (build confidence),
-        # then 3 spelling tasks (apply what was just reviewed).
+        # Mixed mode set: recognition tasks first (build confidence),
+        # then handwriting dictation (apply what was just reviewed).
         # The old set [chinese_to_english, listen_spell, missing_letter]
         # was 100% spelling — children with many lapsed words would get
         # stuck in an infinite loop of failing at spelling, creating more
         # spelling micro-review tasks, and never seeing a recognition task.
         # english_to_chinese = 57% acc, listen_choose_chinese = 55% acc
         # — these give the child a chance to succeed before attempting
-        # the harder spelling modes.
+        # the harder production mode.
+        # 手写化（2026-08-02）：产出环节统一为手写听写，键盘拼写下线。
         BASE_MODES = [
             "listen_choose_chinese",    # 听音选中文
             "english_to_chinese",       # 看英文选中文
-            "chinese_to_english",       # 看中文拼英文
+            "handwriting_dictation",    # 听发音+看中文 → 手写英文
         ]
-        # N1: the new-word bootstrap chain — recognition first, scaffolded
-        # spelling last. Stage index = number of REAL tests so far.
-        N1_BOOTSTRAP_MODES = ["listen_choose_chinese", "english_to_chinese", "missing_letter"]
+        # N1: the new-word bootstrap chain — recognition first, handwritten
+        # production last. Stage index = number of REAL tests so far.
+        N1_BOOTSTRAP_MODES = ["listen_choose_chinese", "english_to_chinese", "handwriting_dictation"]
 
         # Build per-word intelligence from WordMemoryState to drive
         # dynamic question selection (Phase 1 optimization).
         word_intel: dict[str, dict[str, int]] = {}
 
         def modes_for_word(word: str) -> list[str]:
-            """P3 task ladder: recognition -> production, rung chosen by mastery.
+            """P3 task ladder: recognition -> handwriting, rung chosen by mastery.
 
             Rung map (all are existing, frontend-supported task types):
               T1/T2 recognition : listen_choose_chinese, english_to_chinese
-              T3 scaffolded     : missing_letter, hidden_recall
-              T4/T5 production  : chinese_to_english, listen_spell
+              T3-T5 production  : handwriting_dictation（手写听写，2026-08-02
+                                  起取代全部键盘拼写类型）
             P1: intervention words (chronic failures) get assisted forms ONLY.
-            Re-failing the same spelling test for the 100th time teaches
+            Re-failing the same production test for the 100th time teaches
             nothing — the breakthrough path rebuilds the sound<->letter
-            mapping with recognition and scaffolded spelling first.
+            mapping with recognition and one handwritten attempt.
             """
             intel = word_intel.get(word, {})
             lapse = intel.get("lapse_count", 0)
@@ -1385,7 +1396,7 @@ def list_due_review_items(
                 return ["listen_choose_chinese", "english_to_chinese"]
 
             if intel.get("intervention"):
-                return ["listen_choose_chinese", "missing_letter", "hidden_recall"]
+                return ["listen_choose_chinese", "handwriting_dictation"]
             # N1: new-word bootstrap. Words with < 3 REAL tests get a fixed
             # recognition-first chain — one stage per queue fetch — instead of
             # being thrown straight into spelling production. Data behind
@@ -1396,24 +1407,24 @@ def list_due_review_items(
             if real_tests < len(N1_BOOTSTRAP_MODES):
                 return [N1_BOOTSTRAP_MODES[real_tests]]
 
-            # 改进3+4: 拼写失败率高或 unknown 多 -> 回识别，不出纯拼写。
+            # 改进3+4: 拼写失败率高或 unknown 多 -> 回识别 + 一次手写。
             # 改进3: 真测试正确率 <50%（lapse/real_tests>0.5 且 real_tests>=5）
-            # 说明词没学会，考拼写只是反复失败（真测试整体正确率仅36%）。
+            # 说明词没学会，反复考产出只是反复失败（真测试整体正确率仅36%）。
             # 改进4: unknown_errors>=3 完全不会拼（unknown 错误2062次最多）。
             fail_rate = lapse / max(real_tests, 1)
             if (fail_rate > 0.5 and real_tests >= 5) or unknown_errs >= 3:
-                return ["listen_choose_chinese", "english_to_chinese", "missing_letter"]
+                return ["listen_choose_chinese", "english_to_chinese", "handwriting_dictation"]
 
             status_value = intel.get("status", "")
             strength = intel.get("strength", 0)
             # T4-T5: near/mastery — straight to production, no scaffold.
             if status_value in ("mastered", "near_mastered") or strength >= 0.90:
-                return ["chinese_to_english"]
+                return ["handwriting_dictation"]
             # T3-T4: consolidating — recognition warm-up, then production.
             if status_value == "consolidating" or strength >= 0.6:
-                return ["listen_choose_chinese", "chinese_to_english"]
+                return ["listen_choose_chinese", "handwriting_dictation"]
             # T1-T3: teaching / difficult / unknown — recognition first.
-            return ["listen_choose_chinese", "english_to_chinese", "missing_letter"]
+            return ["listen_choose_chinese", "english_to_chinese", "handwriting_dictation"]
 
         # P0-1: Warm-up — sort by strength (highest first = easiest words first)
         def _item_strength(item: LearningItemRead) -> float:
@@ -1575,11 +1586,12 @@ def list_due_review_items(
             need_syllable = 4 <= wlen <= 7
             for mode in word_modes:
                 review_prompt = None
-                if mode == "chinese_to_english":
+                if mode == "handwriting_dictation":
                     # P13: hint follows the child's dominant error type for
                     # this word. First-letter hint wins (hardest blocker),
                     # then ending anchor, then a plain letter count for
-                    # missing/extra-letter strugglers.
+                    # missing/extra-letter strugglers. 手写卡片会把提示
+                    # 显示在画板上方（2026-08-02 起手写取代键盘拼写）。
                     if first_letter_hint:
                         review_prompt = f"首字母:{first_letter_hint}"
                     elif intel.get("ending_errors", 0) >= 2 and wlen >= 3:
@@ -1625,41 +1637,24 @@ def list_due_review_items(
                 continue
             if intervention_words and any(w in intervention_words for w in s_words):
                 continue
+            # 手写整句限量且限长：超过 MAX_SENTENCE_WORDS 词的句子手写太
+            # 慢（手写模式队列同款限制），复习环节只练短句。
+            if s.item_type == "sentence" and len(s_words) > MAX_SENTENCE_WORDS:
+                continue
             sentence_candidates.append(s)
             if len(sentence_candidates) >= 4:
                 break
         sentences_for_session = sentence_candidates[:2]
 
-        # N2: whole-sentence typing costs ~80s per attempt, most of it typing
-        # words the child already knows. When a session sentence contains a
-        # weak word (teaching / difficult / consolidating, or no word-state
-        # at all), serve it as a CLOZE — blank only the weakest word and type
-        # just that word in context (~15s, same contextual benefit). The
-        # frontend blanks item.focus_words when review_task_type is
-        # "cloze_sentence". Sentences whose words are all strong stay whole.
-        cloze_scope_words: set[str] = set()
-        for s in sentences_for_session:
-            cloze_scope_words.update(w.strip().lower() for w in tokenize_words(s.english_text))
-        if cloze_scope_words:
-            cloze_state_rows = db.scalars(
-                select(WordMemoryState).where(
-                    WordMemoryState.user_id == current_user.id,
-                    WordMemoryState.word.in_(list(cloze_scope_words)),
-                )
-            ).all()
-            strength_status_by_word = {ws.word: (ws.memory_strength or 0.0, ws.status or "") for ws in cloze_state_rows}
-            cloze_marked: list[LearningItemRead] = []
-            for s in sentences_for_session:
-                s_words = [w.strip().lower() for w in tokenize_words(s.english_text)]
-                weak_words = [
-                    w for w in s_words
-                    if w and strength_status_by_word.get(w, (0.0, ""))[1] in ("teaching", "difficult", "consolidating", "")
-                ]
-                if weak_words:
-                    target = min(weak_words, key=lambda w: strength_status_by_word.get(w, (0.0, ""))[0])
-                    s = s.model_copy(update={"focus_words": [target], "review_task_type": "cloze_sentence"})
-                cloze_marked.append(s)
-            sentences_for_session = cloze_marked
+        # 手写化（2026-08-02 家长决定）：复习队列的句子不再键盘打字/挖空
+        # （整句敲键盘 ~80s/次、正确率 35%，是 72h 分析里最大的时间黑洞），
+        # 统一改为手写听写：听发音 + 看中文 → 手写整句，AI 视觉判分。
+        # 限量不变：每次会话 ≤2 句 + SENTENCE_DAILY_CAP=3（review_mode
+        # 记为 sentence-handwriting，保持在 sentence-% 前缀下）。
+        sentences_for_session = [
+            s.model_copy(update={"review_task_type": HANDWRITING_DICTATION_TASK_TYPE})
+            for s in sentences_for_session
+        ]
 
         # Build the final queue: multi-mode focus items first, then
         # any remaining items from the due queue. Previously this
@@ -2603,11 +2598,20 @@ async def check_handwriting(
             ).limit(1)
         )
 
-    review_mode = (
-        HANDWRITING_TRANSLATION_REVIEW_MODE
-        if payload.task_type == HANDWRITING_TRANSLATION_TASK_TYPE
-        else HANDWRITING_DICTATION_REVIEW_MODE
+    # 句子手写与单词手写分开记账：review_mode 保持 "sentence-" 前缀，
+    # 复习接口的 SENTENCE_DAILY_CAP（LIKE 'sentence-%'）才能把复习队列里
+    # 的句子手写纳入每日 3 句限量（手写化后句子不再产生 sentence-typing
+    # 日志，没有这个分支限量就失效了）。
+    is_sentence_answer = (
+        (learning_item is not None and learning_item.item_type == "sentence")
+        or len(tokenize_words(expected_english)) > 1
     )
+    if payload.task_type == HANDWRITING_TRANSLATION_TASK_TYPE:
+        review_mode = HANDWRITING_TRANSLATION_REVIEW_MODE
+    elif is_sentence_answer:
+        review_mode = SENTENCE_HANDWRITING_REVIEW_MODE
+    else:
+        review_mode = HANDWRITING_DICTATION_REVIEW_MODE
     error_type = None if verdict.correct else ("meaning" if payload.task_type == HANDWRITING_TRANSLATION_TASK_TYPE else "spelling")
     word_item = get_or_create_word_memory_item(db, current_user.id, expected_english, learning_item)
     result = schedule_memory_review(
@@ -2638,6 +2642,9 @@ async def check_handwriting(
         record_learning_event(db, current_user.id, result.review_log, word_item, duration_ms=duration_ms)
     except Exception as exc:
         logger.warning("Failed to record learning replay event for handwriting review: %s", exc)
+    # 微任务闭环：复习队列把键盘拼写微任务映射成手写后，手写提交必须
+    # 同样结算 WordReviewTask，否则任务永远 pending、每天重复出队。
+    complete_word_review_task(db, current_user.id, payload.review_task_id, result.review_log.is_correct)
     db.commit()
     return HandwritingCheckResponse(
         recognized=verdict.recognized,

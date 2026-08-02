@@ -229,18 +229,20 @@ class TestMaskLearningLetters:
         )
 
 
-# --- BUG-31: choose_task_sequence should not duplicate hidden_recall ---
+# --- BUG-31: choose_task_sequence must never serve keyboard spelling types ---
 class TestChooseTaskSequenceNoDuplicate:
-    """When base_sequence already contains hidden_recall (e.g. for
-    error_type='unknown' it's at index 1), the old `if 'hidden_recall'
-    not in base_sequence[:2]` check failed to detect it and produced
-    ['hidden_recall', 'english_to_chinese', 'hidden_recall', ...]. The
-    fix checks the whole list and skips the prepend.
+    """手写化（2026-08-02 家长决定）：产出类微任务只有 handwriting_dictation。
+
+    旧实现用 hidden_recall/missing_letter/listen_spell/chinese_to_english 等
+    键盘拼写类型，还曾因 prepend 重复 hidden_recall（BUG-31）。现在策略表
+    只含识别类 + 手写听写：无重复、无键盘类型、连错降级到纯识别。
     """
 
-    def test_unknown_error_type_does_not_duplicate_hidden_recall(self):
+    KEYBOARD_TYPES = {"chinese_to_english", "listen_spell", "missing_letter", "hidden_recall"}
+
+    def test_unknown_error_type_has_no_duplicates_or_keyboard_types(self):
         word_state = SimpleNamespace(
-            consecutive_error_count=5,  # qualifies for hidden_recall prepend
+            consecutive_error_count=5,  # triggers the R2 demotion branch
             task_type_counts={},
             error_type_counts={},
             priority_score=0.5,
@@ -251,25 +253,34 @@ class TestChooseTaskSequenceNoDuplicate:
         assert len(sequence) == len(set(sequence)), (
             f"Sequence should have no duplicates, got {sequence}"
         )
-        # The first task in the sequence should be the demoted (easiest)
-        # mode for high-error words, not a duplicated hidden_recall.
-        assert "hidden_recall" in sequence, (
-            f"hidden_recall should still be present (consecutive_error_count=5), "
-            f"got sequence={sequence}"
+        # Keyboard spelling is retired — production is handwriting only.
+        assert not (set(sequence) & self.KEYBOARD_TYPES), (
+            f"Sequence must not contain keyboard spelling types, got {sequence}"
+        )
+        # High-error words are demoted to the easiest recognition mode first.
+        assert sequence[0] == "listen_choose_chinese", (
+            f"consecutive_error_count=5 should demote to listen_choose_chinese, got {sequence[0]}"
+        )
+        # …but a handwriting production task is still in the queue.
+        assert "handwriting_dictation" in sequence, (
+            f"handwriting_dictation should be present, got sequence={sequence}"
         )
 
-    def test_low_error_count_no_hidden_recall_prepend(self):
+    def test_low_error_count_recognition_first_then_handwriting(self):
         word_state = SimpleNamespace(
-            consecutive_error_count=1,  # below the 3-threshold
+            consecutive_error_count=1,
             task_type_counts={},
             error_type_counts={},
             priority_score=0.3,
             last_answer_seen_at=None,
         )
         sequence = choose_task_sequence(word_state, "meaning")
-        # No hidden_recall prepend for low-error count.
-        assert sequence[0] != "hidden_recall", (
-            f"Low-error word should not start with hidden_recall, got {sequence[0]}"
+        assert not (set(sequence) & self.KEYBOARD_TYPES), (
+            f"Sequence must not contain keyboard spelling types, got {sequence}"
+        )
+        # meaning errors drill recognition; no forced production first.
+        assert sequence[0] in {"listen_choose_chinese", "english_to_chinese", "match_translation"}, (
+            f"Low-error meaning word should start with a recognition mode, got {sequence[0]}"
         )
 
 

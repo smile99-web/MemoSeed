@@ -806,6 +806,9 @@ def build_daily_report(db: Session, user_id: UUID, report_date: date | None = No
         "word-missing_letter": "拼写题（缺字母）",
         "word-hidden_recall": "拼写题（隐藏）",
         "sentence-spelling": "拼写题（整句）",
+        "sentence-handwriting": "手写题（整句）",
+        "handwriting-dictation": "手写听写",
+        "handwriting-translation": "手写翻译",
     }
     spelling_count = 0
     spelling_correct = 0
@@ -816,7 +819,7 @@ def build_daily_report(db: Session, user_id: UUID, report_date: date | None = No
         c = int(count)
         cr = int(corr or 0)
         label = REVIEW_TYPE_LABELS.get(mode or "", mode or "其他")
-        kind = "spelling" if "spell" in (mode or "").lower() or "recall" in (mode or "").lower() or "preview" in (mode or "").lower() or "context" in (mode or "").lower() or "missing" in (mode or "").lower() or "hidden" in (mode or "").lower() else "choice"
+        kind = "spelling" if "spell" in (mode or "").lower() or "recall" in (mode or "").lower() or "preview" in (mode or "").lower() or "context" in (mode or "").lower() or "missing" in (mode or "").lower() or "hidden" in (mode or "").lower() or "handwriting" in (mode or "").lower() else "choice"
         per_type_breakdown.append({"mode": mode, "label": label, "reviews": c, "correct": cr, "kind": kind})
         if kind == "spelling":
             spelling_count += c

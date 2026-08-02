@@ -717,6 +717,10 @@ function StudyContent() {
   // disable real pronunciation checking for the REST OF THE SESSION —
   // every later card became a loudness free-pass.
   const echoManualUntilRef = useRef(0);
+  // 家长要求（2026-08-02）：跟读不再先领读。首次尝试只播"开始"提示音
+  // 直接考；读错了才播正确示范再重录。"再听一遍"按钮通过此 ref 要求
+  // 下一次 effect 运行先播示范。
+  const echoPlayModelFirstRef = useRef(false);
   const echoGateActiveRef = useRef(false);
   const echoPromptRef = useRef<{ text: string; translation: string } | null>(null);
   // Mirrors "is a handwriting card on screen" for the study-timer effect
@@ -1536,6 +1540,7 @@ function StudyContent() {
     echoListenGenerationRef.current += 1;
     echoAttemptsRef.current = 0;
     echoNoSpeechRef.current = 0;
+    echoPlayModelFirstRef.current = false; // 首次不领读，只播"开始"提示音
     echoStartedAtMsRef.current = Date.now();
     echoLastTranscriptRef.current = "";
     setEchoVolume(0);
@@ -1565,7 +1570,8 @@ function StudyContent() {
     setWarmUpMeanings(meanings);
     // Course-learning warm-up is a pronunciation exercise too (parent rule:
     // EVERY exercise ends with the child reading aloud). The echo card plays
-    // the model reading, waits for it to finish, then records the child.
+    // the "开始" cue, records the child cold; the model reading only plays
+    // after a failed attempt or on the child's 再听一遍 request.
     startEchoPrompt(first, meanings[normalizeEnglishKey(first)] ?? "");
   }, [startEchoPrompt]);
 
@@ -2087,6 +2093,7 @@ function StudyContent() {
         image,
         task_type: taskType as HandwritingTaskType,
         learning_item_id: getSourceLearningItemId(item) ?? undefined,
+        review_task_id: item.review_task_id ?? undefined,
         expected_english: (item.english_text || "").trim(),
         expected_chinese: (item.chinese_text || "").trim(),
         duration_seconds: Math.max(1, Math.round((Date.now() - handwritingStartedAtRef.current) / 1000)),
@@ -3233,7 +3240,17 @@ function StudyContent() {
       // "read the sentence" — that was the parent's bug report.
       const minVoiceMs = Math.min(5000, Math.max(900, 450 * echoWords));
       void (async () => {
-        await speakClearEnglish(sequenceId, echoPrompt.text, settings, true);
+        // 与 ASR 路径一致：不自动领读。首次只播"开始"提示音；孩子主动点
+        // "再听一遍"（echoPlayModelFirstRef）才播完整示范。
+        if (echoPlayModelFirstRef.current) {
+          echoPlayModelFirstRef.current = false;
+          await speakClearEnglish(sequenceId, echoPrompt.text, settings, true);
+        } else {
+          await Promise.race([
+            speakInVoiceSequence(sequenceId, "开始", settings.ttsChineseVoice, "zh-CN", settings),
+            wait(8000),
+          ]);
+        }
         if (!isCurrent()) return;
         stopAudioPlayback();
         await wait(300);
@@ -3279,27 +3296,45 @@ function StudyContent() {
     setEchoManualMode(false);
 
     void (async () => {
-      // Play the full model reading FIRST and wait for it — recording during
-      // TTS would transcribe the model's own voice and falsely pass.
-      // The timeout scales with text length: the 3-pass slow reading of a
-      // long course sentence (natural + chunked + word-by-word) legitimately
-      // takes 25-40s. A fixed 20s cutoff misread those as hung TTS and dropped
-      // the session into degraded manual mode (no ASR correctness check) —
-      // exactly the "didn't have to read correctly" gap the parent saw on
-      // course-package sentences.
-      const ttsTimeoutMs = Math.min(90000, 15000 + tokenizeEnglish(echoPrompt.text).length * 4000);
-      const ttsFinished = await Promise.race([
-        speakClearEnglish(sequenceId, echoPrompt.text, settings, true),
-        wait(ttsTimeoutMs).then(() => "timeout" as const),
-      ]);
-      if (!isCurrent()) {
-        return;
-      }
-      if (ttsFinished === "timeout") {
-        // TTS hung — don't trap the child behind a gate that can't proceed.
-        enterEchoManualMode("语音加载有点慢，这次先手动继续吧 🎈");
-        setEchoPrompt({ ...echoPrompt });
-        return;
+      // 家长要求（2026-08-02）：首次尝试不领读 —— 只播"开始"提示音就直接
+      // 录音考试；读错后才播正确示范音，然后自动重录（先考后教）。手动点
+      // "再听一遍"（echoPlayModelFirstRef）同样先播示范。
+      const playModelFirst = echoPlayModelFirstRef.current || echoAttemptsRef.current > 0;
+      echoPlayModelFirstRef.current = false;
+      if (playModelFirst) {
+        // Play the full model reading FIRST and wait for it — recording during
+        // TTS would transcribe the model's own voice and falsely pass.
+        // The timeout scales with text length: the 3-pass slow reading of a
+        // long course sentence (natural + chunked + word-by-word) legitimately
+        // takes 25-40s. A fixed 20s cutoff misread those as hung TTS and dropped
+        // the session into degraded manual mode (no ASR correctness check) —
+        // exactly the "didn't have to read correctly" gap the parent saw on
+        // course-package sentences.
+        const ttsTimeoutMs = Math.min(90000, 15000 + tokenizeEnglish(echoPrompt.text).length * 4000);
+        const ttsFinished = await Promise.race([
+          speakClearEnglish(sequenceId, echoPrompt.text, settings, true),
+          wait(ttsTimeoutMs).then(() => "timeout" as const),
+        ]);
+        if (!isCurrent()) {
+          return;
+        }
+        if (ttsFinished === "timeout") {
+          // TTS hung — don't trap the child behind a gate that can't proceed.
+          enterEchoManualMode("语音加载有点慢，这次先手动继续吧 🎈");
+          setEchoPrompt({ ...echoPrompt });
+          return;
+        }
+      } else {
+        // First attempt: "开始" cue only, then record cold. The cue is
+        // non-essential — if TTS is slow/down just proceed to recording
+        // (never degrade to manual over a missing cue).
+        await Promise.race([
+          speakInVoiceSequence(sequenceId, "开始", settings.ttsChineseVoice, "zh-CN", settings),
+          wait(8000),
+        ]);
+        if (!isCurrent()) {
+          return;
+        }
       }
       // CRITICAL: flush trailing TTS audio + 500ms silence gap before
       // recording. Without this the mic catches the system TTS tail and
@@ -3407,7 +3442,9 @@ function StudyContent() {
         return;
       }
       setEchoStatus("retry");
-      setFeedback(`还差一点点！再试一次（第 ${echoAttemptsRef.current + 1} 次）💪`);
+      // 下一轮 effect 会先播正确示范音（attempts > 0 → playModelFirst），
+      // 文案提前告诉孩子"先听再读"。
+      setFeedback(`还差一点点！先听正确读法，再跟读一次（第 ${echoAttemptsRef.current + 1} 次）💪`);
       window.setTimeout(() => {
         if (isCurrent()) {
           setEchoStatus("idle");
@@ -4940,6 +4977,9 @@ function StudyContent() {
                       onMouseDown={keepStudyInputFocus}
                       onClick={() => {
                         // Replay the model TTS (also restarts the recording).
+                        // 家长要求首次不领读，所以这个按钮是孩子主动要示范
+                        // 的唯一入口 —— 标记下一轮 effect 先播示范再录音。
+                        echoPlayModelFirstRef.current = true;
                         echoListenGenerationRef.current += 1;
                         setEchoStatus("idle");
                         setEchoVolume(0);
@@ -4970,7 +5010,7 @@ function StudyContent() {
                                 ? "💪 没关系，继续前进！"
                                 : echoStatus === "listening"
                                   ? "🎤 正在录音…大声读！"
-                                  : "🎧 仔细听，然后大声读！"}
+                                  : "🎤 听到「开始」就大声读！"}
                       </div>
                     )}
                   </div>
@@ -4987,6 +5027,9 @@ function StudyContent() {
                   <p className="text-lg font-bold text-violet-800">
                     {currentItem?.review_task_type === "handwriting_translation" ? "✍️ 看一看，写出中文意思" : "✍️ 听一听，写出英文"}
                   </p>
+                  {currentItem?.review_task_type === "handwriting_dictation" && currentItem?.review_prompt ? (
+                    <p className="rounded-full bg-amber-100 px-3 py-1 text-sm font-bold text-amber-700">💡 {currentItem.review_prompt}</p>
+                  ) : null}
                   {currentItem?.review_task_type === "handwriting_translation" ? (
                     <p className="max-w-full break-words text-center text-2xl font-bold text-slate-900 ipad:text-3xl">{currentItem.english_text}</p>
                   ) : null}

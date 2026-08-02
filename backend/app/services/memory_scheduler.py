@@ -177,7 +177,10 @@ MIN_FAILURE_RETRY_MINUTES = 10
 # Distinct items served per day are capped; the overdue overflow is spread
 # across the next few days instead of piling up under an "overdue" label
 # that stops meaning anything beyond a few dozen items.
-DAILY_REVIEW_ITEM_BUDGET = 90
+# 少而真（2026-08-02 家长决定）：90 → 40。500-1300 题/天的海量复习被
+# 证明无效（真测试正确率仅 36-45%，孩子在凑时间应付）。配合手写化，
+# 每天 40 个不同条目 ≈ 40-60 分钟高质量练习；积压由平滑逻辑分摊。
+DAILY_REVIEW_ITEM_BUDGET = 40
 BACKLOG_SMOOTH_SPREAD_DAYS = 3
 
 LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")

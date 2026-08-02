@@ -46,6 +46,9 @@ def categorize_review_mode(review_mode: str | None) -> str:
         return "english_to_chinese"
     if "sentence" in rm:
         return "sentence"
+    if "handwriting" in rm:
+        # 手写听写/翻译 = 拼写产出（2026-08-02 起取代键盘拼写）
+        return "chinese_to_english"
     if "phrase" in rm:
         return "phrase"
     if "spell" in rm or "recall" in rm or "preview" in rm or "context" in rm or "hinted" in rm:
@@ -593,6 +596,9 @@ MODE_LABELS = {
     "word-match_translation": "中英配对",
     "sentence-spelling": "整句拼写",
     "sentence-cloze": "句子挖空",
+    "sentence-handwriting": "句子手写",
+    "handwriting-dictation": "手写听写",
+    "handwriting-translation": "手写翻译",
     "word-spelling": "拼写",
     "word-spelling-spelling": "拼写",
 }

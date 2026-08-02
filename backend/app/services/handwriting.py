@@ -56,6 +56,28 @@ MAX_SENTENCE_WORDS = 8  # handwriting a long sentence is slow — keep it short
 MAX_SENTENCE_CHARS = 120
 MAX_IMAGE_DATA_URL_CHARS = 9 * 1024 * 1024  # same bound as tingxie
 
+# 家长决定（2026-08-02）：拼写产出全部改手写，不再键盘打字。键盘拼写
+# 孩子可以不动脑乱敲蒙混（数据：the→"is"/"door" 4 秒提交）；手写的每
+# 一笔都必须真回忆。复习队列里所有键盘拼写任务在服务端出队时统一改
+# 写为手写听写：播放发音 + 显示中文意思 → 画板手写 → AI 视觉判分。
+KEYBOARD_SPELLING_TASK_TYPES = frozenset({
+    "listen_spell",
+    "chinese_to_english",
+    "missing_letter",
+    "hidden_recall",
+})
+
+# 句子手写复习的 review_mode：保持 "sentence-" 前缀，复习接口的
+# SENTENCE_DAILY_CAP 统计（review_mode LIKE 'sentence-%'）才能继续生效。
+SENTENCE_HANDWRITING_REVIEW_MODE = "sentence-handwriting"
+
+
+def handwriting_task_for(task_type: str | None) -> str | None:
+    """键盘拼写任务类型统一改写为手写听写；其余类型原样返回。"""
+    if task_type in KEYBOARD_SPELLING_TASK_TYPES:
+        return HANDWRITING_DICTATION_TASK_TYPE
+    return task_type
+
 # 手写听写队列的课程来源（家长指定）：先出单词复习，再按课次出中考英语
 # 第1课→第10课的句子。包名容忍 "中考英语"/"中考英文" 两种写法。
 HANDWRITING_COURSE_PACKAGE_NAMES = ("中考英语", "中考英文")
