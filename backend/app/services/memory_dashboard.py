@@ -809,6 +809,7 @@ def build_daily_report(db: Session, user_id: UUID, report_date: date | None = No
         "sentence-handwriting": "手写题（整句）",
         "handwriting-dictation": "手写听写",
         "handwriting-translation": "手写翻译",
+        "handwriting-both": "每日听写（英文+中文）",
     }
     spelling_count = 0
     spelling_correct = 0

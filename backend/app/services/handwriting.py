@@ -71,6 +71,13 @@ KEYBOARD_SPELLING_TASK_TYPES = frozenset({
 # SENTENCE_DAILY_CAP 统计（review_mode LIKE 'sentence-%'）才能继续生效。
 SENTENCE_HANDWRITING_REVIEW_MODE = "sentence-handwriting"
 
+# 每日一测（家长 2026-08-02 要求）：每天听写 20 个词，英文和中文意思
+# 都要手写，一张卡写两样（上四线格写英文、下米字格写中文），AI 判双关。
+# "不能光学习没有反馈"——当天学的词当天测，错词自动回炉。
+HANDWRITING_BOTH_TASK_TYPE = "handwriting_both"
+HANDWRITING_BOTH_REVIEW_MODE = "handwriting-both"
+DAILY_TEST_WORD_LIMIT = 20
+
 
 def handwriting_task_for(task_type: str | None) -> str | None:
     """键盘拼写任务类型统一改写为手写听写；其余类型原样返回。"""
@@ -90,6 +97,10 @@ class HandwritingVerdict:
     recognized: str
     correct: bool
     comment: str
+    # 每日一测（handwriting_both）的分项判定：英文拼写 / 中文意思各自对错，
+    # 前端据此给出"英文对了但意思错了"的精确反馈。其余任务类型为 None。
+    english_ok: bool | None = None
+    chinese_ok: bool | None = None
 
 
 # --------------------------------------------------------------------------
@@ -203,6 +214,49 @@ def compose_daily_handwriting_queue(
     return (words + course)[:limit]
 
 
+def pick_daily_test_words(
+    today_rows: list[Any],
+    due_rows: list[Any],
+    weak_rows: list[Any],
+    *,
+    tested_today_ids: set[UUID],
+    tested_today_words: frozenset[str] | set[str] = frozenset(),
+    limit: int = DAILY_TEST_WORD_LIMIT,
+) -> list[Any]:
+    """每日一测选词（三个列表由调用方排好序传入）：今日所学 → 到期复习 → 最弱学过。
+
+    今日所学的词排最前——当天的学习效果当天检查（家长 2026-08-02："每天一测
+    ……不能光学习没有反馈，不然任务只会积累的越来越多"）；不足 20 个时
+    到期复习词补充，再不足学过的最弱词补齐。今日已测的词排除（重测只出
+    剩余）。按 id + 归一化词文本双重去重（同一个词可能有多条 item）。
+
+    tested_today_words 是今天已测词的归一化文本——手写提交记账在
+    word-memory 专属 item 上（id 与课程 item 不同），只靠 id 排除会漏，
+    导致刚测过的词当天重出。
+    """
+    picked: list[Any] = []
+    seen_ids: set[Any] = set()
+    seen_words: set[str] = set()
+    for rows in (today_rows, due_rows, weak_rows):
+        for item in rows:
+            item_id = getattr(item, "id", None)
+            word_key = (getattr(item, "english_text", "") or "").strip().lower()
+            if item_id is None or not word_key:
+                continue
+            if item_id in seen_ids or word_key in seen_words:
+                continue
+            if item_id in tested_today_ids or word_key in tested_today_words:
+                continue
+            if getattr(item, "item_type", None) != "word":
+                continue
+            seen_ids.add(item_id)
+            seen_words.add(word_key)
+            picked.append(item)
+            if len(picked) >= limit:
+                return picked
+    return picked
+
+
 # --------------------------------------------------------------------------
 # Vision judging
 # --------------------------------------------------------------------------
@@ -225,6 +279,17 @@ _TRANSLATION_PROMPT = """你是小学英语批改老师。图片是孩子手写�
 只输出 JSON，不要输出任何其他文字：
 {{"recognized": "辨认出的中文", "correct": true或false, "comment": "给孩子的简短评语，15字以内，语气温和鼓励"}}"""
 
+_BOTH_PROMPT = """你是小学英语听写批改老师。图片上半部分是孩子在四线三格中手写的英文单词，下半部分是孩子在米字格中手写的中文意思。
+孩子听到的录音是英文单词「{expected}」，参考中文意思是「{chinese}」。请完成：
+1. 辨认孩子在上面四线格部分写出的英文（孩子字体可能稚嫩、连笔、大小不一）；
+2. 辨认孩子在下面米字格部分写出的中文（允许写拼音代替生字）；
+3. 分别判定：
+   - 英文拼写：大小写不同算对；拼写错误、漏字母、写成了别的词算错；
+   - 中文意思：只要是该词的任何一个正确释义就算对（同义表达、意思相近、用词不同都可以），
+     写的是别的词的意思、意思错误、答非所问算错。
+只输出 JSON，不要输出任何其他文字：
+{{"recognized_english": "辨认出的英文", "recognized_chinese": "辨认出的中文", "english_ok": true或false, "chinese_ok": true或false, "comment": "给孩子的简短评语，20字以内，语气温和鼓励，指出错在哪"}}"""
+
 
 def judge_handwriting(
     image_data_url: str,
@@ -243,7 +308,9 @@ def judge_handwriting(
     if not image_data_url.startswith("data:image/"):
         raise ValueError("image must be a data URL")
 
-    if task_type == HANDWRITING_TRANSLATION_TASK_TYPE:
+    if task_type == HANDWRITING_BOTH_TASK_TYPE:
+        prompt = _BOTH_PROMPT.format(expected=expected_english, chinese=expected_chinese or "（无参考释义）")
+    elif task_type == HANDWRITING_TRANSLATION_TASK_TYPE:
         prompt = _TRANSLATION_PROMPT.format(expected=expected_english, chinese=expected_chinese or "（无参考释义）")
     else:
         prompt = _DICTATION_PROMPT.format(expected=expected_english)
@@ -294,6 +361,42 @@ def judge_handwriting(
     recognized = str(result.get("recognized") or "").strip()
     model_correct = bool(result.get("correct"))
     comment = str(result.get("comment") or "").strip()
+
+    if task_type == HANDWRITING_BOTH_TASK_TYPE:
+        # 每日一测：英文+中文双关判定。
+        recognized_en = str(result.get("recognized_english") or "").strip()
+        recognized_zh = str(result.get("recognized_chinese") or "").strip()
+        en_ok = bool(result.get("english_ok"))
+        zh_ok = bool(result.get("chinese_ok"))
+        # 英文部分服务端硬校验（tingxie 教训——不信模型自判）：归一化相等
+        # 强制对；什么都不认识强制错；重度不一致强制错。
+        expected_norm = _normalize_english(expected_english)
+        recognized_norm = _normalize_english(recognized_en)
+        if not recognized_norm:
+            en_ok = False
+        elif recognized_norm == expected_norm:
+            en_ok = True
+        else:
+            similarity = SequenceMatcher(None, expected_norm, recognized_norm).ratio()
+            en_ok = en_ok and similarity >= 0.85
+        # 中文是语义判断，信任模型（与写翻译同规则）——但什么都没写必错。
+        if not recognized_zh:
+            zh_ok = False
+        correct = en_ok and zh_ok
+        recognized = " / ".join(part for part in (recognized_en, recognized_zh) if part)
+        if not comment:
+            if correct:
+                comment = "全对，真棒！"
+            elif not en_ok and not zh_ok:
+                comment = "英文和中文都要再练一练"
+            elif not en_ok:
+                comment = f"英文写错了，正确是 {expected_english}"
+            else:
+                comment = "中文意思写错了"
+        return HandwritingVerdict(
+            recognized=recognized, correct=correct, comment=comment,
+            english_ok=en_ok, chinese_ok=zh_ok,
+        )
 
     if task_type == HANDWRITING_TRANSLATION_TASK_TYPE:
         # Semantic judgment is the model's job — no string compare possible.

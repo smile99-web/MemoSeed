@@ -311,6 +311,21 @@ export default function LearningStartPage() {
               动笔
             </span>
           </Link>
+
+          <Link
+            className="hover-lift flex items-center justify-between gap-3 rounded-2xl border border-rose-300/70 bg-rose-50/70 px-5 py-4 shadow-soft backdrop-blur-xl transition-colors hover:border-rose-400 ipad:px-6 ipad:py-5"
+            href="/learning/study?mode=test"
+          >
+            <div>
+              <p className="text-base font-bold text-rose-700 ipad:text-lg">📝 每日一测</p>
+              <p className="mt-1 text-xs text-slate-600 ipad:text-sm">
+                每天听写 20 个词，英文和中文意思都写对才算过
+              </p>
+            </div>
+            <span className="shrink-0 rounded-full bg-rose-500 px-3 py-1 text-sm font-bold text-white ipad:text-base">
+              测验
+            </span>
+          </Link>
         </div>
 
         {errorMessage ? <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 ipad:px-6 ipad:py-4 ipad:text-base">{errorMessage}</p> : null}

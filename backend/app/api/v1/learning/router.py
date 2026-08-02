@@ -80,7 +80,10 @@ from app.services.memory_scheduler import (
 from app.services.pronunciation import recognize_speech_flash, score_pronunciation
 from app.services.secure_model_settings import get_private_model_settings
 from app.services.handwriting import (
+    DAILY_TEST_WORD_LIMIT,
     DEFAULT_VISION_MODEL,
+    HANDWRITING_BOTH_REVIEW_MODE,
+    HANDWRITING_BOTH_TASK_TYPE,
     HANDWRITING_COURSE_PACKAGE_NAMES,
     HANDWRITING_DAILY_CAP,
     HANDWRITING_DICTATION_REVIEW_MODE,
@@ -95,6 +98,7 @@ from app.services.handwriting import (
     handwriting_task_for,
     judge_handwriting,
     parse_lesson_number,
+    pick_daily_test_words,
 )
 from app.services.speak_practice import (
     READ_ALOUD_REVIEW_MODE,
@@ -2535,6 +2539,121 @@ def list_handwriting_items(
     ]
 
 
+@router.get("/daily-test-items", response_model=list[LearningItemRead])
+def list_daily_test_items(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: int = DAILY_TEST_WORD_LIMIT,
+) -> list[LearningItemRead]:
+    """每日一测（家长 2026-08-02 要求）：每天听写 20 个词，英文+中文意思
+    都要手写，AI 判双关——当天的学习效果当天检查，错词自动回炉，
+    "不能光学习没有反馈，不然任务只会积累的越来越多"。
+
+    选词优先级：今日所学（当天任何模式复习过的词，最弱在前）→ 到期复习词
+    → 学过的最弱词补齐。今日已测过的词不重出（重测只出剩余）。
+    """
+    capped_limit = max(1, min(limit, 30))
+    now = datetime.now(UTC)
+    today_start = now.astimezone(LOCAL_TIMEZONE).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).astimezone(UTC)
+
+    # 今日已测：手写提交记账在 word-memory 专属 item 上（id 与候选的课程
+    # item 不同），所以 id 与归一化词文本都要收集，双重排除才不会漏。
+    tested_rows = db.execute(
+        select(LearningEvent.learning_item_id, LearningItem.english_text)
+        .outerjoin(LearningItem, LearningItem.id == LearningEvent.learning_item_id)
+        .where(
+            LearningEvent.user_id == current_user.id,
+            LearningEvent.review_mode == HANDWRITING_BOTH_REVIEW_MODE,
+            LearningEvent.occurred_at >= today_start,
+        )
+    ).all()
+    tested_today_ids = {row_id for row_id, _text in tested_rows if row_id is not None}
+    tested_today_words = {
+        (text or "").strip().lower() for _row_id, text in tested_rows if (text or "").strip()
+    }
+
+    def _testable(item: LearningItem) -> bool:
+        # 必须有有效中文释义——每日一测要考"写出中文意思"。
+        ch = item.chinese_text or ""
+        return (
+            item.item_type == "word"
+            and bool(ch.strip())
+            and any("一" <= c <= "鿿" for c in ch)
+            and ch.strip().lower() != (item.english_text or "").strip().lower()
+        )
+
+    # 今日所学：当天任何模式有真复习记录的单词条目。最弱的排最前——
+    # 测的就是不牢的；并列时最近学过的在前（刚学完就测，反馈最及时）。
+    today_logs = (
+        select(
+            ReviewLog.learning_item_id.label("item_id"),
+            func.max(ReviewLog.reviewed_at).label("last_at"),
+        )
+        .where(
+            ReviewLog.user_id == current_user.id,
+            ReviewLog.reviewed_at >= today_start,
+            ReviewLog.learning_item_id.is_not(None),
+        )
+        .group_by(ReviewLog.learning_item_id)
+        .subquery()
+    )
+    today_rows = [
+        item
+        for item, _last_at, _strength in sorted(
+            db.execute(
+                select(LearningItem, today_logs.c.last_at, MemoryState.memory_strength)
+                .join(today_logs, today_logs.c.item_id == LearningItem.id)
+                .outerjoin(MemoryState, MemoryState.learning_item_id == LearningItem.id)
+                .where(
+                    LearningItem.user_id == current_user.id,
+                    LearningItem.item_type == "word",
+                )
+            ).all(),
+            key=lambda row: (
+                row[2] if row[2] is not None else 1.0,
+                -(row[1].timestamp() if row[1] else 0.0),
+            ),
+        )
+        if _testable(item)
+    ]
+
+    studied_rows = db.execute(
+        select(LearningItem, MemoryState.memory_strength, MemoryState.next_review_at)
+        .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
+        .where(
+            LearningItem.user_id == current_user.id,
+            LearningItem.item_type == "word",
+            MemoryState.repetition_count > 0,
+        )
+    ).all()
+    strength_by_id = {item.id: (strength or 0.0) for item, strength, _nra in studied_rows}
+    due_rows = sorted(
+        (item for item, _s, nra in studied_rows if nra is not None and nra <= now and _testable(item)),
+        key=lambda item: strength_by_id.get(item.id, 0.0),
+    )
+    weak_rows = sorted(
+        (item for item, _s, _nra in studied_rows if _testable(item)),
+        key=lambda item: strength_by_id.get(item.id, 0.0),
+    )
+
+    picked = pick_daily_test_words(
+        today_rows,
+        due_rows,
+        weak_rows,
+        tested_today_ids=tested_today_ids,
+        tested_today_words=tested_today_words,
+        limit=capped_limit,
+    )
+    return [
+        LearningItemRead.model_validate(item).model_copy(
+            update={"review_task_type": HANDWRITING_BOTH_TASK_TYPE, "source": "每日一测"}
+        )
+        for item in picked
+    ]
+
+
 @router.post("/handwriting-check", response_model=HandwritingCheckResponse)
 async def check_handwriting(
     payload: HandwritingCheckRequest,
@@ -2601,18 +2720,30 @@ async def check_handwriting(
     # 句子手写与单词手写分开记账：review_mode 保持 "sentence-" 前缀，
     # 复习接口的 SENTENCE_DAILY_CAP（LIKE 'sentence-%'）才能把复习队列里
     # 的句子手写纳入每日 3 句限量（手写化后句子不再产生 sentence-typing
-    # 日志，没有这个分支限量就失效了）。
+    # 日志，没有这个分支限量就失效了）。每日一测（handwriting_both）是
+    # 独立模式独立记账（只出单词）。
     is_sentence_answer = (
         (learning_item is not None and learning_item.item_type == "sentence")
         or len(tokenize_words(expected_english)) > 1
     )
-    if payload.task_type == HANDWRITING_TRANSLATION_TASK_TYPE:
+    if payload.task_type == HANDWRITING_BOTH_TASK_TYPE:
+        review_mode = HANDWRITING_BOTH_REVIEW_MODE
+    elif payload.task_type == HANDWRITING_TRANSLATION_TASK_TYPE:
         review_mode = HANDWRITING_TRANSLATION_REVIEW_MODE
     elif is_sentence_answer:
         review_mode = SENTENCE_HANDWRITING_REVIEW_MODE
     else:
         review_mode = HANDWRITING_DICTATION_REVIEW_MODE
-    error_type = None if verdict.correct else ("meaning" if payload.task_type == HANDWRITING_TRANSLATION_TASK_TYPE else "spelling")
+    if verdict.correct:
+        error_type = None
+    elif payload.task_type == HANDWRITING_TRANSLATION_TASK_TYPE:
+        error_type = "meaning"
+    elif payload.task_type == HANDWRITING_BOTH_TASK_TYPE:
+        # 双关判定：英文错记 spelling，英文对但中文错记 meaning——
+        # 错因分流决定回炉微任务的类型。
+        error_type = "spelling" if verdict.english_ok is False else "meaning"
+    else:
+        error_type = "spelling"
     word_item = get_or_create_word_memory_item(db, current_user.id, expected_english, learning_item)
     result = schedule_memory_review(
         db=db,
@@ -2652,6 +2783,8 @@ async def check_handwriting(
         comment=verdict.comment,
         expected=expected_english,
         learning_item_id=word_item.id,
+        english_ok=verdict.english_ok,
+        chinese_ok=verdict.chinese_ok,
     )
 
 

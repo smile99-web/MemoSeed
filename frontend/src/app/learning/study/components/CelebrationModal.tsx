@@ -25,20 +25,32 @@ interface NextCourseTarget {
   isLocked: boolean;
 }
 
+/** 每日一测成绩单的一行：一个词的对错 + 英文/中文分项判定。 */
+interface TestReportEntry {
+  word: string;
+  chinese: string;
+  correct: boolean;
+  englishOk: boolean | null;
+  chineseOk: boolean | null;
+}
+
 interface CelebrationModalProps {
   nextCourse: NextCourseTarget | null;
   summary: CelebrationSummary;
+  /** 每日一测完成后传入逐词成绩单；其余模式为 null。 */
+  testReport?: TestReportEntry[] | null;
 }
 
-const CelebrationModal = memo(function CelebrationModal({ nextCourse, summary }: CelebrationModalProps) {
+const CelebrationModal = memo(function CelebrationModal({ nextCourse, summary, testReport }: CelebrationModalProps) {
   const nextCourseHref = nextCourse
     ? `/learning/study?course_id=${nextCourse.id}&package_id=${nextCourse.packageId}&course_name=${encodeURIComponent(nextCourse.name)}`
     : "/learning";
+  const testCorrectCount = testReport ? testReport.filter((entry) => entry.correct).length : 0;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-slate-950/45 px-6 backdrop-blur-sm">
       <CelebrationConfetti runKey={summary.durationSeconds + summary.correctWordCount} />
-      <div className="glass-card animate-pop-in relative z-10 w-full max-w-md overflow-hidden p-7 text-center ipad:max-w-lg ipad:p-10">
+      <div className="glass-card animate-pop-in relative z-10 max-h-[92dvh] w-full max-w-md overflow-y-auto p-7 text-center ipad:max-w-lg ipad:p-10">
         <div className="pointer-events-none absolute -top-20 left-1/2 h-44 w-72 -translate-x-1/2 rounded-full bg-cyan-300/35 blur-3xl" />
         <div className="relative">
           <div className="mx-auto mb-3 flex h-16 w-16 animate-float items-center justify-center rounded-2xl text-4xl icon-chip-amber icon-chip">🏆</div>
@@ -52,6 +64,36 @@ const CelebrationModal = memo(function CelebrationModal({ nextCourse, summary }:
               <p className="mt-1 text-xl font-bold text-slate-900 ipad:text-3xl">{formatCourseDuration(summary.durationSeconds)}</p>
             </div>
           </div>
+        {testReport && testReport.length > 0 ? (
+          <div className="relative mt-5 rounded-2xl border border-rose-200/80 bg-rose-50/80 px-4 py-4 text-left shadow-soft ipad:mt-6 ipad:px-6 ipad:py-5">
+            <p className="text-sm font-semibold text-rose-700 ipad:text-base">
+              📝 每日一测成绩单：{testCorrectCount} / {testReport.length} 全对
+            </p>
+            <ul className="mt-3 max-h-56 space-y-1.5 overflow-y-auto pr-1 ipad:max-h-64">
+              {testReport.map((entry, index) => (
+                <li key={`${entry.word}-${index}`} className={`flex items-center justify-between gap-2 rounded-xl border px-3 py-1.5 text-sm ipad:text-base ${entry.correct ? "border-emerald-200 bg-emerald-50/80" : "border-amber-200 bg-amber-50/80"}`}>
+                  <span className="min-w-0">
+                    <span className="font-bold text-slate-900">{entry.word}</span>
+                    <span className="ml-2 text-slate-600">{entry.chinese}</span>
+                  </span>
+                  <span className="shrink-0 text-xs font-bold ipad:text-sm">
+                    {entry.englishOk === null && entry.chineseOk === null ? (
+                      <span className={entry.correct ? "text-emerald-600" : "text-amber-600"}>{entry.correct ? "✓ 全对" : "✗ 再练练"}</span>
+                    ) : (
+                      <>
+                        <span className={entry.englishOk ? "text-emerald-600" : "text-rose-500"}>英文{entry.englishOk ? "✓" : "✗"}</span>
+                        <span className={`ml-2 ${entry.chineseOk ? "text-emerald-600" : "text-rose-500"}`}>中文{entry.chineseOk ? "✓" : "✗"}</span>
+                      </>
+                    )}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {testCorrectCount < testReport.length ? (
+              <p className="mt-3 text-xs text-amber-700 ipad:text-sm">写错的词已经自动加入复习队列，会在复习里再次练习。</p>
+            ) : null}
+          </div>
+        ) : null}
         {nextCourse ? (
           <div className={`relative mt-5 rounded-2xl border px-4 py-4 text-left shadow-soft ipad:mt-6 ipad:px-6 ipad:py-5 ${nextCourse.isLocked ? "border-amber-200/80 bg-amber-50/80" : "border-emerald-200/80 bg-emerald-50/80"}`}>
             <p className="text-sm font-semibold text-slate-700 ipad:text-base">
@@ -90,4 +132,4 @@ const CelebrationModal = memo(function CelebrationModal({ nextCourse, summary }:
 });
 
 export default CelebrationModal;
-export type { CelebrationSummary, NextCourseTarget };
+export type { CelebrationSummary, NextCourseTarget, TestReportEntry };

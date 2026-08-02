@@ -661,7 +661,25 @@ export async function listHandwritingItems(accessToken: string, limit = 12): Pro
   return (await response.json()) as LearningItem[];
 }
 
-export type HandwritingTaskType = "handwriting_dictation" | "handwriting_translation";
+// 每日一测：优先取"今天学过的词"→到期复习→最弱的已学词，当天已测的排除。
+export async function listDailyTestItems(accessToken: string, limit = 20): Promise<LearningItem[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/learning/daily-test-items?${params.toString()}`,
+    {
+      cache: "no-store",
+    },
+    accessToken,
+  );
+
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+
+  return (await response.json()) as LearningItem[];
+}
+
+export type HandwritingTaskType = "handwriting_dictation" | "handwriting_translation" | "handwriting_both";
 
 export interface HandwritingCheckPayload {
   image: string;
@@ -681,6 +699,9 @@ export interface HandwritingCheckResult {
   comment: string;
   expected: string;
   learning_item_id: string | null;
+  // 每日一测分项判定（handwriting_both 才有值）：英文拼写/中文释义各自对错。
+  english_ok?: boolean | null;
+  chinese_ok?: boolean | null;
 }
 
 export async function checkHandwriting(accessToken: string, payload: HandwritingCheckPayload): Promise<HandwritingCheckResult> {

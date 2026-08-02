@@ -6,15 +6,18 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from 
  * On-screen handwriting canvas (ported from the tingxie 语文听写 app).
  *
  * The child writes with Apple Pencil / finger / mouse via Pointer Events
- * (pressure-sensitive strokes). Two guide styles:
+ * (pressure-sensitive strokes). Three guide styles:
  * - "english": 四线三格 — the four-line English copybook grid;
- * - "chinese": 米字格 cells, one per expected character (tingxie's grid).
+ * - "chinese": 米字格 cells, one per expected character (tingxie's grid);
+ * - "both":    每日一测 — English four-line grid on top + one row of
+ *              Chinese 米字格 below; the child writes the English word AND
+ *              its Chinese meaning on one canvas, judged as one image.
  *
  * exportImage() renders a clean white-background PNG data URL — that image,
  * grid included, is what the vision LLM sees.
  */
 
-export type HandwritingGridStyle = "english" | "chinese";
+export type HandwritingGridStyle = "english" | "chinese" | "both";
 
 export interface HandwritingCanvasHandle {
   undo: () => void;
@@ -39,8 +42,12 @@ interface HandwritingCanvasProps {
 }
 
 const ENGLISH_HEIGHT = 180;
+const BOTH_ENGLISH_HEIGHT = 132;
+const BOTH_GAP = 16;
 const CHINESE_CELL_MIN = 72;
 const CHINESE_CELL_MAX = 120;
+const BOTH_CELL_MIN = 56;
+const BOTH_CELL_MAX = 92;
 const MAX_WIDTH = 760;
 
 function drawEnglishGrid(ctx: CanvasRenderingContext2D, width: number, height: number) {
@@ -114,6 +121,10 @@ const HandwritingCanvas = forwardRef<HandwritingCanvasHandle, HandwritingCanvasP
         cell = Math.max(CHINESE_CELL_MIN, Math.min(CHINESE_CELL_MAX, Math.floor(maxW / Math.max(1, cells))));
         cssW = cell * Math.max(1, cells);
         cssH = cell;
+      } else if (gridStyle === "both") {
+        cssW = Math.min(window.innerWidth - 60, MAX_WIDTH);
+        cell = Math.max(BOTH_CELL_MIN, Math.min(BOTH_CELL_MAX, Math.floor(cssW / Math.max(1, cells))));
+        cssH = BOTH_ENGLISH_HEIGHT + BOTH_GAP + cell;
       } else {
         cssW = Math.min(window.innerWidth - 60, MAX_WIDTH);
         cssH = ENGLISH_HEIGHT;
@@ -145,6 +156,12 @@ const HandwritingCanvas = forwardRef<HandwritingCanvasHandle, HandwritingCanvasP
       const { cssW, cssH, cell } = sizeRef.current;
       if (gridStyle === "chinese") {
         drawChineseGrid(ctx, cell, Math.max(1, cells));
+      } else if (gridStyle === "both") {
+        drawEnglishGrid(ctx, cssW, BOTH_ENGLISH_HEIGHT);
+        ctx.save();
+        ctx.translate(0, BOTH_ENGLISH_HEIGHT + BOTH_GAP);
+        drawChineseGrid(ctx, cell, Math.max(1, cells));
+        ctx.restore();
       } else {
         drawEnglishGrid(ctx, cssW, cssH);
       }
@@ -246,6 +263,12 @@ const HandwritingCanvas = forwardRef<HandwritingCanvasHandle, HandwritingCanvasP
         ctx.scale(scale, scale);
         if (gridStyle === "chinese") {
           drawChineseGrid(ctx, cell, Math.max(1, cells));
+        } else if (gridStyle === "both") {
+          drawEnglishGrid(ctx, cssW, BOTH_ENGLISH_HEIGHT);
+          ctx.save();
+          ctx.translate(0, BOTH_ENGLISH_HEIGHT + BOTH_GAP);
+          drawChineseGrid(ctx, cell, Math.max(1, cells));
+          ctx.restore();
         } else {
           drawEnglishGrid(ctx, cssW, cssH);
         }

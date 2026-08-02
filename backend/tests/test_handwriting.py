@@ -18,6 +18,7 @@ import pytest
 
 from app.services import handwriting
 from app.services.handwriting import (
+    HANDWRITING_BOTH_TASK_TYPE,
     HANDWRITING_DICTATION_TASK_TYPE,
     HANDWRITING_TRANSLATION_TASK_TYPE,
     KEYBOARD_SPELLING_TASK_TYPES,
@@ -27,6 +28,7 @@ from app.services.handwriting import (
     judge_handwriting,
     parse_lesson_number,
     pick_course_dictation_tasks,
+    pick_daily_test_words,
     pick_review_word_tasks,
 )
 
@@ -198,6 +200,56 @@ class TestComposeDailyHandwritingQueue:
         assert compose_daily_handwriting_queue([], [], tested_today_ids=set(), limit=16) == []
 
 
+class TestPickDailyTestWords:
+    """每日一测选词（家长 2026-08-02）：今日所学优先 → 到期复习 → 最弱学过，
+    今日已测的词排除（重测只出剩余）。"""
+
+    def test_today_words_come_first_then_due_then_weak(self):
+        today = [_item(english="today1"), _item(english="today2")]
+        due = [_item(english="due1")]
+        weak = [_item(english="weak1")]
+        picked = pick_daily_test_words(today, due, weak, tested_today_ids=set(), limit=20)
+        assert [item.english_text for item in picked] == ["today1", "today2", "due1", "weak1"]
+
+    def test_tested_today_excluded_by_id(self):
+        done = _item(english="done")
+        fresh = _item(english="fresh")
+        picked = pick_daily_test_words(
+            [done, fresh], [], [], tested_today_ids={done.id}, limit=20,
+        )
+        assert [item.english_text for item in picked] == ["fresh"]
+
+    def test_tested_today_excluded_by_word_text(self):
+        """手写提交记账在 word-memory 专属 item 上（id 与课程 item 不同）——
+        只靠 id 排除会让刚测过的词当天重出，必须按归一化词文本也排除。"""
+        same_word_other_id = _item(english="Done")  # 大小写不同，同一个词
+        fresh = _item(english="fresh")
+        picked = pick_daily_test_words(
+            [same_word_other_id, fresh], [], [],
+            tested_today_ids=set(), tested_today_words={"done"}, limit=20,
+        )
+        assert [item.english_text for item in picked] == ["fresh"]
+
+    def test_duplicate_word_forms_deduped(self):
+        first = _item(english="apple")
+        same_word = _item(english="Apple ")  # 同一个词的另一条 item 行
+        picked = pick_daily_test_words([first, same_word], [], [], tested_today_ids=set(), limit=20)
+        assert len(picked) == 1
+
+    def test_non_word_items_skipped(self):
+        sentence = _item("sentence", "I like it.", "我喜欢它。")
+        word = _item(english="word1")
+        picked = pick_daily_test_words([sentence, word], [], [], tested_today_ids=set(), limit=20)
+        assert [item.english_text for item in picked] == ["word1"]
+
+    def test_limit_respected(self):
+        rows = [_item(english=f"w{i}") for i in range(30)]
+        assert len(pick_daily_test_words(rows, [], [], tested_today_ids=set(), limit=20)) == 20
+
+    def test_empty_pools_give_empty_queue(self):
+        assert pick_daily_test_words([], [], [], tested_today_ids=set(), limit=20) == []
+
+
 class _FakeHttpResponse(io.BytesIO):
     def __enter__(self):
         return self
@@ -332,3 +384,83 @@ class TestJudgeHandwriting:
                 base_url="https://ark.example.com/api/v3",
                 api_key="sk-test",
             )
+
+
+class TestJudgeHandwritingBoth:
+    """每日一测（handwriting_both）双关判定：英文服务端硬校验
+    （不信模型自判，同 tingxie 教训）+ 中文模型语义判定，两者都对才算对。"""
+
+    def _set_both(self, mock_urlopen, en: str, zh: str, en_ok: bool, zh_ok: bool, comment: str = ""):
+        mock_urlopen["next_response"] = _http_response(
+            json.dumps({
+                "recognized_english": en,
+                "recognized_chinese": zh,
+                "english_ok": en_ok,
+                "chinese_ok": zh_ok,
+                "comment": comment,
+            })
+        )
+
+    def _judge_both(self):
+        return judge_handwriting(
+            "data:image/png;base64,AAAA",
+            HANDWRITING_BOTH_TASK_TYPE,
+            expected_english="apple",
+            expected_chinese="苹果",
+            base_url="https://ark.example.com/api/v3",
+            api_key="sk-test",
+        )
+
+    def test_both_correct(self, mock_urlopen):
+        self._set_both(mock_urlopen, "apple", "苹果", True, True)
+        verdict = self._judge_both()
+        assert verdict.correct is True
+        assert verdict.english_ok is True
+        assert verdict.chinese_ok is True
+        assert verdict.recognized == "apple / 苹果"
+
+    def test_divergent_english_fails_despite_model_pass(self, mock_urlopen):
+        # 模型幻觉放行英文——服务端硬校验必须拦住。
+        self._set_both(mock_urlopen, "banana", "苹果", True, True)
+        verdict = self._judge_both()
+        assert verdict.english_ok is False
+        assert verdict.chinese_ok is True
+        assert verdict.correct is False
+
+    def test_exact_english_forces_pass_despite_model_strictness(self, mock_urlopen):
+        self._set_both(mock_urlopen, "Apple!", "苹果", False, True)
+        verdict = self._judge_both()
+        assert verdict.english_ok is True
+        assert verdict.correct is True
+
+    def test_right_english_wrong_chinese_is_wrong(self, mock_urlopen):
+        self._set_both(mock_urlopen, "apple", "香蕉", True, False)
+        verdict = self._judge_both()
+        assert verdict.english_ok is True
+        assert verdict.chinese_ok is False
+        assert verdict.correct is False
+
+    def test_empty_chinese_fails(self, mock_urlopen):
+        self._set_both(mock_urlopen, "apple", "", True, True)
+        verdict = self._judge_both()
+        assert verdict.chinese_ok is False
+        assert verdict.correct is False
+
+    def test_fallback_comment_points_at_english(self, mock_urlopen):
+        self._set_both(mock_urlopen, "aple", "苹果", False, True)
+        verdict = self._judge_both()
+        assert verdict.english_ok is False
+        assert "apple" in verdict.comment
+
+    def test_fallback_comment_points_at_chinese(self, mock_urlopen):
+        self._set_both(mock_urlopen, "apple", "香蕉", True, False)
+        verdict = self._judge_both()
+        assert "中文" in verdict.comment
+
+    def test_prompt_mentions_both_grids_and_word(self, mock_urlopen):
+        self._set_both(mock_urlopen, "apple", "苹果", True, True)
+        self._judge_both()
+        prompt_text = mock_urlopen["payload"]["messages"][0]["content"][1]["text"]
+        assert "四线" in prompt_text
+        assert "米字格" in prompt_text
+        assert "apple" in prompt_text

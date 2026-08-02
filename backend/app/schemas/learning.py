@@ -233,7 +233,8 @@ class HandwritingCheckRequest(BaseModel):
     # Canvas PNG as a data URL (the tingxie pattern — no multipart needed,
     # the image never touches disk). Bounded in the endpoint.
     image: str
-    task_type: Literal["handwriting_dictation", "handwriting_translation"]
+    # handwriting_both = 每日一测：一张卡写英文+中文意思，AI 判双关。
+    task_type: Literal["handwriting_dictation", "handwriting_translation", "handwriting_both"]
     learning_item_id: UUID | None = None
     # 复习队列微任务 id（手写化后键盘拼写微任务以手写形式出队，提交时
     # 带回此 id 才能结算 WordReviewTask）。
@@ -249,3 +250,6 @@ class HandwritingCheckResponse(BaseModel):
     comment: str
     expected: str
     learning_item_id: UUID | None = None
+    # 每日一测分项判定（其余任务类型为 None）
+    english_ok: bool | None = None
+    chinese_ok: bool | None = None

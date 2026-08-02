@@ -599,6 +599,7 @@ MODE_LABELS = {
     "sentence-handwriting": "句子手写",
     "handwriting-dictation": "手写听写",
     "handwriting-translation": "手写翻译",
+    "handwriting-both": "每日听写",
     "word-spelling": "拼写",
     "word-spelling-spelling": "拼写",
 }

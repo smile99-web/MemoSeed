@@ -177,6 +177,7 @@ export function getReviewTaskModeLabel(taskType: string | undefined): string {
     voice_practice: "🎤 主动发音",
     handwriting_dictation: "✍️ 手写听写",
     handwriting_translation: "✍️ 手写翻译",
+    handwriting_both: "📝 每日一测",
   };
   return taskType ? labels[taskType] ?? "专项复习" : "";
 }
