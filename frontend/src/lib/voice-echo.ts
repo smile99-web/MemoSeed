@@ -45,13 +45,19 @@ export async function initVoiceEcho(): Promise<boolean> {
 /**
  * Listen for voice-level sound for up to `windowMs` milliseconds.
  * Resolves true as soon as enough loud sound is detected (cumulative loud
- * time >= minLoudMs, or one sharp peak), false when the window expires.
- * `onVolume` receives 0..1 levels for the animated wave display.
+ * time >= minLoudMs, or one sharp peak when allowPeak), false when the
+ * window expires. `onVolume` receives 0..1 levels for the animated wave.
+ *
+ * The echo gate passes a text-scaled minLoudMs and allowPeak=false: a single
+ * shouted first word (or a clap) must NOT count as "read the sentence".
  */
 export function listenForVoice(
   windowMs: number,
   onVolume?: (level: number) => void,
+  options: { minLoudMs?: number; allowPeak?: boolean } = {},
 ): Promise<boolean> {
+  const minLoudMs = options.minLoudMs ?? 350;
+  const allowPeak = options.allowPeak ?? true;
   return new Promise((resolve) => {
     if (!mediaStream) {
       resolve(false);
@@ -76,7 +82,6 @@ export function listenForVoice(
 
       const LOUD_RMS = 0.03;
       const PEAK_RMS = 0.12;
-      const MIN_LOUD_MS = 350;
       const startedAt = Date.now();
       let loudMs = 0;
       let lastTick = startedAt;
@@ -108,7 +113,7 @@ export function listenForVoice(
         if (rms >= LOUD_RMS) {
           loudMs += elapsed;
         }
-        if (rms >= PEAK_RMS || loudMs >= MIN_LOUD_MS) {
+        if ((allowPeak && rms >= PEAK_RMS) || loudMs >= minLoudMs) {
           finish(true);
           return;
         }

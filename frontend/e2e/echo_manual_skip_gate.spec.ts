@@ -14,6 +14,9 @@ import { test, expect } from "@playwright/test";
 //     — a silent skip now costs more time than just reading aloud.
 //  2. A manual click earns NO points, does NOT increment the 开口 count, and
 //     is logged to the timeline as passed=false (honest like the giveup).
+//  3. The manual loudness pass demands SUSTAINED voice scaled to the text
+//     length (~450ms/word, no peak shortcut) — shouting only the first word
+//     must not count as having read the sentence (parent report 2026-08-02).
 //
 // Run: MIGRATION_TOKEN=<token> PLAYWRIGHT_SKIP_WEB_SERVER=1 npx playwright test e2e/echo_manual_skip_gate.spec.ts --project=chromium --workers=1
 
@@ -30,6 +33,91 @@ test.use({
     args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"],
   },
   permissions: ["microphone"],
+});
+
+test("first-word shout does NOT pass; sustained reading does (manual loudness gate)", async ({ page }) => {
+  test.skip(!TOKEN, "no token provided");
+  test.setTimeout(300000);
+
+  // Controllable tone mic: silence by default; window.__testBurst(ms) emits
+  // a loud 440 Hz burst for ms milliseconds — simulating "shout one word"
+  // (500ms) vs "read the whole sentence" (3000ms sustained).
+  await page.addInitScript(() => {
+    const ctx = new AudioContext();
+    const destination = ctx.createMediaStreamDestination();
+    (window as unknown as { __testBurst: (ms: number) => void }).__testBurst = (ms: number) => {
+      const oscillator = ctx.createOscillator();
+      oscillator.frequency.value = 440;
+      const gain = ctx.createGain();
+      gain.gain.value = 0.5;
+      oscillator.connect(gain);
+      gain.connect(destination);
+      oscillator.start();
+      window.setTimeout(() => {
+        try {
+          oscillator.stop();
+          oscillator.disconnect();
+          gain.disconnect();
+        } catch {
+          /* already stopped */
+        }
+      }, ms);
+    };
+    navigator.mediaDevices.getUserMedia = async (constraints) => {
+      if (!constraints || constraints.audio !== true) {
+        throw new Error("test mic only supports audio");
+      }
+      return destination.stream;
+    };
+  });
+  await page.goto(`${BASE}/login`, { waitUntil: "domcontentloaded" });
+  await page.evaluate(
+    ({ token, user }) => {
+      window.localStorage.setItem("memoseed_access_token", token);
+      window.localStorage.setItem("memoseed_user", JSON.stringify(user));
+    },
+    { token: TOKEN, user: USER },
+  );
+
+  await page.route("**/api/v1/learning/pronunciation-check", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ transcript: "", score: 0, passed: false, heard_speech: false }),
+    });
+  });
+  await page.route("**/api/v1/learning/read-aloud-events", async (route) => {
+    await route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ learning_item_id: null }) });
+  });
+  await page.route("**/api/v1/memory/points/award", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ total_points: 0 }) });
+  });
+
+  await page.goto(`${BASE}/learning/study?mode=speak`, { waitUntil: "domcontentloaded" });
+  await expect(page).not.toHaveURL(/login/, { timeout: 15000 });
+  await expect(page.getByText("正在加载学习内容")).toBeHidden({ timeout: 60000 });
+  await expect(page.getByText("轮到你了！大声读出来")).toBeVisible({ timeout: 30000 });
+
+  // Silence through 3 no-speech cycles → manual mode.
+  const manualBtn = page.locator("button", { hasText: /我读完了|先仔细听示范/ }).first();
+  await expect(manualBtn).toBeVisible({ timeout: 150000 });
+
+  // --- Phase 1: a 500ms first-word shout must NOT pass ---
+  await page.getByRole("button", { name: /再听一遍/ }).click();
+  await expect(page.locator("button", { hasText: "先仔细听示范…" }).first()).toBeDisabled({ timeout: 5000 });
+  // Wait for the listen window ("正在听…") then shout ONE word.
+  await expect(page.getByText("🎧 正在听…读出来！")).toBeVisible({ timeout: 30000 });
+  await page.evaluate(() => (window as unknown as { __testBurst: (ms: number) => void }).__testBurst(500));
+  // The window must end WITHOUT a pass: no success, button unlocks instead.
+  await expect(page.locator("button", { hasText: "我读完了！" }).first()).toBeEnabled({ timeout: 30000 });
+  await expect(page.getByText("🌟 真棒！")).toBeHidden();
+  await expect(page.getByText("轮到你了！大声读出来")).toBeVisible();
+
+  // --- Phase 2: sustained reading (3s of voice) DOES pass ---
+  await page.getByRole("button", { name: /再听一遍/ }).click();
+  await expect(page.getByText("🎧 正在听…读出来！")).toBeVisible({ timeout: 30000 });
+  await page.evaluate(() => (window as unknown as { __testBurst: (ms: number) => void }).__testBurst(3000));
+  await expect(page.getByText("🌟 真棒！")).toBeVisible({ timeout: 30000 });
 });
 
 test("manual-mode 我读完了 button is gated and earns no rewards", async ({ page }) => {
@@ -99,7 +187,7 @@ test("manual-mode 我读完了 button is gated and earns no rewards", async ({ p
   await expect(manualBtn).toBeVisible({ timeout: 150000 });
 
   // Replay the model reading: the button must IMMEDIATELY lock again and stay
-  // locked through TTS + the 7s listen window.
+  // locked through TTS + the 9s listen window.
   await page.getByRole("button", { name: /再听一遍/ }).click();
   await expect(page.locator("button", { hasText: "先仔细听示范…" }).first()).toBeDisabled({ timeout: 5000 });
 

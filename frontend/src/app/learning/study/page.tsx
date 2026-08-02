@@ -711,6 +711,12 @@ function StudyContent() {
   const echoAsrErrorsRef = useRef(0);
   const echoNoSpeechRef = useRef(0);
   const echoManualModeRef = useRef(false);
+  // Manual (degraded) mode is a COOLDOWN, not a session sentence: once it
+  // trips, the next echo card after ECHO_MANUAL_COOLDOWN_MS re-probes the
+  // ASR path. A transient blip (child walked away → 3 silences) used to
+  // disable real pronunciation checking for the REST OF THE SESSION —
+  // every later card became a loudness free-pass.
+  const echoManualUntilRef = useRef(0);
   const echoGateActiveRef = useRef(false);
   const echoPromptRef = useRef<{ text: string; translation: string } | null>(null);
   // Mirrors "is a handwriting card on screen" for the study-timer effect
@@ -727,6 +733,9 @@ function StudyContent() {
   const ECHO_MAX_ATTEMPTS = 5;
   const ECHO_MAX_CONSECUTIVE_ASR_ERRORS = 2;
   const ECHO_MAX_CONSECUTIVE_NO_SPEECH = 3;
+  // How long manual mode lasts before the next card re-probes ASR (see
+  // echoManualUntilRef above).
+  const ECHO_MANUAL_COOLDOWN_MS = 10 * 60 * 1000;
 
   const [encodingStage, setEncodingStage] = useState<EncodingStage | null>(null);
   const [encodingWord, setEncodingWord] = useState("");
@@ -3024,8 +3033,11 @@ function StudyContent() {
   // reading must be re-read; 5 failed attempts auto-advance so the child is
   // never trapped. When the mic/ASR is unavailable (denied permission,
   // repeated ASR errors, constant silence) the card degrades to manual mode
-  // (我读完了 button + loudness detection) — the gate STAYS ON there too:
-  // the advance still goes through completeEcho, never around it.
+  // (我读完了 button + sustained-loudness detection) for a 10-minute
+  // cooldown, then the next card re-probes ASR — the gate STAYS ON
+  // throughout: the advance still goes through completeEcho, never around
+  // it, and even the degraded loudness pass demands sustained voice scaled
+  // to the text length (one shouted word is not a read sentence).
   // ---------------------------------------------------------------------
 
   // Read-aloud telemetry: EVERY finished echo gate (pass or giveup) becomes
@@ -3062,11 +3074,13 @@ function StudyContent() {
     }).catch(() => undefined);
   }
 
-  // Switch to degraded (manual) echo mode for the rest of the session:
-  // loudness auto-detect + the manual 我读完了 button replace ASR scoring.
-  // The pronunciation GATE stays on — the child still reads aloud (or, with a
-  // broken mic, explicitly confirms) before every advance.
+  // Switch to degraded (manual) echo mode for a COOLDOWN window: loudness
+  // auto-detect (now requiring sustained voice, see the effect below) + the
+  // manual 我读完了 button replace ASR scoring. Re-tripping while already
+  // degraded simply extends the cooldown; when it expires the next echo
+  // card re-probes the ASR path so the real pronunciation gate comes back.
   function enterEchoManualMode(hint?: string) {
+    echoManualUntilRef.current = Date.now() + ECHO_MANUAL_COOLDOWN_MS;
     if (echoManualModeRef.current) {
       return;
     }
@@ -3205,7 +3219,8 @@ function StudyContent() {
     const sequenceId = startVoiceSequence();
     let cancelled = false;
 
-    const isManual = echoManualModeRef.current || !isPronunciationCheckSupported();
+    const isManual = !isPronunciationCheckSupported() || Date.now() < echoManualUntilRef.current;
+    const echoWords = Math.max(1, tokenizeEnglish(echoPrompt.text).length);
     if (isManual) {
       // Degraded path: pre-ASR behavior — loudness detection auto-completes,
       // manual button stays available. The button starts DISABLED: it only
@@ -3213,6 +3228,10 @@ function StudyContent() {
       // without detecting a voice, so a silent one-click skip takes longer
       // than just reading the text aloud.
       setEchoManualReady(false);
+      // Sustained-voice requirement scales with the text (~450ms/word):
+      // shouting only the FIRST word (~350ms of voice) must NOT count as
+      // "read the sentence" — that was the parent's bug report.
+      const minVoiceMs = Math.min(5000, Math.max(900, 450 * echoWords));
       void (async () => {
         await speakClearEnglish(sequenceId, echoPrompt.text, settings, true);
         if (!isCurrent()) return;
@@ -3233,11 +3252,11 @@ function StudyContent() {
             return;
           }
           setEchoStatus("listening");
-          const detected = await listenForVoice(7000, (level) => {
+          const detected = await listenForVoice(9000, (level) => {
             if (isCurrent()) {
               setEchoVolume(level);
             }
-          });
+          }, { minLoudMs: minVoiceMs, allowPeak: false });
           if (!isCurrent()) {
             return;
           }
@@ -3254,6 +3273,10 @@ function StudyContent() {
         cancelled = true;
       };
     }
+    // Cooldown expired (or never tripped): real ASR gate. Restore the gated
+    // UI in case the previous card was degraded.
+    echoManualModeRef.current = false;
+    setEchoManualMode(false);
 
     void (async () => {
       // Play the full model reading FIRST and wait for it — recording during
@@ -3304,6 +3327,12 @@ function StudyContent() {
       setEchoStatus("listening");
       setEchoVolume(0);
       const attempt = await recordAndRecognize(echoPrompt.text, accessToken, {
+        // Slow child readers pause between words: scale the trailing-silence
+        // cutoff and the hard cap with the text length — otherwise the
+        // recording stops after the FIRST word's pause and a full sentence
+        // can never be judged (the other half of the parent's bug report).
+        silenceMs: echoWords >= 4 ? 2000 : 1300,
+        maxDurationMs: Math.min(30000, Math.max(10000, 8000 + echoWords * 1200)),
         onVolume: (level) => {
           if (isCurrent()) {
             setEchoVolume(level);
