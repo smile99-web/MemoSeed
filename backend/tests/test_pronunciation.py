@@ -126,3 +126,46 @@ def test_real_asr_failure_still_raises(monkeypatch: pytest.MonkeyPatch):
 def test_ok_status_returns_transcript(monkeypatch: pytest.MonkeyPatch):
     _patch_urlopen(monkeypatch, "20000000", "Success", text="Give me a pen")
     assert recognize_speech_flash(b"fake-audio", api_key="test-key") == "Give me a pen"
+
+
+def test_word_coverage_pass_accented_transcription():
+    # ASR hears accent-y near-misses of every word — still a basically-correct read.
+    result = score_pronunciation("Give me a pen", "giv me a pin")
+    assert result.passed is True
+    assert result.heard_speech is True
+
+
+def test_word_coverage_pass_dropped_function_words():
+    result = score_pronunciation("This is a big tree", "this is big tree")
+    assert result.passed is True
+
+
+def test_word_coverage_pass_homophone_transcription():
+    result = score_pronunciation("I can swim", "eye can swim")
+    assert result.passed is True
+
+
+def test_word_coverage_pass_most_words_correct():
+    # Three of four words right — basically correct even if one word differs.
+    result = score_pronunciation("Give me a pen", "give me a book")
+    assert result.passed is True
+
+
+def test_word_coverage_rejects_babbling_one_word():
+    # Repeating a single word of a longer sentence must NOT pass.
+    result = score_pronunciation("The cat is on the mat", "cat cat cat")
+    assert result.passed is False
+    assert result.heard_speech is True
+
+
+def test_word_coverage_rejects_first_word_only():
+    # "只读第一个词" regression guard — one word of a four-word sentence fails.
+    result = score_pronunciation("Give me a pen", "give")
+    assert result.passed is False
+    assert result.heard_speech is True
+
+
+def test_word_coverage_rejects_unrelated_speech():
+    result = score_pronunciation("Give me a pen", "I like eating apples and bananas")
+    assert result.passed is False
+    assert result.heard_speech is True

@@ -33,10 +33,21 @@ ASR_STATUS_OK = "20000000"
 # manual mode, which is exactly the bug the parent reported.
 ASR_NO_SPEECH_STATUSES = {"20000003"}
 
-# Lenient pass bar: max() of the three similarity metrics must reach this.
-# Tuned so ASR imperfections (case, punctuation, a/an swaps like
-# "Give Me Your pen." for "Give me a pen") pass while unrelated speech fails.
+# Lenient pass bar: max() of the similarity metrics must reach this. Kept at
+# 0.6 so completely-unrelated speech ("乱读") and reading only one word still
+# FAIL — this is the anti-garbage guard, not the leniency lever.
 PASS_THRESHOLD = 0.6
+
+# "Word coverage" gate — the primary lenient path for child voices. The child
+# is judged to have read the sentence basically-correctly when at least
+# PASS_COVERAGE_FRACTION of the expected words each fuzzy-match (char
+# similarity >= WORD_COVERAGE_BAR) some word the ASR actually heard. This
+# tolerates accent-y near-misses ("giv me a pin" for "give me a pen"), dropped
+# function words ("this is big tree" for "this is a big tree") and ASR
+# mangling, while completely unrelated speech shares none of the expected
+# words and a child who only babbles one repeated word covers too few.
+WORD_COVERAGE_BAR = 0.6
+PASS_COVERAGE_FRACTION = 0.5
 
 _WORD_RE = re.compile(r"[a-z']+")
 
@@ -121,12 +132,14 @@ def score_pronunciation(expected: str, transcript: str) -> PronunciationScore:
 
     expected_norm = _normalize(expected)
     actual_words = _words(transcript)
+    coverage = _word_coverage(expected_words, actual_words)
     score = max(
         _char_ratio(expected_norm, transcript_norm),
         _word_f1(expected_words, actual_words),
         _mean_best_word_score(expected_words, actual_words),
     )
-    return PronunciationScore(score=score, passed=score >= PASS_THRESHOLD, heard_speech=True)
+    passed = score >= PASS_THRESHOLD or coverage >= PASS_COVERAGE_FRACTION
+    return PronunciationScore(score=score, passed=passed, heard_speech=True)
 
 
 def _normalize(text: str) -> str:
@@ -172,3 +185,21 @@ def _mean_best_word_score(expected: list[str], actual: list[str]) -> float:
     for word in expected:
         total += max((_char_ratio(word, candidate) for candidate in actual), default=0.0)
     return total / len(expected)
+
+
+def _word_coverage(expected: list[str], actual: list[str]) -> float:
+    """Fraction of expected words each fuzzy-matched to some heard word.
+
+    Each expected word counts as "read" when it is char-similar enough
+    (>= WORD_COVERAGE_BAR) to at least one word the ASR heard. A child voice
+    ASR transcribes with accent-y near-misses ("giv me a pin") or with small
+    function words dropped still reaches a high fraction, while a completely
+    unrelated sentence shares almost none of the expected words.
+    """
+    if not expected or not actual:
+        return 0.0
+    covered = 0
+    for word in expected:
+        if any(_char_ratio(word, candidate) >= WORD_COVERAGE_BAR for candidate in actual):
+            covered += 1
+    return covered / len(expected)

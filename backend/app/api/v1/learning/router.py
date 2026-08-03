@@ -2294,6 +2294,14 @@ async def check_pronunciation(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     result = score_pronunciation(expected, transcript)
+    logger.info(
+        "pronunciation-check expected=%r transcript=%r score=%.3f passed=%s heard_speech=%s",
+        expected,
+        transcript,
+        result.score,
+        result.passed,
+        result.heard_speech,
+    )
     return PronunciationCheckResponse(
         transcript=transcript,
         score=round(result.score, 3),

@@ -15,6 +15,12 @@ from app.models.word_memory_state import WordMemoryState
 from app.models.word_review_task import WordReviewTask
 from app.models.word_translation import WordTranslation
 
+# Route app-level loggers (e.g. the per-request pronunciation-check details)
+# to stderr at INFO so systemd/journald captures them. uvicorn configures its
+# own loggers; this only gives the root handler a level high enough that
+# logger.info() lines survive instead of being silently dropped.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
 logger = logging.getLogger(__name__)
 
 
