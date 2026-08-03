@@ -42,7 +42,7 @@ class TestFallback:
     def test_primary_success_does_not_touch_fallback(self, monkeypatch):
         calls: list[tuple[str, str]] = []
 
-        def fake_dispatch(settings, prompt):
+        def fake_dispatch(settings, prompt, timeout=None):
             calls.append((settings.base_url, settings.model))
             return "你好"
 
@@ -53,7 +53,7 @@ class TestFallback:
     def test_primary_failure_retries_with_attached_fallback(self, monkeypatch):
         calls: list[str] = []
 
-        def fake_dispatch(settings, prompt):
+        def fake_dispatch(settings, prompt, timeout=None):
             calls.append(settings.model)
             if len(calls) == 1:
                 raise ValueError("LLM translation failed: HTTP 429")
@@ -68,7 +68,7 @@ class TestFallback:
         monkeypatch.setattr(llm_translation, "_env_fallback_settings", lambda: FALLBACK)
         calls: list[str] = []
 
-        def fake_dispatch(settings, prompt):
+        def fake_dispatch(settings, prompt, timeout=None):
             calls.append(settings.model)
             if len(calls) == 1:
                 raise ValueError("boom")
@@ -79,7 +79,7 @@ class TestFallback:
         assert calls == ["deepseek-v4-flash-modelhub", "deepseek-v4-flash"]
 
     def test_no_fallback_reraises_original_error(self, monkeypatch):
-        def fake_dispatch(settings, prompt):
+        def fake_dispatch(settings, prompt, timeout=None):
             raise ValueError("primary is down")
 
         monkeypatch.setattr(llm_translation, "_dispatch_llm_generate", fake_dispatch)
@@ -87,7 +87,7 @@ class TestFallback:
             call_llm_generate(PRIMARY, "hi")
 
     def test_fallback_failure_propagates_its_error(self, monkeypatch):
-        def fake_dispatch(settings, prompt):
+        def fake_dispatch(settings, prompt, timeout=None):
             if settings.model == PRIMARY.model:
                 raise ValueError("primary down")
             raise ValueError("fallback also down")
