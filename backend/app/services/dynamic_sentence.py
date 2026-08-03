@@ -110,22 +110,28 @@ def _pick_fallback_template(focus_word: str, known_words: list[str]) -> str:
     # sent 4/7 templates down the one-arg branch → IndexError → 500 whenever
     # the LLM was down and the hash picked an indexed template (70 500s/wk).
     placeholder_count = len(re.findall(r"\{\d*\}", pattern))
+
+    def _finish(text: str) -> str:
+        # Templates already end with "." — appending another produced
+        # "This word can swim.." (masked until now by the IndexError).
+        return text if text.endswith(".") else text + "."
+
     if placeholder_count == 2:
         if pattern in _FALLBACK_VERB_SETS:
             verb = word_options[option_index % len(word_options)]
             noun = support_words[option_index % len(support_words)]
             # "This {0} can {1}." slots are (noun, verb), not (verb, noun).
             if pattern == "This {0} can {1}.":
-                return pattern.format(noun, verb) + "."
-            return pattern.format(verb, noun) + "."
+                return _finish(pattern.format(noun, verb))
+            return _finish(pattern.format(verb, noun))
         elif pattern in _FALLBACK_ADJ_SETS:
             noun = support_words[option_index % len(support_words)]
             adj = word_options[(option_index + 1) % len(word_options)]
-            return pattern.format(noun, adj) + "."
+            return _finish(pattern.format(noun, adj))
         else:
-            return pattern.format(focus, word_options[option_index % len(word_options)]) + "."
+            return _finish(pattern.format(focus, word_options[option_index % len(word_options)]))
     else:
-        return pattern.format(focus) + "."
+        return _finish(pattern.format(focus))
 
 
 def unique_preserve_order(words: list[str]) -> list[str]:
