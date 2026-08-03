@@ -36,21 +36,25 @@ class CourseRead(CourseCreate):
 
 
 class PackageExportItem(BaseModel):
-    item_type: str
-    english_text: str
-    chinese_text: str
-    phonetic: str | None = None
-    difficulty_level: int = 1
+    # Import payloads are untrusted JSON: validate against the DB check
+    # constraints (ck_learning_items_item_type, ck_learning_items_difficulty_level)
+    # so a hand-edited file gets a clean 422 instead of a 500 mid-import
+    # (2026-08-04 audit).
+    item_type: str = Field(pattern="^(word|phrase|sentence)$")
+    english_text: str = Field(min_length=1, max_length=500)
+    chinese_text: str = Field(default="", max_length=500)
+    phonetic: str | None = Field(default=None, max_length=200)
+    difficulty_level: int = Field(default=1, ge=1, le=5)
     sort_order: int = 0
-    unit_label: str | None = None
+    unit_label: str | None = Field(default=None, max_length=100)
 
 
 class PackageExportCourse(BaseModel):
     id: UUID | None = None
-    name: str
-    description: str
+    name: str = Field(min_length=1, max_length=120)  # courses.name is VARCHAR(120)
+    description: str = ""
     prerequisite_course_id: UUID | None = None
-    min_mastery_ratio: float = 0.75
+    min_mastery_ratio: float = Field(default=0.75, ge=0.0, le=1.0)
     items: list[PackageExportItem] = []
 
 

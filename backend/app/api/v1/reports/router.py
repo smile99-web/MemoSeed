@@ -261,7 +261,7 @@ def import_user_data(
             english_text=str(row.get("english_text") or ""),
             chinese_text=str(row.get("chinese_text") or ""),
             phonetic=str(row.get("phonetic")) if row.get("phonetic") is not None else None,
-            difficulty_level=as_int(row.get("difficulty_level"), 1),
+            difficulty_level=clamp_int(row.get("difficulty_level"), 1, 1, 5),
             source=str(row.get("source")) if row.get("source") is not None else "import",
         )
         if not learning_item.english_text:
@@ -298,9 +298,9 @@ def import_user_data(
             existing_memory_states[learning_item_id] = memory_state
         # Upsert: overwrite scheduling fields with the imported snapshot
         memory_state.interval_days = as_int(row.get("interval_days"), 0)
-        memory_state.ease_factor = as_float(row.get("ease_factor"), 2.5)
-        memory_state.memory_strength = as_float(row.get("memory_strength"), 0.0)
-        memory_state.forget_risk = as_float(row.get("forget_risk"), 1.0)
+        memory_state.ease_factor = clamp_float(row.get("ease_factor"), 2.5, 1.3, 10.0)
+        memory_state.memory_strength = clamp_float(row.get("memory_strength"), 0.0, 0.0, 1.0)
+        memory_state.forget_risk = clamp_float(row.get("forget_risk"), 1.0, 0.0, 1.0)
         memory_state.repetition_count = as_int(row.get("repetition_count"), 0)
         memory_state.lapse_count = as_int(row.get("lapse_count"), 0)
         memory_state.consecutive_correct_count = as_int(row.get("consecutive_correct_count"), 0)
@@ -375,7 +375,9 @@ def import_user_data(
         wms.word: wms for wms in db.scalars(select(WordMemoryState).where(WordMemoryState.user_id == current_user.id)).all()
     }
     for row in as_rows(payload.get("word_memory_states")):
-        word = str(row.get("word") or "").strip().lower()
+        # word_memory_states.word is VARCHAR(120) — truncate overlong import
+        # values instead of 500ing on a DataError (2026-08-04).
+        word = str(row.get("word") or "").strip().lower()[:120]
         if not word:
             continue
         word_state = existing_word_states.get(word)
@@ -389,9 +391,9 @@ def import_user_data(
         word_state.learning_item_id = id_maps["learning_items"].get(str(row.get("learning_item_id"))) if row.get("learning_item_id") else None
         word_state.memory_state_id = id_maps["memory_states"].get(str(row.get("memory_state_id"))) if row.get("memory_state_id") else None
         word_state.status = str(row.get("status") or "teaching")
-        word_state.memory_strength = as_float(row.get("memory_strength"), 0.0)
-        word_state.forget_risk = as_float(row.get("forget_risk"), 1.0)
-        word_state.priority_score = as_float(row.get("priority_score"), 1.0)
+        word_state.memory_strength = clamp_float(row.get("memory_strength"), 0.0, 0.0, 1.0)
+        word_state.forget_risk = clamp_float(row.get("forget_risk"), 1.0, 0.0, 1.0)
+        word_state.priority_score = clamp_float(row.get("priority_score"), 1.0, 0.0, 1.0)
         word_state.consecutive_correct_count = as_int(row.get("consecutive_correct_count"), 0)
         word_state.consecutive_error_count = as_int(row.get("consecutive_error_count"), 0)
         word_state.recall_correct_count = as_int(row.get("recall_correct_count"), 0)
@@ -499,12 +501,12 @@ def import_user_data(
             db.add(daily_plan)
             db.flush()
             existing_plans[plan_date] = daily_plan
-        daily_plan.warmup_review_minutes = as_int(row.get("warmup_review_minutes"), 10)
-        daily_plan.new_learning_minutes = as_int(row.get("new_learning_minutes"), 20)
-        daily_plan.sentence_training_minutes = as_int(row.get("sentence_training_minutes"), 20)
-        daily_plan.mistake_reinforcement_minutes = as_int(row.get("mistake_reinforcement_minutes"), 10)
-        daily_plan.new_word_limit = as_int(row.get("new_word_limit"), 0)
-        daily_plan.new_phrase_limit = as_int(row.get("new_phrase_limit"), 0)
+        daily_plan.warmup_review_minutes = clamp_int(row.get("warmup_review_minutes"), 10, 0, 600)
+        daily_plan.new_learning_minutes = clamp_int(row.get("new_learning_minutes"), 20, 0, 600)
+        daily_plan.sentence_training_minutes = clamp_int(row.get("sentence_training_minutes"), 20, 0, 600)
+        daily_plan.mistake_reinforcement_minutes = clamp_int(row.get("mistake_reinforcement_minutes"), 10, 0, 600)
+        daily_plan.new_word_limit = clamp_int(row.get("new_word_limit"), 0, 0, 500)
+        daily_plan.new_phrase_limit = clamp_int(row.get("new_phrase_limit"), 0, 0, 500)
         daily_plan.strategy = as_dict(row.get("strategy"))
         summary["daily_plans"] += 1
 
@@ -519,12 +521,12 @@ def import_user_data(
             db.add(report)
             db.flush()
             existing_reports[report_date] = report
-        report.accuracy_rate = as_float(row.get("accuracy_rate"), 0.0)
-        report.spelling_error_rate = as_float(row.get("spelling_error_rate"), 0.0)
-        report.sentence_error_rate = as_float(row.get("sentence_error_rate"), 0.0)
-        report.study_duration_minutes = as_int(row.get("study_duration_minutes"), 0)
-        report.review_backlog_count = as_int(row.get("review_backlog_count"), 0)
-        report.high_forget_risk_count = as_int(row.get("high_forget_risk_count"), 0)
+        report.accuracy_rate = clamp_float(row.get("accuracy_rate"), 0.0, 0.0, 1.0)
+        report.spelling_error_rate = clamp_float(row.get("spelling_error_rate"), 0.0, 0.0, 1.0)
+        report.sentence_error_rate = clamp_float(row.get("sentence_error_rate"), 0.0, 0.0, 1.0)
+        report.study_duration_minutes = clamp_int(row.get("study_duration_minutes"), 0, 0, 1440)
+        report.review_backlog_count = clamp_int(row.get("review_backlog_count"), 0, 0, 100000)
+        report.high_forget_risk_count = clamp_int(row.get("high_forget_risk_count"), 0, 0, 100000)
         report.summary = str(row.get("summary") or "")
         report.next_day_strategy = as_dict(row.get("next_day_strategy"))
         summary["ai_daily_reports"] += 1
@@ -624,6 +626,16 @@ def as_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def clamp_float(value: Any, default: float, low: float, high: float) -> float:
+    """Import payloads are untrusted: keep values inside the DB check
+    constraints instead of 500ing on a hand-edited export (2026-08-04)."""
+    return min(max(as_float(value, default), low), high)
+
+
+def clamp_int(value: Any, default: int, low: int, high: int) -> int:
+    return min(max(as_int(value, default), low), high)
 
 
 def as_bool(value: Any) -> bool:

@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.learning_item import LearningItem
@@ -123,7 +123,10 @@ def sync_word_memory_from_review(
     word_state.last_reviewed_at = now
     word_state.next_micro_review_at = memory_state.next_review_at
 
-    if is_correct and review_mode.startswith("word-recall"):
+    # 2026-08-04: handwriting-* 也算无提示产出（孩子凭记忆手写英文/中文，
+    # 不看答案）——08-02 全面手写化后所有拼写产出都是 handwriting 模式，
+    # 不纳入的话 no_hint_correct_date_count 永远冻结、词永远无法毕业。
+    if is_correct and (review_mode.startswith("word-recall") or review_mode.startswith("handwriting-")):
         local_date = now.astimezone(LOCAL_TIMEZONE).date()
         if word_state.last_no_hint_correct_date != local_date:
             word_state.no_hint_correct_date_count += 1
@@ -182,8 +185,14 @@ DEMOTION_RECENT_ACCURACY = 0.60
 
 
 def _real_word_test_clause():
+    # 2026-08-04: handwriting-* 是真实测试（无辅助、可失败），必须计入
+    # P21 毕业统计——否则手写时代 get_recent_word_test_stats 永远返回
+    # None/旧数据，P21 路径对纯手写词完全失效。
     return (
-        ReviewLog.review_mode.like("word-%"),
+        or_(
+            ReviewLog.review_mode.like("word-%"),
+            ReviewLog.review_mode.like("handwriting-%"),
+        ),
         ReviewLog.review_mode.notin_(sorted(ASSISTED_REVIEW_MODES)),
     )
 

@@ -3,6 +3,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -145,52 +146,62 @@ def import_course_package(
     db.commit()
     db.refresh(package)
 
-    items_count = 0
-    imported_courses: list[Course] = []
-    course_id_map: dict[UUID, UUID] = {}
-    for export_course in payload.courses:
-        course = Course(
-            user_id=current_user.id,
-            package_id=package.id,
-            name=export_course.name.strip(),
-            description=export_course.description.strip(),
-            prerequisite_course_id=None,
-            min_mastery_ratio=export_course.min_mastery_ratio,
-        )
-        db.add(course)
-        db.commit()
-        db.refresh(course)
-        imported_courses.append(course)
-        if export_course.id is not None:
-            course_id_map[export_course.id] = course.id
-
-        for export_item in export_course.items:
-            if not export_item.english_text.strip():
-                continue
-            item = LearningItem(
+    # Single-transaction import (2026-08-04): previously each course was
+    # committed separately, so an IntegrityError mid-loop left the package
+    # and earlier courses committed (partial import; the retry then
+    # duplicated courses as "name (2)"). Flush per course, commit once.
+    try:
+        items_count = 0
+        imported_courses: list[Course] = []
+        course_id_map: dict[UUID, UUID] = {}
+        for export_course in payload.courses:
+            course = Course(
                 user_id=current_user.id,
-                course_id=course.id,
-                item_type=export_item.item_type,
-                english_text=export_item.english_text.strip(),
-                chinese_text=export_item.chinese_text.strip(),
-                phonetic=export_item.phonetic,
-                difficulty_level=export_item.difficulty_level,
-                sort_order=export_item.sort_order,
-                unit_label=export_item.unit_label,
+                package_id=package.id,
+                name=export_course.name.strip(),
+                description=export_course.description.strip(),
+                prerequisite_course_id=None,
+                min_mastery_ratio=export_course.min_mastery_ratio,
             )
-            db.add(item)
-            items_count += 1
-        db.commit()
-        resequence_course_items(db, current_user.id, course.id)
+            db.add(course)
+            db.flush()
+            imported_courses.append(course)
+            if export_course.id is not None:
+                course_id_map[export_course.id] = course.id
 
-    for index, export_course in enumerate(payload.courses):
-        if export_course.prerequisite_course_id is None or index >= len(imported_courses):
-            continue
-        mapped_prerequisite_id = course_id_map.get(export_course.prerequisite_course_id)
-        if mapped_prerequisite_id is None:
-            continue
-        imported_courses[index].prerequisite_course_id = mapped_prerequisite_id
-    db.commit()
+            for export_item in export_course.items:
+                if not export_item.english_text.strip():
+                    continue
+                item = LearningItem(
+                    user_id=current_user.id,
+                    course_id=course.id,
+                    item_type=export_item.item_type,
+                    english_text=export_item.english_text.strip(),
+                    chinese_text=export_item.chinese_text.strip(),
+                    phonetic=export_item.phonetic,
+                    difficulty_level=export_item.difficulty_level,
+                    sort_order=export_item.sort_order,
+                    unit_label=export_item.unit_label,
+                )
+                db.add(item)
+                items_count += 1
+            db.flush()
+            resequence_course_items(db, current_user.id, course.id)
+
+        for index, export_course in enumerate(payload.courses):
+            if export_course.prerequisite_course_id is None or index >= len(imported_courses):
+                continue
+            mapped_prerequisite_id = course_id_map.get(export_course.prerequisite_course_id)
+            if mapped_prerequisite_id is None:
+                continue
+            imported_courses[index].prerequisite_course_id = mapped_prerequisite_id
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"课程包数据不合法，未导入任何内容：{exc.orig}",
+        ) from exc
 
     return PackageImportResult(
         imported_package_name=package.name,

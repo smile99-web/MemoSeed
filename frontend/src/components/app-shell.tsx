@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect } from "react";
+import { usePathname, useRouter } from "next/navigation";
 
 import { DeviceProvider } from "@/components/device-provider";
 import type { DeviceInfo } from "@/lib/device";
+import { onSessionExpired } from "@/lib/auth";
 
 const CHUNK_ERROR_PATTERN = /ChunkLoadError|Loading chunk [\w-]+ failed|Failed to fetch dynamically imported module|error loading dynamically imported module/i;
 const RELOAD_FLAG_KEY = "memoseed_chunk_reload_at";
@@ -54,5 +56,18 @@ export function AppShell({
   initialDevice: DeviceInfo;
 }) {
   useChunkErrorAutoReload();
+  const router = useRouter();
+  const pathname = usePathname();
+  // When the refresh token truly dies, lib/auth clears the session and fires
+  // this event. Until now nothing listened: every fetch then failed quietly
+  // and queue pages cheerfully rendered "今天没有可测的单词啦！" as if the
+  // queue were genuinely empty. Route to login instead.
+  useEffect(() => {
+    return onSessionExpired(() => {
+      if (pathname !== "/login" && pathname !== "/register") {
+        router.replace("/login");
+      }
+    });
+  }, [pathname, router]);
   return <DeviceProvider initialDevice={initialDevice}>{children}</DeviceProvider>;
 }

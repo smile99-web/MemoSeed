@@ -2,7 +2,10 @@ from pydantic import BaseModel, Field
 
 
 class SpeechSynthesisRequest(BaseModel):
-    text: str = Field(min_length=1)
+    # max_length: unbounded text let any authenticated user run up the shared
+    # server TTS key bill (and block 60s per call) with megabyte payloads.
+    # 500 chars covers the longest course sentence many times over.
+    text: str = Field(min_length=1, max_length=500)
     voice: str | None = None
     language: str | None = None
     speech_rate: int | None = Field(default=None, ge=-50, le=100)

@@ -143,6 +143,7 @@ def pick_review_word_tasks(
     rows: list[tuple[Any, float | None, datetime | None, bool]],
     *,
     tested_today_ids: set[UUID],
+    tested_today_words: frozenset[str] | set[str] = frozenset(),
     limit: int,
 ) -> list[tuple[Any, str]]:
     """单词复习部分：到期复习词优先（与"单词复习"模式同源的 next_review_at
@@ -151,10 +152,15 @@ def pick_review_word_tasks(
 
     今日已测的排除；有中文释义的词交替 听写/翻译（两个方向都练），
     无释义只听写。到期词内部按最弱优先排序（手写专攻打不牢的词）。
+    已测判定同时看 id 和归一化词文本——手写记账在 word-memory 孪生
+    item 上，只按 id 排除会漏掉课程侧同词 item（2026-08-04 修复）。
     """
     pool: list[tuple[Any, float, datetime | None, bool]] = []
     for item, strength, last_tested_at, is_due in rows:
         if getattr(item, "id", None) in tested_today_ids:
+            continue
+        word_key = (getattr(item, "english_text", "") or "").strip().lower()
+        if word_key and word_key in tested_today_words:
             continue
         if getattr(item, "item_type", None) != "word":
             continue
@@ -184,6 +190,7 @@ def pick_course_dictation_tasks(
     rows: list[Any],
     *,
     tested_today_ids: set[UUID],
+    tested_today_words: frozenset[str] | set[str] = frozenset(),
     limit: int,
 ) -> list[tuple[Any, str]]:
     """课程句子部分（中考英语 第1课→第10课）：全部听写。
@@ -191,12 +198,16 @@ def pick_course_dictation_tasks(
     rows 由调用方按 (课次, sort_order) 排好序传入——这里不重复排序，
     只过滤 今日已测 / 不适合手写（过长），顺序取前 limit 个。
     课程句子是"学习内容"，不要求学过（repetition_count 可为 0）。
+    已测判定同时看 id 和归一化文本（句子手写记账可能落在别的 item 上）。
     """
     tasks: list[tuple[Any, str]] = []
     for item in rows:
         if len(tasks) >= limit:
             break
         if getattr(item, "id", None) in tested_today_ids:
+            continue
+        text_key = (getattr(item, "english_text", "") or "").strip().lower()
+        if text_key and text_key in tested_today_words:
             continue
         if not is_dictation_candidate(item):
             continue
@@ -209,6 +220,7 @@ def compose_daily_handwriting_queue(
     course_rows: list[Any],
     *,
     tested_today_ids: set[UUID],
+    tested_today_words: frozenset[str] | set[str] = frozenset(),
     limit: int,
     word_quota: int = HANDWRITING_WORD_DAILY_QUOTA,
 ) -> list[tuple[Any, str]]:
@@ -219,11 +231,11 @@ def compose_daily_handwriting_queue(
     队列自然回到纯单词复习；到期词不足时最弱学过词补齐）。
     """
     word_quota = max(0, min(word_quota, limit))
-    words = pick_review_word_tasks(word_rows, tested_today_ids=tested_today_ids, limit=word_quota)
-    course = pick_course_dictation_tasks(course_rows, tested_today_ids=tested_today_ids, limit=limit - len(words))
+    words = pick_review_word_tasks(word_rows, tested_today_ids=tested_today_ids, tested_today_words=tested_today_words, limit=word_quota)
+    course = pick_course_dictation_tasks(course_rows, tested_today_ids=tested_today_ids, tested_today_words=tested_today_words, limit=limit - len(words))
     if len(course) < limit - len(words):
         # 课程句子不足 → 复习词多补（含前面已选的，顺序保持一致）
-        words = pick_review_word_tasks(word_rows, tested_today_ids=tested_today_ids, limit=limit - len(course))
+        words = pick_review_word_tasks(word_rows, tested_today_ids=tested_today_ids, tested_today_words=tested_today_words, limit=limit - len(course))
     return (words + course)[:limit]
 
 
@@ -361,8 +373,15 @@ def judge_handwriting(
 
     try:
         body = json.loads(raw.decode("utf-8"))
-        text = (body["choices"][0]["message"]["content"] or "").strip()
-    except (ValueError, KeyError, IndexError, UnicodeDecodeError) as exc:
+        content = body["choices"][0]["message"]["content"]
+        if isinstance(content, list):
+            # Some multimodal endpoints return content as a list of parts.
+            text = " ".join(
+                str(part.get("text", "")) for part in content if isinstance(part, dict)
+            ).strip()
+        else:
+            text = (content or "").strip()
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError, UnicodeDecodeError) as exc:
         raise ValueError("Handwriting recognition returned an invalid response") from exc
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*```$", "", text)
@@ -372,15 +391,15 @@ def judge_handwriting(
         raise ValueError(f"Handwriting recognition result parse failed: {text[:200]}") from exc
 
     recognized = str(result.get("recognized") or "").strip()
-    model_correct = bool(result.get("correct"))
+    model_correct = _json_bool(result.get("correct"))
     comment = str(result.get("comment") or "").strip()
 
     if task_type == HANDWRITING_BOTH_TASK_TYPE:
         # 每日一测：英文+中文双关判定。
         recognized_en = str(result.get("recognized_english") or "").strip()
         recognized_zh = str(result.get("recognized_chinese") or "").strip()
-        en_ok = bool(result.get("english_ok"))
-        zh_ok = bool(result.get("chinese_ok"))
+        en_ok = _json_bool(result.get("english_ok"))
+        zh_ok = _json_bool(result.get("chinese_ok"))
         # 英文部分服务端硬校验（tingxie 教训——不信模型自判）：归一化相等
         # 强制对；什么都不认识强制错；重度不一致强制错。
         expected_norm = _normalize_english(expected_english)
@@ -433,6 +452,23 @@ def judge_handwriting(
 
 
 _WORD_CHAR_RE = re.compile(r"[a-z']+")
+
+
+def _json_bool(value: Any) -> bool:
+    """Strict bool coercion for LLM JSON verdicts.
+
+    bool("false") is True in Python — a model that answers with the STRING
+    "false" (happens with weaker endpoints) used to flip a wrong answer to
+    correct, feeding a fake success to FSRS. Accept real booleans and the
+    usual string forms only.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return False
 
 
 def _normalize_english(text: str) -> str:

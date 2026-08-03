@@ -1240,7 +1240,17 @@ def update_memory_counters(memory_state: MemoryState, is_correct: bool, review_m
         # regardless of the review mode. Previously only word-recall
         # was counted, which meant words spelled correctly in other
         # modes never showed progress.
-        if review_mode.startswith("word-recall") or review_mode.startswith("listen_spell") or review_mode.startswith("chinese_to_english"):
+        # 2026-08-04: handwriting-* modes MUST count too — since the
+        # 2026-08-02 all-handwriting switch every production test submits
+        # as handwriting-dictation/translation/both. Without this branch
+        # recall_correct_count stayed frozen, derive_word_status never saw
+        # the evidence, and no word could newly reach mastered ever again.
+        if (
+            review_mode.startswith("word-recall")
+            or review_mode.startswith("listen_spell")
+            or review_mode.startswith("chinese_to_english")
+            or review_mode.startswith("handwriting-")
+        ):
             memory_state.recall_correct_count += 1
         elif review_mode.startswith("word-hinted"):
             memory_state.hinted_correct_count += 1
@@ -1435,7 +1445,16 @@ def schedule_memory_review(
         else:
             # Learning-phase failure: same-day spaced retry (≥10 minutes,
             # bedtime-capped, 2h escape for 3+ lapses).
-            review_delay = calculate_failure_delay(score, memory_state.lapse_count, now, memory_state)
+            # 2026-08-04 fix: pass the CONSECUTIVE failure count, not the
+            # lifetime lapse_count. The function's STS decay (0.6 ** n) is
+            # designed for a consecutive-failure streak; feeding lifetime
+            # lapses (40-138 in production) made reduced_sts ≈ 0 forever,
+            # so every failure of a historically-struggling word collapsed
+            # to the degenerate 2-minute path / 2h escape — even the first
+            # slip weeks after re-learning.
+            review_delay = calculate_failure_delay(
+                score, max(1, memory_state.consecutive_error_count or 1), now, memory_state
+            )
     elif previous_repetition_count == 0:
         # Use STS-derived interval for same-day (sub-24-hour) first successes
         # instead of the hardcoded FIRST_SUCCESS_DELAYS lookup table.
@@ -1525,14 +1544,15 @@ def schedule_memory_review(
     # 间隔：答对说明掌握到位，应至少隔天再见。
     # 数据：90 个词 interval_days=0（29%），139 个 1-2 天（45%），
     # 544 条 review/天，33 个词 ≥5 次/天。
-    if is_correct:
+    # 2026-08-04 fix: 地板按强度设防——只对学得还行的词（strength>=0.5）
+    # 生效。慢性错词（rep 高、lapse 也高、strength 低）一次走运答对不能
+    # 直接推 3/7 天，否则 Q2 弱词缩短机制被覆盖，孩子 7 天后又忘。
+    if is_correct and float(memory_state.memory_strength or 0.0) >= 0.5:
         rep_count = int(memory_state.repetition_count or 0)
         if rep_count >= 30:
             floor_days = 7
         elif rep_count >= 15:
             floor_days = 3
-        elif rep_count >= 5:
-            floor_days = 1
         else:
             floor_days = 0
         if floor_days > 0 and review_delay < timedelta(days=floor_days):

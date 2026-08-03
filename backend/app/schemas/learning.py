@@ -24,6 +24,12 @@ class LearningItemCreate(LearningItemBase):
 
 
 class LearningItemRead(LearningItemBase):
+    # Stored word-memory rows may legitimately carry chinese_text=""
+    # (created before any translation was available). The read schema must
+    # tolerate what the DB holds — with min_length=1 inherited from the
+    # base, a single such row makes every queue/list endpoint raise
+    # ResponseValidationError → 500 for the whole response (2026-08-04).
+    chinese_text: str = ""
     id: UUID
     user_id: UUID
     review_task_id: UUID | None = None

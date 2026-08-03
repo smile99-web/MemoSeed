@@ -678,6 +678,12 @@ function StudyContent() {
   // twice in the same second (two review_logs for "am" at 16:30:34). This ref
   // is set synchronously inside checkWord before the async setState resolves.
   const wordJudgedRef = useRef<Set<number>>(new Set());
+  // Same protection for the mistake-practice judge path (2026-08-04): its
+  // keydown handler fires on every Enter/Space with no cooldown, and the
+  // function awaits TTS mid-body — a double-tap judged the same answer
+  // twice (duplicate mistake logs, or a double consecutive-correct
+  // increment that skips a practice word / the meaning quiz).
+  const mistakePracticeJudgingRef = useRef(false);
   const lastStudyTickAtRef = useRef(Date.now());
   const lastStudyActivityAtRef = useRef(Date.now());
   const isStudyPausedRef = useRef(false);
@@ -2117,6 +2123,14 @@ function StudyContent() {
         expected_chinese: (item.chinese_text || "").trim(),
         duration_seconds: Math.max(1, Math.round((Date.now() - handwritingStartedAtRef.current) / 1000)),
       });
+      // Stale guard (2026-08-04): the AI check takes seconds and the mode-
+      // switch buttons stay tappable mid-flight. If the child switched
+      // items/modes while waiting, this verdict belongs to the OLD item —
+      // dropping it now prevents an old verdict/echo card from popping over
+      // the new card and an old word landing in a freshly-reset testResults.
+      if (currentItemRef.current?.id !== item.id) {
+        return;
+      }
       markStudyActivityRef.current();
       setHandwritingVerdict({
         recognized: result.recognized,
@@ -2188,6 +2202,10 @@ function StudyContent() {
       }
 
       try {
+        // Clear any stale error from a previous failed load — an old banner
+        // used to survive successful reloads and suppress the study card
+        // until a hard refresh (2026-08-04 audit H7).
+        setErrorMessage(null);
         let mergedItems: LearningItem[] = [];
         let dueReviewItems: LearningItem[] = [];
         let nextItems: LearningItem[] = [];
@@ -2196,17 +2214,20 @@ function StudyContent() {
           // 每日一测: 今天学过的词优先，其次到期复习、最弱的已学词，共 20 个。
           // 每个词听发音，在一张卡片上写出英文+中文意思，AI 判双关；
           // 写错的词后端自动回炉到纠正循环。
-          mergedItems = await listDailyTestItems(accessToken, INITIAL_TEST_QUEUE_LIMIT).catch(() => [] as LearningItem[]);
+          // 2026-08-04: 不再 .catch(() => []) —— 401/网络错误曾被吞成
+          // "空队列"，把加载失败伪装成"今天没有可测的单词"。失败必须
+          // 抛到外层 catch 显示错误（可重试），真为空才显示引导卡片。
+          mergedItems = await listDailyTestItems(accessToken, INITIAL_TEST_QUEUE_LIMIT);
         } else if (studyMode === "handwrite") {
           // 手写听写: weakest studied words/sentences, alternating dictation
           // (write the English you hear) and translation (write the Chinese
           // meaning). Judged by the AI vision model on the backend.
-          mergedItems = await listHandwritingItems(accessToken, INITIAL_HANDWRITE_QUEUE_LIMIT).catch(() => [] as LearningItem[]);
+          mergedItems = await listHandwritingItems(accessToken, INITIAL_HANDWRITE_QUEUE_LIMIT);
         } else if (studyMode === "speak") {
           // 语音练习: familiar sentences/phrases served as pronunciation-gated
           // read-aloud echo cards. The whole exercise is "see the sentence →
           // hear the model → read it aloud correctly" — no typing, no choices.
-          mergedItems = await listSpeakItems(accessToken, INITIAL_SPEAK_QUEUE_LIMIT).catch(() => [] as LearningItem[]);
+          mergedItems = await listSpeakItems(accessToken, INITIAL_SPEAK_QUEUE_LIMIT);
         } else if (studyMode === "review") {
           // Pure review: all due review items across all courses.
           dueReviewItems = await listDueReviewItems(
@@ -2217,7 +2238,7 @@ function StudyContent() {
             INITIAL_REVIEW_QUEUE_LIMIT,
             isFocusMode,
             isPhonics,
-          ).catch(() => [] as LearningItem[]);
+          );
 
           // AI-recommended review: keep ALL 123 words but REORDER
           // so AI-prioritized words come first, then FSRS order for
@@ -2311,8 +2332,8 @@ function StudyContent() {
           mergedItems = allItems;
         } else {
           // Default mixed behavior: review + new content interleaved.
-          nextItems = await listLearningItems(accessToken, courseId).catch(() => [] as LearningItem[]);
-          dueReviewItems = await listDueReviewItems(accessToken, courseId, INITIAL_REVIEW_QUEUE_LIMIT, false, INITIAL_REVIEW_QUEUE_LIMIT, isFocusMode).catch(() => [] as LearningItem[]);
+          nextItems = await listLearningItems(accessToken, courseId);
+          dueReviewItems = await listDueReviewItems(accessToken, courseId, INITIAL_REVIEW_QUEUE_LIMIT, false, INITIAL_REVIEW_QUEUE_LIMIT, isFocusMode);
           mergedItems = mergeLearningQueues(dueReviewItems, nextItems);
         }
 
@@ -3998,6 +4019,11 @@ function StudyContent() {
   }
 
   async function checkMistakePracticeWord() {
+    if (mistakePracticeJudgingRef.current) {
+      return;
+    }
+    mistakePracticeJudgingRef.current = true;
+    try {
     const expectedWord = mistakePracticeWords[mistakePracticeIndex];
     if (!expectedWord) {
       return;
@@ -4093,6 +4119,9 @@ function StudyContent() {
       "success",
     );
     window.setTimeout(() => mistakePracticeInputRef.current?.focus(), 0);
+    } finally {
+      mistakePracticeJudgingRef.current = false;
+    }
   }
 
   /** Advance after a mistake word's meaning quiz is passed (or skipped when
@@ -4757,7 +4786,12 @@ function StudyContent() {
 
       <section className={isStudyFullscreen ? "flex min-h-0 flex-1 items-center justify-center overflow-visible px-4 py-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] ipad:px-8 ipad:py-6 ipad-lg:px-10 ipad-lg:py-8" : "flex min-h-0 flex-1 items-start justify-center overflow-visible px-4 py-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] ipad:px-5 ipad:py-4 ipad-lg:px-6 ipad-lg:py-5"}>
         {isLoading ? <p className="text-lg font-bold text-muted-foreground ipad:text-xl">正在加载学习内容...</p> : null}
-        {!isLoading && errorMessage ? <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 ipad:px-6 ipad:py-4 ipad:text-base">{errorMessage}</p> : null}
+        {!isLoading && errorMessage ? (
+          <div className="flex flex-col items-center gap-3">
+            <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 ipad:px-6 ipad:py-4 ipad:text-base">{errorMessage}</p>
+            <Button variant="outline" onClick={() => window.location.reload()}>重新加载</Button>
+          </div>
+        ) : null}
         {!isLoading && !errorMessage && !currentItem ? (
           studyMode === "test" ? (
             // 每日一测空队列：没有可测的词（还没学过词，或今天已全部测完）。

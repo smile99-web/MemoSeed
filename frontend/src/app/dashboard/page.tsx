@@ -634,6 +634,35 @@ export default function DashboardPage() {
       }
     }
 
+    // Force a full page reload on the FIRST visit per browser so stale
+    // chunks after a rebuild never get reused. This check MUST run before
+    // loadDashboard() fires — the previous standalone effect ran after the
+    // data fetch had already started, so the page began rendering and was
+    // then torn down by the reload (the "dashboard 数据加载不出来然后自己
+    // 恢复" flash, 2026-08-03/04). The flag is versioned with a build tag
+    // so a new deployment can invalidate previous builds by bumping
+    // DASHBOARD_RELOAD_VERSION. Old-version flags are cleared so storage
+    // doesn't accumulate (collect keys first, remove in a second pass —
+    // removeItem inside the loop mutates indexed storage length and skips
+    // every other key).
+    const RELOAD_VERSION = "v3";
+    const flagKey = `dashboard_reload_${RELOAD_VERSION}`;
+    if (window.localStorage.getItem(flagKey) !== "1") {
+      window.localStorage.setItem(flagKey, "1");
+      const staleKeys: string[] = [];
+      for (let i = 0; i < window.localStorage.length; i++) {
+        const key = window.localStorage.key(i);
+        if (key && key.startsWith("dashboard_reload_") && key !== flagKey) {
+          staleKeys.push(key);
+        }
+      }
+      for (const key of staleKeys) {
+        window.localStorage.removeItem(key);
+      }
+      window.location.reload();
+      return;
+    }
+
     void loadDashboard();
   }, [selectedCourseId]);
 
@@ -734,38 +763,9 @@ export default function DashboardPage() {
     }
   }
 
-  // Force a full page reload on the FIRST visit per browser so stale
-  // chunks after a rebuild never get reused. The flag is versioned with
-  // a build tag so a new deployment can invalidate previous builds by
-  // bumping DASHBOARD_RELOAD_VERSION. Without the version suffix, a user
-  // who already saw v1 would never reload on a v2 build, defeating the
-  // purpose. The previous version wrote a permanent "dashboard_v2_loaded"
-  // flag that never cleared — once tripped it would never re-trigger,
-  // and on a fresh browser the user got a jarring mid-render reload.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const RELOAD_VERSION = "v3";
-    const flagKey = `dashboard_reload_${RELOAD_VERSION}`;
-    if (window.localStorage.getItem(flagKey) !== "1") {
-      window.localStorage.setItem(flagKey, "1");
-      // Clear the older-version flag so storage doesn't accumulate over
-      // time across many releases. Collect keys first then remove in a
-      // second pass — calling removeItem inside the original for-loop
-      // mutated the indexed storage length and skipped every other key
-      // (off-by-one in the loop index vs the actual length).
-      const staleKeys: string[] = [];
-      for (let i = 0; i < window.localStorage.length; i++) {
-        const key = window.localStorage.key(i);
-        if (key && key.startsWith("dashboard_reload_") && key !== flagKey) {
-          staleKeys.push(key);
-        }
-      }
-      for (const key of staleKeys) {
-        window.localStorage.removeItem(key);
-      }
-      window.location.reload();
-    }
-  }, []);
+  // NOTE: the versioned force-reload check lives at the TOP of the mount
+  // effect above (before loadDashboard fires) — a standalone post-fetch
+  // effect used to tear the page down mid-render (2026-08-04).
 
   async function handleGenerateReport() {
     const accessToken = getAccessToken();

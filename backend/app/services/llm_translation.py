@@ -74,6 +74,7 @@ def translate_english_to_chinese(
     english_text: str,
     settings: LlmTranslationSettings,
     multiple_meanings: bool = False,
+    timeout: int | None = None,
 ) -> str:
     if multiple_meanings:
         prompt = (
@@ -94,32 +95,36 @@ def translate_english_to_chinese(
             "Return only the Chinese translation, with no explanation, quotes, markdown, or extra text.\n\n"
             f"English: {english_text.strip()}"
         )
-    response = call_llm_generate(settings, prompt)
+    response = call_llm_generate(settings, prompt, timeout=timeout)
     translated_text = response.strip().strip('"“”')
     if not translated_text:
         raise ValueError("LLM translation returned empty text")
     return translated_text
 
 
-def generate_learning_text(prompt: str, settings: LlmTranslationSettings) -> str:
-    response = call_llm_generate(settings, prompt)
+def generate_learning_text(prompt: str, settings: LlmTranslationSettings, timeout: int | None = None) -> str:
+    response = call_llm_generate(settings, prompt, timeout=timeout)
     generated_text = response.strip().strip('"“”')
     if not generated_text:
         raise ValueError("LLM generation returned empty text")
     return generated_text
 
 
-def call_llm_generate(settings: LlmTranslationSettings, prompt: str) -> str:
+def call_llm_generate(settings: LlmTranslationSettings, prompt: str, timeout: int | None = None) -> str:
     """Generate with the primary LLM, transparently retrying with a fallback.
 
     Any primary failure (HTTP error, timeout, bad response, unsupported
     provider) retries once with `settings.fallback`, or with the env-level
     AI_FALLBACK_* config when no per-settings fallback is attached. Without
     a fallback the original exception propagates unchanged.
+
+    `timeout` (seconds, per HTTP call) lets latency-sensitive callers
+    tighten the default 30s socket timeout — e.g. dynamic-sentence
+    generation must stay inside the nginx proxy timeout.
     """
     fallback = settings.fallback if settings.fallback is not None else _env_fallback_settings()
     try:
-        return _dispatch_llm_generate(settings, prompt)
+        return _dispatch_llm_generate(settings, prompt, timeout=timeout)
     except Exception:
         if fallback is None:
             raise
@@ -128,15 +133,15 @@ def call_llm_generate(settings: LlmTranslationSettings, prompt: str) -> str:
             settings.provider, settings.model, fallback.provider, fallback.model,
             exc_info=True,
         )
-        return _dispatch_llm_generate(fallback, prompt)
+        return _dispatch_llm_generate(fallback, prompt, timeout=timeout)
 
 
-def _dispatch_llm_generate(settings: LlmTranslationSettings, prompt: str) -> str:
+def _dispatch_llm_generate(settings: LlmTranslationSettings, prompt: str, timeout: int | None = None) -> str:
     provider = settings.provider.strip().lower()
     if provider in {"ollama", "local"}:
         return call_ollama_generate(settings.base_url, settings.model, prompt)
     if provider in {"deepseek", "openai", "qwen"}:
-        return call_openai_chat_completion(settings.base_url, settings.model, settings.api_key, prompt)
+        return call_openai_chat_completion(settings.base_url, settings.model, settings.api_key, prompt, timeout=timeout)
     raise ValueError(f"Unsupported LLM provider: {settings.provider}")
 
 
@@ -203,7 +208,7 @@ def request_ollama_generate(base_url: str, model: str, prompt: str) -> str:
     return generated_text
 
 
-def call_openai_chat_completion(base_url: str, model: str, api_key: str | None, prompt: str) -> str:
+def call_openai_chat_completion(base_url: str, model: str, api_key: str | None, prompt: str, timeout: int | None = None) -> str:
     if not base_url.strip():
         raise ValueError("LLM base URL is required")
     if not model.strip():
@@ -233,7 +238,7 @@ def call_openai_chat_completion(base_url: str, model: str, api_key: str | None, 
         method="POST",
     )
     try:
-        with urlopen(request, timeout=30) as response:
+        with urlopen(request, timeout=timeout if timeout is not None else 30) as response:
             body = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = read_http_error_detail(exc)
@@ -336,14 +341,22 @@ def generate_choice_distractors(
         except Exception:
             pass
 
-    # Step 3: Try default network LLM as last resort
+    # Step 3: Try default network LLM as last resort — ONLY when the user's
+    # own settings are DeepSeek. Reusing their key against hardcoded
+    # api.deepseek.com would otherwise POST a non-DeepSeek credential (e.g.
+    # a Volcengine Ark key) to a third-party host it was never issued for.
     network_settings = LlmTranslationSettings(
         provider="deepseek",
         base_url="https://api.deepseek.com",
         model="deepseek-chat",
         api_key=settings.api_key if settings is not None else None,
     )
-    if network_settings.api_key:
+    user_is_deepseek = (
+        settings is not None
+        and settings.provider.strip().lower() == "deepseek"
+        and "deepseek" in (settings.base_url or "").lower()
+    )
+    if network_settings.api_key and user_is_deepseek:
         try:
             result = _try_generate_distractors(network_settings, prompt, count)
             if len(result) >= count:

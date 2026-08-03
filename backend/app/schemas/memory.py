@@ -170,6 +170,11 @@ class ReviewForecastEfficiency(BaseModel):
 
 
 class ReviewForecastResponse(BaseModel):
+    # backlog_count / suggested_daily_minutes were returned by the builder but
+    # missing here — FastAPI silently stripped them and the dashboard rendered
+    # "今日建议学习 undefined 分钟" (2026-08-04 contract audit).
+    backlog_count: int
+    suggested_daily_minutes: int
     today: ReviewForecastToday
     tomorrow: ReviewForecastTomorrow
     week: ReviewForecastWeek

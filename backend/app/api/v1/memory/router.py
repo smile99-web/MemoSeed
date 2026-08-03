@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import and_, case, func, select, update
@@ -28,6 +29,7 @@ from app.services.learning_replay import record_learning_event
 from app.services.memory_scheduler import ASSISTED_REVIEW_MODES, schedule_memory_review
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.get("/dashboard", response_model=MemoryDashboardResponse)
@@ -298,7 +300,13 @@ def schedule_next_review(
         response_text=payload.response_text,
         duration_seconds=payload.duration_seconds,
     )
-    record_learning_event(db, current_user.id, result.review_log, learning_item)
+    try:
+        # Savepoint containment: replay telemetry must never take down the
+        # review submit itself (2026-08-04 audit).
+        with db.begin_nested():
+            record_learning_event(db, current_user.id, result.review_log, learning_item)
+    except Exception as exc:
+        logger.warning("Failed to record learning replay event for memory schedule: %s", exc)
     db.commit()
 
     return MemoryScheduleResponse(

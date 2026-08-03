@@ -2476,19 +2476,35 @@ def list_handwriting_items(
         hour=0, minute=0, second=0, microsecond=0
     ).astimezone(UTC)
 
-    tested_today_ids = {
-        row_id
-        for row_id in db.scalars(
-            select(LearningEvent.learning_item_id).where(
-                LearningEvent.user_id == current_user.id,
-                LearningEvent.review_mode.in_(HANDWRITING_REVIEW_MODES),
-                LearningEvent.occurred_at >= today_start,
-                LearningEvent.learning_item_id.is_not(None),
-            )
-        ).all()
-        if row_id is not None
+    # 2026-08-04 fix: the "tested today" exclusion was doubly broken —
+    # (a) it filtered only dictation/translation modes, missing
+    #     sentence-handwriting and handwriting-both events;
+    # (b) handwriting reviews are booked on the word-memory TWIN item, so
+    #     the served course item id never matched tested_today_ids and the
+    #     same sentences/words were re-served all day (cap also undercounted).
+    # Fix: exclude by normalized TEXT as well as id, count distinct items.
+    _handwriting_modes_all = (
+        *HANDWRITING_REVIEW_MODES,
+        SENTENCE_HANDWRITING_REVIEW_MODE,
+        HANDWRITING_BOTH_REVIEW_MODE,
+    )
+    tested_rows = db.execute(
+        select(LearningEvent.learning_item_id, LearningItem.english_text)
+        .outerjoin(LearningItem, LearningItem.id == LearningEvent.learning_item_id)
+        .where(
+            LearningEvent.user_id == current_user.id,
+            LearningEvent.review_mode.in_(_handwriting_modes_all),
+            LearningEvent.occurred_at >= today_start,
+        )
+    ).all()
+    tested_today_ids = {row_id for row_id, _text in tested_rows if row_id is not None}
+    tested_today_words = {text.strip().lower() for _id, text in tested_rows if text}
+    tested_today_keys = {
+        text.strip().lower() if text else str(row_id)
+        for row_id, text in tested_rows
+        if row_id is not None or text
     }
-    daily_remaining = max(HANDWRITING_DAILY_CAP - len(tested_today_ids), 0)
+    daily_remaining = max(HANDWRITING_DAILY_CAP - len(tested_today_keys), 0)
     if daily_remaining == 0:
         return []
 
@@ -2499,7 +2515,7 @@ def list_handwriting_items(
         )
         .where(
             LearningEvent.user_id == current_user.id,
-            LearningEvent.review_mode.in_(HANDWRITING_REVIEW_MODES),
+            LearningEvent.review_mode.in_(_handwriting_modes_all),
         )
         .group_by(LearningEvent.learning_item_id)
         .subquery()
@@ -2555,6 +2571,7 @@ def list_handwriting_items(
         word_rows,
         course_items,
         tested_today_ids=tested_today_ids,
+        tested_today_words=tested_today_words,
         limit=min(capped_limit, daily_remaining),
     )
     return [
@@ -2779,21 +2796,33 @@ async def check_handwriting(
         error_type = "spelling" if verdict.english_ok is False else "meaning"
     else:
         error_type = "spelling"
-    word_item = get_or_create_word_memory_item(db, current_user.id, expected_english, learning_item)
+    # 2026-08-04 fix: sentence answers must NOT mint word-type word-memory
+    # items. Previously get_or_create_word_memory_item received the whole
+    # sentence text, creating a permanent item_type="word" item per sentence
+    # (normalize_word keeps interior spaces) that then re-entered the 12-word
+    # handwriting quota as duplicate sentence dictation and polluted
+    # WordMemoryState word metrics. Sentence answers book the review on the
+    # original course item; only genuine single words get a word-memory twin.
+    if is_sentence_answer and learning_item is not None:
+        review_target_item = learning_item
+    else:
+        review_target_item = get_or_create_word_memory_item(db, current_user.id, expected_english, learning_item)
+    word_item = review_target_item  # response/points keep the historical name
     result = schedule_memory_review(
         db=db,
         user_id=current_user.id,
-        learning_item_id=word_item.id,
+        learning_item_id=review_target_item.id,
         score=4 if verdict.correct else 1,
         review_mode=review_mode,
         response_text=verdict.recognized[:200],
         duration_seconds=max(int(payload.duration_seconds or 0), 0),
         error_type=error_type,
     )
-    sync_word_memory_from_review(
-        db, current_user.id, word_item.english_text, result.memory_state, review_mode,
-        result.review_log.is_correct, error_type,
-    )
+    if not is_sentence_answer:
+        sync_word_memory_from_review(
+            db, current_user.id, review_target_item.english_text, result.memory_state, review_mode,
+            result.review_log.is_correct, error_type,
+        )
     try:
         from app.services.points_service import POINTS_CORRECT_NO_HINT, POINTS_WRONG, award_points
         if result.review_log.is_correct:
@@ -2805,7 +2834,11 @@ async def check_handwriting(
     try:
         from app.services.learning_replay import record_learning_event
         duration_ms = min(max(int(payload.duration_seconds or 0), 0) * 1000, 5 * 60 * 1000) or 30_000
-        record_learning_event(db, current_user.id, result.review_log, word_item, duration_ms=duration_ms)
+        # Savepoint containment: a replay-recording failure must never poison
+        # the session — the review itself still has to commit (2026-07-30:
+        # zombie pending insert → PendingRollbackError → 500, answer lost).
+        with db.begin_nested():
+            record_learning_event(db, current_user.id, result.review_log, word_item, duration_ms=duration_ms)
     except Exception as exc:
         logger.warning("Failed to record learning replay event for handwriting review: %s", exc)
     # 微任务闭环：复习队列把键盘拼写微任务映射成手写后，手写提交必须
@@ -2883,7 +2916,8 @@ def create_word_mistake_log(
             duration_ms = min(total_seconds * 1000, 5 * 60 * 1000)
         else:
             duration_ms = 20_000
-        record_learning_event(db, current_user.id, result.review_log, word_item, duration_ms=duration_ms)
+        with db.begin_nested():
+            record_learning_event(db, current_user.id, result.review_log, word_item, duration_ms=duration_ms)
     except Exception as exc:
         logger.warning("Failed to record learning replay event for word mistake: %s", exc)
     db.commit()
@@ -3008,7 +3042,8 @@ def create_word_review(
         try:
             from app.services.learning_replay import record_learning_event
             capped_ms = min(int(payload.duration_seconds or 0) * 1000, 5 * 60 * 1000)
-            record_learning_event(db, current_user.id, log_only_review_log, word_item, duration_ms=capped_ms or 20_000)
+            with db.begin_nested():
+                record_learning_event(db, current_user.id, log_only_review_log, word_item, duration_ms=capped_ms or 20_000)
         except Exception as exc:
             logger.warning("Failed to record learning replay event for capped word review: %s", exc)
         db.commit()
@@ -3078,7 +3113,8 @@ def create_word_review(
             duration_ms = min(total_seconds * 1000, 5 * 60 * 1000)
         else:
             duration_ms = 20_000  # default for legacy clients
-        record_learning_event(db, current_user.id, result.review_log, word_item, duration_ms=duration_ms)
+        with db.begin_nested():
+            record_learning_event(db, current_user.id, result.review_log, word_item, duration_ms=duration_ms)
     except Exception as exc:
         logger.warning("Failed to record learning replay event for word review: %s", exc)
     db.commit()

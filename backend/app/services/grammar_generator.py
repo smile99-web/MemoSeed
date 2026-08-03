@@ -290,6 +290,15 @@ def generate_grammar_questions(
                 f"LLM returned a null element at index {index}; aborting normalization. "
                 "Common cause: model emitted an incomplete JSON array."
             )
+        if not isinstance(raw_item, dict):
+            # Weak local models sometimes emit an array of bare strings /
+            # numbers — _normalize_question would die on raw.get(...) with
+            # AttributeError, surfacing as an unhandled 500 (router only
+            # maps ValueError to the documented 502).
+            raise ValueError(
+                f"LLM returned a non-object element at index {index} ({type(raw_item).__name__}); "
+                "aborting normalization."
+            )
         questions.append(_normalize_question(raw_item, index, level))
 
     return GrammarQuestionSet(level=level, questions=questions)

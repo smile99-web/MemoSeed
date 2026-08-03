@@ -221,7 +221,13 @@ def _fill_gap_minutes(db: Session, user_id: UUID, event: LearningEvent) -> None:
             with db.begin_nested():
                 db.flush()
         except IntegrityError:
-            # Concurrent filler won the race — nothing more to do
+            # Concurrent filler won the race — nothing more to do.
+            # CRITICAL: expunge the losing object. After a savepoint
+            # rollback SQLAlchemy keeps it in session.new, so the NEXT
+            # flush (outside any savepoint) would retry the INSERT, hit
+            # the unique index again, and poison the whole session —
+            # production: word-reviews 500 + lost answer (2026-07-30).
+            db.expunge(stat)
             continue
     _last_event_minute[user_id] = (event.event_date, event.event_hour, event.event_minute)
 
@@ -259,7 +265,10 @@ def _increment_minute_stat(db: Session, event: LearningEvent) -> None:
             with db.begin_nested():
                 db.flush()
         except IntegrityError:
-            # Lost an insert race against the unique index — re-read the row
+            # Lost an insert race against the unique index — expunge the
+            # zombie pending object (see gap-fill comment above), then
+            # re-read the row the concurrent writer created.
+            db.expunge(stat)
             stat = db.scalar(stmt)
             if stat is None:
                 return

@@ -1,5 +1,7 @@
 import hashlib
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -27,6 +29,14 @@ class DynamicSentenceResult:
 
 COMMON_FILLER_WORDS = ["I", "can", "see", "the", "and", "like", "my", "this", "is", "a"]
 WORD_MEMORY_SOURCE = "word-memory"
+
+# Latency guards (2026-08-04): nginx's proxy timeout is 60s, but sequential
+# candidate generation could burn 3x(30s generate + 30s translate) = 180s
+# with a degraded LLM — the child stared at a spinner, then got a 504.
+# Per-call timeout + parallel candidates + an overall budget keep the whole
+# endpoint well under the proxy limit.
+DYNAMIC_SENTENCE_LLM_TIMEOUT = 12  # seconds per LLM HTTP call (this path only)
+DYNAMIC_SENTENCE_TIME_BUDGET = 40  # seconds total for all candidates
 
 SENTENCE_TEMPLATE_POOL = [
     "Subject + can + verb + object",
@@ -95,10 +105,18 @@ def _pick_fallback_template(focus_word: str, known_words: list[str]) -> str:
     if not support_words:
         support_words = ["word"]
 
-    if pattern.count("{}") == 2:
+    # 2026-08-04 fix: templates mix "{}" and indexed "{0}"/"{1}" styles —
+    # count ALL placeholder forms. The old count("{}") missed indexed ones,
+    # sent 4/7 templates down the one-arg branch → IndexError → 500 whenever
+    # the LLM was down and the hash picked an indexed template (70 500s/wk).
+    placeholder_count = len(re.findall(r"\{\d*\}", pattern))
+    if placeholder_count == 2:
         if pattern in _FALLBACK_VERB_SETS:
             verb = word_options[option_index % len(word_options)]
             noun = support_words[option_index % len(support_words)]
+            # "This {0} can {1}." slots are (noun, verb), not (verb, noun).
+            if pattern == "This {0} can {1}.":
+                return pattern.format(noun, verb) + "."
             return pattern.format(verb, noun) + "."
         elif pattern in _FALLBACK_ADJ_SETS:
             noun = support_words[option_index % len(support_words)]
@@ -232,23 +250,42 @@ def generate_dynamic_review_sentence(
     selected_known_words = [word for word in known_by_strength if word not in set(focus_words)][:15]
     required_words = unique_preserve_order(mistaken_words) or focus_words
 
-    # Generate 2-3 candidate sentences
+    # Generate 2-3 candidate sentences in parallel under a total time budget
+    # (see DYNAMIC_SENTENCE_TIME_BUDGET) — a slow LLM must never push this
+    # endpoint past nginx's 60s proxy timeout.
     num_candidates = 3 if len(focus_words) >= 2 else 2
-    candidates: list[dict[str, str]] = []
-    for i in range(num_candidates):
+
+    def _build_candidate(i: int) -> dict[str, str] | None:
         template = _pick_template(focus_words + [str(i)])
         english_text = _generate_sentence_with_llm(
             selected_known_words, focus_words, current_sentence, settings,
             required_words, template, known_ratio, min_len, max_len,
         )
         english_text = _normalize_sentence_length(english_text, selected_known_words, focus_words, required_words, min_len, max_len)
-        chinese_text = translate_sentence_or_fallback(english_text, settings)
+        chinese_text = translate_sentence_or_fallback(english_text, settings, timeout=DYNAMIC_SENTENCE_LLM_TIMEOUT)
         if english_text and chinese_text:
-            candidates.append({"english_text": english_text, "chinese_text": chinese_text})
+            return {"english_text": english_text, "chinese_text": chinese_text}
+        return None
+
+    candidates: list[dict[str, str]] = []
+    pool = ThreadPoolExecutor(max_workers=num_candidates)
+    futures = [pool.submit(_build_candidate, i) for i in range(num_candidates)]
+    deadline = time.monotonic() + DYNAMIC_SENTENCE_TIME_BUDGET
+    for future in futures:
+        try:
+            result = future.result(timeout=max(0.1, deadline - time.monotonic()))
+        except Exception:
+            # Budget exhausted for this candidate (or it raised) — skip it;
+            # remaining completed candidates or the fallback below cover us.
+            continue
+        if result is not None:
+            candidates.append(result)
+    # Don't wait for stragglers: their socket calls time out on their own.
+    pool.shutdown(wait=False, cancel_futures=True)
 
     if not candidates:
         fb = _build_fallback_sentence(known_words, focus_words)
-        candidates.append({"english_text": fb, "chinese_text": translate_sentence_or_fallback(fb, settings)})
+        candidates.append({"english_text": fb, "chinese_text": translate_sentence_or_fallback(fb, settings, timeout=DYNAMIC_SENTENCE_LLM_TIMEOUT)})
 
     # Cache all generated candidates
     _cache_sentences(db, words_hash, difficulty_level, candidates)
@@ -315,7 +352,7 @@ def _generate_sentence_with_llm(
         f"Previous sentence: {current_sentence}"
     )
     try:
-        return generate_learning_text(prompt, settings)
+        return generate_learning_text(prompt, settings, timeout=DYNAMIC_SENTENCE_LLM_TIMEOUT)
     except ValueError:
         return _build_fallback_sentence(known_words, focus_words)
 
@@ -336,8 +373,8 @@ def _build_fallback_sentence(known_words: list[str], focus_words: list[str]) -> 
     return _pick_fallback_template(focus_word, known_words)
 
 
-def translate_sentence_or_fallback(sentence: str, settings: LlmTranslationSettings) -> str:
+def translate_sentence_or_fallback(sentence: str, settings: LlmTranslationSettings, timeout: int | None = None) -> str:
     try:
-        return translate_english_to_chinese(sentence, settings)
+        return translate_english_to_chinese(sentence, settings, timeout=timeout)
     except ValueError:
         return "AI 生成复习句"
