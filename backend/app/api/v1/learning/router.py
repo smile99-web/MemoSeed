@@ -920,6 +920,10 @@ def _build_voice_practice_items(
         eng = (cand_item.english_text or "").strip()
         if not eng or eng.lower() in existing_texts:
             continue
+        # 视觉词（the, I, is, are...）不需要朗读练习——孩子在每句话里都会
+        # 读到它们，单独练"the"的发音没有教学价值。
+        if cand_item.item_type == "word" and eng.lower() in SIGHT_WORDS:
+            continue
         voice_items.append(
             LearningItemRead(
                 id=uuid4(),

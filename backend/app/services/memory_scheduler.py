@@ -1260,8 +1260,21 @@ def update_memory_counters(memory_state: MemoryState, is_correct: bool, review_m
 
 
 def calculate_interval_days(delay: timedelta) -> int:
-    if delay < timedelta(days=1):
-        return 0
+    """Convert a review delay into whole days for the memory_state record.
+
+    Previously sub-day delays returned 0, so a 10-min or 6-hr same-day
+    retry recorded ``interval_days=0`` — the word was always "overdue" in
+    the next queue fetch (which could be seconds later in the same session).
+    This was the root cause of the "the word keeps coming back" loop: every
+    sub-day retry reset the clock by minutes, not days, so the backlog of
+    "due" words grew monotonically (131 words due at any given moment with
+    a 40-item daily budget).
+
+    Floor at 1 so sub-day delays still show as "reviewed today" and the
+    word isn't re-fetched until ``next_review_at`` (which still records
+    the exact sub-day timing).  Words with genuine multi-day intervals keep
+    their full spacing.
+    """
     return max(1, ceil(delay.total_seconds() / 86400))
 
 
@@ -1495,11 +1508,7 @@ def schedule_memory_review(
         min_days = 14 if is_correct else 7
         if review_delay < timedelta(days=min_days):
             review_delay = timedelta(days=min_days)
-    # 视觉词快速通道：最常见功能词不需要反复手写/拼写考。孩子通过句子
-    # 语境自然习得这些词——"the"不需要在手写画板上写 20 次/天来证明。
-    # 数据：the 近7天141条 review_log、i 80条（18次拼写全错），13.7%
-    # 复习预算被 1-2 字母词吃掉。这些词一律给长间隔：写对 60 天、写错
-    # 也不崩——错误在手写笔迹不是词汇掌握。
+    # 视觉词快速通道（见上方 SIGHT_WORDS 定义）
     word_text = (learning_item.english_text or "").strip().lower()
     if word_text in SIGHT_WORDS and pre_word_state is not None:
         if pre_word_state.status in ("mastered", "near_mastered"):
@@ -1510,6 +1519,24 @@ def schedule_memory_review(
             min_days = 7 if is_correct else 3
         if review_delay < timedelta(days=min_days):
             review_delay = timedelta(days=min_days)
+    # 复习次数地板（2026-08-03）：阻止"每天考同一个词"的循环。
+    # 只对正确回答生效——失败延迟已由 P7/P18 妥善处理（同天首次失败
+    # 给 STS 重试、≥2 次失败推到明天 8am）。正确回答不应该给 sub-day
+    # 间隔：答对说明掌握到位，应至少隔天再见。
+    # 数据：90 个词 interval_days=0（29%），139 个 1-2 天（45%），
+    # 544 条 review/天，33 个词 ≥5 次/天。
+    if is_correct:
+        rep_count = int(memory_state.repetition_count or 0)
+        if rep_count >= 30:
+            floor_days = 7
+        elif rep_count >= 15:
+            floor_days = 3
+        elif rep_count >= 5:
+            floor_days = 1
+        else:
+            floor_days = 0
+        if floor_days > 0 and review_delay < timedelta(days=floor_days):
+            review_delay = timedelta(days=floor_days)
     memory_state.interval_days = calculate_interval_days(review_delay)
     if is_correct:
         next_retrievability_at_due = calculate_fsrs_retrievability(review_delay.total_seconds() / 86400, next_stability_days)
