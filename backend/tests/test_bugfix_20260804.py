@@ -165,6 +165,9 @@ class _MockDB:
     def scalar(self, _stmt):
         return self._scalar_results.pop(0) if self._scalar_results else None
 
+    def scalars(self, _stmt):
+        return SimpleNamespace(all=lambda: [])
+
     def add(self, obj):
         self.added.append(obj)
 
