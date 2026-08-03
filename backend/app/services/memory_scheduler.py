@@ -209,6 +209,36 @@ EASY_FUNCTION_WORDS = {
     "we",
     "you",
 }
+
+# 视觉词 (sight words)：最常见的英语功能词。孩子通过句子语境自然习得，
+# 不需要作为独立单词反复手写/拼写——它们在每句话里都会出现。
+# 这些词只要掌握到"能识别意思"就够了，不占用复习预算考手写产出。
+# 数据证据：the 近7天 141条 review_log（20次/天），i 80条（18次拼写全错），
+# 1-2字母词吃掉 13.7% 的复习预算（524/3812）。
+SIGHT_WORDS: frozenset[str] = frozenset({
+    # Pronouns
+    "i", "me", "my", "mine", "we", "us", "our", "you", "your",
+    "he", "him", "his", "she", "her", "it", "its", "they", "them", "their",
+    # Articles
+    "a", "an", "the",
+    # Be-verbs
+    "is", "am", "are", "be", "was", "were", "been",
+    # Auxiliary / modal
+    "can", "do", "does", "did", "will", "would", "could", "should",
+    "have", "has", "had",
+    # Prepositions
+    "in", "on", "at", "to", "of", "for", "from", "with", "by", "about",
+    "into", "over", "under", "after", "before", "between",
+    # Conjunctions
+    "and", "or", "but", "so", "if", "because", "than", "then", "also",
+    # Common adverbs / particles
+    "not", "no", "yes", "go", "up", "out", "get", "let", "put",
+    "here", "there", "now", "just", "very", "too", "well",
+    # Common determiners
+    "this", "that", "these", "those", "all", "some", "any", "every", "each",
+    # Question words
+    "what", "when", "where", "who", "how", "why",
+})
 HARD_ABSTRACT_WORDS = {
     "because",
     "beautiful",
@@ -1463,6 +1493,21 @@ def schedule_memory_review(
     )
     if pre_word_state is not None and pre_word_state.status == "mastered":
         min_days = 14 if is_correct else 7
+        if review_delay < timedelta(days=min_days):
+            review_delay = timedelta(days=min_days)
+    # 视觉词快速通道：最常见功能词不需要反复手写/拼写考。孩子通过句子
+    # 语境自然习得这些词——"the"不需要在手写画板上写 20 次/天来证明。
+    # 数据：the 近7天141条 review_log、i 80条（18次拼写全错），13.7%
+    # 复习预算被 1-2 字母词吃掉。这些词一律给长间隔：写对 60 天、写错
+    # 也不崩——错误在手写笔迹不是词汇掌握。
+    word_text = (learning_item.english_text or "").strip().lower()
+    if word_text in SIGHT_WORDS and pre_word_state is not None:
+        if pre_word_state.status in ("mastered", "near_mastered"):
+            min_days = 60 if is_correct else 30
+        elif pre_word_state.status == "consolidating":
+            min_days = 21 if is_correct else 10
+        else:
+            min_days = 7 if is_correct else 3
         if review_delay < timedelta(days=min_days):
             review_delay = timedelta(days=min_days)
     memory_state.interval_days = calculate_interval_days(review_delay)

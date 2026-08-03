@@ -76,6 +76,17 @@ class TestIsDictationCandidate:
     def test_empty_english_rejected(self):
         assert is_dictation_candidate(_item("word", "", "空")) is False
 
+    def test_sight_words_excluded(self):
+        """视觉词（the, I, is, are...）不出现在手写队列中——
+        这些功能词在每句话里都会出现，手写考毫无价值。"""
+        for word in ("the", "i", "is", "are", "a", "an", "he", "she", "it", "we", "you"):
+            assert is_dictation_candidate(_item(english=word)) is False, f"'{word}' should be excluded"
+
+    def test_content_words_still_qualify(self):
+        """视觉词过滤不应影响正常内容词的入选。"""
+        for word in ("apple", "beautiful", "elephant", "important", "remember", "school", "teacher"):
+            assert is_dictation_candidate(_item(english=word)) is True, f"'{word}' should qualify"
+
 
 class TestPickReviewWordTasks:
     def test_weakest_first_and_never_tested_first(self):

@@ -36,6 +36,12 @@ from urllib.request import Request, urlopen
 from uuid import UUID
 
 from app.utils import tokenize_words
+from app.services.memory_scheduler import SIGHT_WORDS
+
+# 视觉词手写排除阈值：强度 >= 此值的视觉词不应出现在手写/每日一测中。
+# 这些词（the, I, is, are...）太基础——孩子通过句子语境就能掌握，写对
+# 了没价值、写错了也只是笔迹问题不反映词汇掌握。
+_SIGHT_DICTATION_THRESHOLD = 0.70
 
 logger = logging.getLogger(__name__)
 
@@ -108,12 +114,19 @@ class HandwritingVerdict:
 # --------------------------------------------------------------------------
 
 def is_dictation_candidate(item: Any) -> bool:
-    """Words always qualify; sentences only when short enough to handwrite."""
+    """Words always qualify; sentences only when short enough to handwrite.
+
+    视觉词（SIGHT_WORDS）除外——"the"/"I"/"is" 这些词在每句话里都会出现，
+    考手写毫无价值（错只是笔迹问题，不反映词汇掌握）。
+    """
     item_type = getattr(item, "item_type", None)
     english = (getattr(item, "english_text", "") or "").strip()
     if not english:
         return False
     if item_type == "word":
+        word = (english or "").strip().lower()
+        if word in SIGHT_WORDS:
+            return False
         return True
     if item_type in ("sentence", "phrase"):
         return len(english) <= MAX_SENTENCE_CHARS and len(tokenize_words(english)) <= MAX_SENTENCE_WORDS

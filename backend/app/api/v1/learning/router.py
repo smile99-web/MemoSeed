@@ -65,6 +65,7 @@ from app.services.memory_scheduler import (
     DAILY_REVIEW_ITEM_BUDGET,
     LOCAL_TIMEZONE,
     MAX_DAILY_REVIEWS_PER_WORD,
+    SIGHT_WORDS,
     calculate_current_forget_risk,
     calculate_review_priority,
     exceeded_daily_review_filter_clause,
@@ -1387,7 +1388,26 @@ def list_due_review_items(
             Re-failing the same production test for the 100th time teaches
             nothing — the breakthrough path rebuilds the sound<->letter
             mapping with recognition and one handwritten attempt.
+
+            视觉词快速通道（2026-08-03）：日常高频功能词不需要手写考。
+            强度 ≥0.75 的视觉词直接从队列排除——它们在每句话里都会出现，
+            孩子的掌握度已在语境中体现；较低强度的保持识别模式（只考意思
+            不考写），写对就给长间隔。数据：the 近7天141条 review_log、
+            i 80条（18次拼写全错），1-2字母词吃掉复习预算 13.7%。
             """
+            word_lower = word.strip().lower()
+            # 视觉词已掌握 → 从复习队列中排除，不占每日预算。
+            if word_lower in SIGHT_WORDS:
+                intel = word_intel.get(word, {})
+                strength = intel.get("strength", 0)
+                if strength >= 0.75:
+                    return []  # 自动退休，不占预算
+                # 强度不足的视觉词：只识别，不手写（写这些词毫无意义）
+                status_value = intel.get("status", "")
+                if status_value in ("mastered", "near_mastered") or strength >= 0.65:
+                    return ["listen_choose_chinese"]
+                return ["listen_choose_chinese", "english_to_chinese"]
+
             intel = word_intel.get(word, {})
             lapse = intel.get("lapse_count", 0)
             real_tests = intel.get("real_tests", 0)
@@ -2294,14 +2314,6 @@ async def check_pronunciation(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     result = score_pronunciation(expected, transcript)
-    logger.info(
-        "pronunciation-check expected=%r transcript=%r score=%.3f passed=%s heard_speech=%s",
-        expected,
-        transcript,
-        result.score,
-        result.passed,
-        result.heard_speech,
-    )
     return PronunciationCheckResponse(
         transcript=transcript,
         score=round(result.score, 3),
@@ -2637,14 +2649,25 @@ def list_daily_test_items(
         )
     ).all()
     strength_by_id = {item.id: (strength or 0.0) for item, strength, _nra in studied_rows}
+    # 视觉词（the, I, is, are...）不出每日一测——这些功能词太基础，
+    # 写错只是笔迹问题不反映词汇掌握，不值得占 20 个测验位。
+    _SIGHT_TEST_THRESHOLD = 0.70
+    def _not_retired_sight(item: LearningItem) -> bool:
+        word = (item.english_text or "").strip().lower()
+        if word not in SIGHT_WORDS:
+            return True
+        return strength_by_id.get(item.id, 0.0) < _SIGHT_TEST_THRESHOLD
+
     due_rows = sorted(
-        (item for item, _s, nra in studied_rows if nra is not None and nra <= now and _testable(item)),
+        (item for item, _s, nra in studied_rows if nra is not None and nra <= now and _testable(item) and _not_retired_sight(item)),
         key=lambda item: strength_by_id.get(item.id, 0.0),
     )
     weak_rows = sorted(
-        (item for item, _s, _nra in studied_rows if _testable(item)),
+        (item for item, _s, _nra in studied_rows if _testable(item) and _not_retired_sight(item)),
         key=lambda item: strength_by_id.get(item.id, 0.0),
     )
+    # today_rows 也过滤——今天刚学过的 sight word 强度已够就不测。
+    today_rows = [item for item in today_rows if _not_retired_sight(item)]
 
     picked = pick_daily_test_words(
         today_rows,
