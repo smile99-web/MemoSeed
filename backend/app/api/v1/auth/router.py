@@ -17,11 +17,26 @@ from app.core.security import (
 )
 from app.db.session import get_db
 from app.models.refresh_token import RefreshToken
+from app.services.rate_limit import SlidingWindowRateLimiter
 from app.models.user import User
 from app.schemas.auth import AuthResponse, AuthUserResponse, LoginRequest, RefreshTokenRequest, RegisterRequest, TokenResponse
 from app.schemas.common import MessageResponse
 
 router = APIRouter()
+
+# P0 (2026-08-06): throttle password-guessing against /login. Keyed by
+# client-IP + email so one device mistyping a password is not locked out by
+# another, while a targeted spray at one account is capped. 5 attempts /
+# minute / key; single-process in-memory is right for this single-family app.
+_login_rate_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=60.0)
+
+
+def _client_ip(request: Request) -> str:
+    """Client IP, trusting X-Forwarded-For only because nginx sets it."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 def _extract_device_hint(user_agent: str | None) -> str | None:
@@ -72,9 +87,16 @@ def register(
 @router.post("/login", response_model=AuthResponse)
 def login(
     payload: LoginRequest,
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     user_agent: Annotated[str | None, Header(alias="User-Agent")] = None,
 ) -> AuthResponse:
+    rate_key = f"{_client_ip(request)}|{payload.email.strip().lower()}"
+    if not _login_rate_limiter.check(rate_key):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts. Please wait a minute and try again.",
+        )
     user = db.scalar(select(User).where(User.email == payload.email, User.is_active.is_(True)))
     if user is None or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
