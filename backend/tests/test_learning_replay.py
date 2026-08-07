@@ -30,9 +30,9 @@ class TestStudySessionWindows:
         windows = _build_study_windows(events)
         beats = _beats(T0 - timedelta(seconds=100), 30)  # -100s .. +190s
         kept = _filter_heartbeats_by_windows(beats, windows)
-        # window = [T0-150s, T0+150s] → beats at -100..+150 kept (26 beats)
-        assert len(kept) == 26
-        assert sum(d for _, d in kept) == 260.0
+        # 2026-08-07 收紧后 window = [T0-45s, T0+45s] → beats at -40..+40 kept (9 beats)
+        assert len(kept) == 9
+        assert sum(d for _, d in kept) == 90.0
 
     def test_heartbeats_beyond_edge_grace_dropped(self):
         events = [T0]
@@ -41,42 +41,49 @@ class TestStudySessionWindows:
         kept = _filter_heartbeats_by_windows(beats, windows)
         assert all(abs((ts - T0).total_seconds()) <= STUDY_SESSION_EDGE_GRACE_SECONDS for ts, _ in kept)
 
-    def test_gap_under_300s_merges_into_one_session(self):
-        # 事件间隔 200s < 300s → 同一段学习，间隙心跳全计
-        events = [T0, T0 + timedelta(seconds=200)]
+    def test_gap_under_120s_merges_into_one_session(self):
+        # 事件间隔 100s < 120s → 同一段学习，间隙心跳全计
+        events = [T0, T0 + timedelta(seconds=100)]
         windows = _build_study_windows(events)
         assert len(windows) == 1
-        beats = _beats(T0 + timedelta(seconds=10), 19)  # 间隙内 10s..190s
+        beats = _beats(T0 + timedelta(seconds=10), 9)  # 间隙内 10s..90s
         kept = _filter_heartbeats_by_windows(beats, windows)
-        assert len(kept) == 19
+        assert len(kept) == 9
 
-    def test_gap_over_300s_splits_and_interior_dropped(self):
-        # 事件间隔 600s ≥ 300s → 两段会话，间隙超出 ±150s 宽限的部分剔除
+    def test_gap_over_120s_splits_and_interior_dropped(self):
+        # 事件间隔 600s ≥ 120s → 两段会话，间隙超出 ±45s 宽限的部分剔除
         events = [T0, T0 + timedelta(seconds=600)]
         windows = _build_study_windows(events)
         assert len(windows) == 2
         beats = _beats(T0, 61)  # 0s .. 600s 每 10s 一条
         kept = _filter_heartbeats_by_windows(beats, windows)
         kept_times = [ts for ts, _ in kept]
-        # 第一段窗口 [−150s, +150s]，第二段 [+450s, +750s]
+        # 第一段窗口 [−45s, +45s]，第二段 [+555s, +645s]
         assert all(ts <= T0 + timedelta(seconds=STUDY_SESSION_EDGE_GRACE_SECONDS)
                    or ts >= T0 + timedelta(seconds=600 - STUDY_SESSION_EDGE_GRACE_SECONDS)
                    for ts in kept_times)
-        # 中间 160s..440s 的心跳全部被剔除
-        assert not any(T0 + timedelta(seconds=160) <= ts <= T0 + timedelta(seconds=440) for ts in kept_times)
+        # 中间 50s..550s 的心跳全部被剔除
+        assert not any(T0 + timedelta(seconds=50) <= ts <= T0 + timedelta(seconds=550) for ts in kept_times)
+
+    def test_gap_200s_now_splits(self):
+        # 2026-08-07 收紧：旧口径 200s < 300s 还算同一段；新口径 ≥120s 即分段。
+        # 家长实测：52 分钟计时里 20 分钟零答题，正是 300s 容差吞入空分钟所致。
+        events = [T0, T0 + timedelta(seconds=200)]
+        windows = _build_study_windows(events)
+        assert len(windows) == 2
 
     def test_real_0729_pattern(self):
-        # 复刻 2026-07-29 20 点档：连续 46 分钟心跳，但 24:36→33:18（522s）
-        # 零事件 → 间隙只保留两端各 150s，中间 ~222s 剔除
+        # 复刻 2026-07-29 20 点档：连续心跳，但 24:36→33:18（522s）
+        # 零事件 → 间隙只保留两端各 45s，中间全部剔除
         e1 = T0
         e2 = T0 + timedelta(seconds=522)
         windows = _build_study_windows([e1, e2])
         beats = _beats(T0 - timedelta(seconds=300), 90)  # -300s .. +590s
         kept = _filter_heartbeats_by_windows(beats, windows)
         kept_secs = sum(d for _, d in kept)
-        # 窗口 [−150,+150] ∪ [+372,+672]：交集内心跳 = 31 + 22 = 53 条
-        assert len(kept) == 53
-        assert kept_secs == 530.0
+        # 窗口 [−45,+45] ∪ [+477,+567]：交集内心跳 = 9 + 9 = 18 条
+        assert len(kept) == 18
+        assert kept_secs == 180.0
 
     def test_empty_events_no_study_time(self):
         beats = _beats(T0, 60)
