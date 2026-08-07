@@ -177,7 +177,7 @@ RECENT_ACCURACY_WINDOW = 10
 # enough real tests, decent accuracy, and correct on at least 2 distinct local
 # days (spaced proof — a same-day cram session no longer graduates a word).
 MASTERED_MIN_TEST_COUNT = 5
-MASTERED_MIN_RECENT_ACCURACY = 0.70
+MASTERED_MIN_RECENT_ACCURACY = 0.85  # Plan L: was 0.70; "mastered" must reflect real no-hint retrieval, not assisted passes
 MASTERED_MIN_CORRECT_DAYS = 2
 NEAR_MASTERED_MIN_TEST_COUNT = 3
 NEAR_MASTERED_MIN_RECENT_ACCURACY = 0.60

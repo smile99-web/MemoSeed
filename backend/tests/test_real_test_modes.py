@@ -114,14 +114,14 @@ def test_mastered_requires_spaced_proof_not_same_day_cram():
     ws = _ws(memory_strength=0.65)
     # 6/6 correct but ALL on one day — a cram session must not graduate.
     assert derive_word_status(ws, 1.0, 1, 6) != "mastered"
-    # Same record spread over 2 distinct days -> mastered.
-    assert derive_word_status(ws, 0.8, 2, 5) == "mastered"
+    # Same record spread over 2 distinct days -> mastered (>=0.85 accuracy).
+    assert derive_word_status(ws, 0.9, 2, 5) == "mastered"
 
 
 def test_mastered_exact_minima_and_shortfalls():
-    assert derive_word_status(_ws(memory_strength=0.6), 0.7, 2, 5) == "mastered"
-    assert derive_word_status(_ws(memory_strength=0.65), 0.7, 2, 4) != "mastered"   # too few tests
-    assert derive_word_status(_ws(memory_strength=0.65), 0.69, 3, 9) != "mastered"  # accuracy short
+    assert derive_word_status(_ws(memory_strength=0.6), 0.85, 2, 5) == "mastered"
+    assert derive_word_status(_ws(memory_strength=0.65), 0.9, 2, 4) != "mastered"   # too few tests
+    assert derive_word_status(_ws(memory_strength=0.65), 0.84, 3, 9) != "mastered"  # accuracy short (Plan L: <0.85)
     assert derive_word_status(_ws(memory_strength=0.59), 1.0, 3, 9) != "mastered"   # strength short
     # A 2-error streak blocks graduation even with great aggregates.
     assert derive_word_status(_ws(memory_strength=0.65, consecutive_error_count=2), 0.9, 3, 6) != "mastered"

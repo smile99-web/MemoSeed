@@ -518,6 +518,10 @@ VALID_WORD_ERROR_TYPES: frozenset[str] = frozenset({
 })
 
 
+# Plan A: an attempt this similar to the target is a near-miss, not a lapse.
+NEAR_MISS_SIMILARITY = 0.8
+
+
 def spelling_similarity(expected: str, actual: str) -> float:
     """Letter-level similarity between the expected word and the child's attempt.
 
@@ -2953,6 +2957,18 @@ def create_word_review(
     review_mode = payload.review_mode.strip()[:32]
     error_type = normalize_word_error_type(payload.error_type) if payload.error_type else None
 
+    # Plan A: near-miss upgrade. A score==2 attempt that is highly similar to
+    # the target is upgraded to a passing 3 so it counts as correct (does not
+    # lapse / reset intervals). Falls back to server-side similarity when the
+    # client did not supply one.
+    review_score = payload.score
+    if review_score == 2:
+        sim = payload.spelling_similarity
+        if sim is None:
+            sim = spelling_similarity(payload.word or "", payload.response_text or "")
+        if sim >= NEAR_MISS_SIMILARITY:
+            review_score = 3
+
     # P15: assisted phases (answer shown / heavy hints BEFORE responding) can
     # never fail, so they are telemetry-only — no review_log, no FSRS
     # mutation, no mistake_log, no accuracy contribution. They used to be 63%
@@ -2988,7 +3004,7 @@ def create_word_review(
                 current_user.id,
                 word_item,
                 review_mode,
-                payload.score,
+                review_score,
                 response_text=(payload.response_text or "").strip() or None,
                 duration_ms=min(encoding_ms or total_ms or 20_000, 5 * 60 * 1000),
                 error_type=error_type,
@@ -3018,8 +3034,8 @@ def create_word_review(
             learning_item_id=word_item.id,
             review_mode=review_mode,
             error_type=error_type,
-            score=payload.score,
-            is_correct=payload.score >= 3,
+            score=review_score,
+            is_correct=review_score >= 3,
             response_text=(payload.response_text or "").strip(),
             duration_seconds=payload.duration_seconds,
             encoding_stage=payload.encoding_stage,
@@ -3053,7 +3069,7 @@ def create_word_review(
         db=db,
         user_id=current_user.id,
         learning_item_id=word_item.id,
-        score=payload.score,
+        score=review_score,
         review_mode=review_mode,
         response_text=(payload.response_text or "").strip(),
         duration_seconds=payload.duration_seconds,
@@ -3062,6 +3078,32 @@ def create_word_review(
         encoding_duration_ms=payload.encoding_duration_ms,
     )
     word_state = sync_word_memory_from_review(db, current_user.id, word_item.english_text, result.memory_state, review_mode, result.review_log.is_correct, error_type)
+
+    # Plan E (2026-08-07): confusable-word bookkeeping. When the child fails a
+    # word by typing a DIFFERENT word they are also studying (e.g. writes
+    # "here" for "hear"), tag the target word's error_type_counts with
+    # `confusable:<typed>` so the parent's word-detail error breakdown shows
+    # the confusion, and log the pair for later contrast re-teaching.
+    if not result.review_log.is_correct:
+        typed = normalize_word((payload.response_text or "").strip())
+        target = normalize_word(word_item.english_text or "")
+        if typed and target and typed != target and " " not in typed:
+            confused_item = db.scalar(
+                select(LearningItem).where(
+                    LearningItem.user_id == current_user.id,
+                    func.lower(LearningItem.english_text) == typed,
+                ).limit(1)
+            )
+            if confused_item is not None:
+                counts = dict(word_state.error_type_counts or {})
+                key = f"confusable:{typed}"
+                existing = counts.get(key)
+                new_count = (int(existing.get("count", 0)) if isinstance(existing, dict) else int(existing or 0)) + 1
+                counts[key] = {"count": new_count, "last": datetime.now(UTC).isoformat()}
+                word_state.error_type_counts = counts
+                db.add(word_state)
+                logger.info("confusable-pair target=%r typed=%r user=%s", target, typed, current_user.id)
+
     complete_word_review_task(db, current_user.id, payload.review_task_id, result.review_log.is_correct)
     if result.review_log.is_correct:
         supersede_stale_pending_tasks_for_reviewed_words(db, current_user.id)
@@ -3074,7 +3116,7 @@ def create_word_review(
                 award_points(db, current_user.id, POINTS_CORRECT_HINTED, "word_hinted", f"提示后正确拼写 +{POINTS_CORRECT_HINTED}", word_item.id)
             elif review_mode.startswith("word-preview"):
                 award_points(db, current_user.id, POINTS_CORRECT_PREVIEW, "word_preview", f"预览后正确拼写 +{POINTS_CORRECT_PREVIEW}", word_item.id)
-            elif review_mode.startswith("sentence-spelling") and payload.score >= 5:
+            elif review_mode.startswith("sentence-spelling") and review_score >= 5:
                 award_points(db, current_user.id, POINTS_PERFECT_SENTENCE, "perfect_sentence", f"整句完全正确 +{POINTS_PERFECT_SENTENCE}", word_item.id)
             else:
                 award_points(db, current_user.id, POINTS_CORRECT_NO_HINT, "word_correct", f"正确拼写 +{POINTS_CORRECT_NO_HINT}", word_item.id)

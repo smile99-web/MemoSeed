@@ -134,7 +134,19 @@ STUCK_WORD_RESCHEDULE_DAYS = 7   # informational; we don't actually reschedule
 # Daily cap on how many times the same word can appear in the due queue.
 # Without this, a single stuck word can occupy 30% of a session
 # (e.g. 'truth' reviewed 270 times over 24 days).
-MAX_DAILY_REVIEWS_PER_WORD = 3
+MAX_DAILY_REVIEWS_PER_WORD = 2  # Plan J: was 3; a word recurring 3+/day burns session time without new signal
+
+# Plan J: once a word fails this many times consecutively, stop letting it
+# dominate the daily queue (it gets deprioritized in calculate_review_priority
+# and rebuilt via scaffolding rather than bare re-test).
+CIRCUIT_BREAKER_CONSECUTIVE_ERRORS = 8
+
+# Plan K: after this many consecutive NO-HINT-correct reviews, a word is
+# graduated up the interval ladder (days) so it stops re-entering the daily
+# queue. The ladder is the smallest interval the word may receive at each
+# graduation step; FSRS may still give more.
+GRADUATION_STREAK_THRESHOLD = 3
+GRADUATION_INTERVAL_LADDER = (3, 7, 15, 30)
 
 # P15/P16: review modes that show the answer (or heavy hints) BEFORE the child
 # responds are *assisted* phases, not tests. They can never fail (100%
@@ -926,9 +938,23 @@ def calculate_review_priority(memory_state: MemoryState, now: datetime) -> float
     new_word_boost = 0.0
     if (memory_state.repetition_count or 0) < 5 and current_risk > 0.3:
         new_word_boost = 0.10
+    # Plan J (2026-08-07): a word that has failed many times in a row is being
+    # actively FAILED by the child, not forgotten — pushing it to the front of
+    # the queue every day just manufactures frustration (production: 27% of
+    # words consumed 66% of all reviews). Once consecutive_error hits the
+    # circuit-breaker threshold, stop boosting and actively demote it so the
+    # daily session is spent on winnable words; the word is rebuilt through
+    # the scaffolded (hinted/preview) path instead of bare re-testing.
+    if memory_state.consecutive_error_count >= CIRCUIT_BREAKER_CONSECUTIVE_ERRORS:
+        lapse_boost = 0.0
+        error_boost = 0.0
+        new_word_boost = 0.0
+        circuit_breaker_penalty = 0.5
+    else:
+        circuit_breaker_penalty = 0.0
     return round(clamp(
         current_risk + overdue_boost + lapse_boost + error_boost
-        - recent_practice_penalty + new_word_boost,
+        - recent_practice_penalty + new_word_boost - circuit_breaker_penalty,
         0.0, 1.0,
     ), 4)
 
@@ -1485,6 +1511,22 @@ def schedule_memory_review(
         review_delay = calculate_fsrs_interval(
             next_stability_days, fsrs_target_retention, current_strength
         )
+        # Plan K (2026-08-07): graduation jump. A word the child spells right
+        # WITHOUT hints several times in a row is learned — keep it on a 1-day
+        # leash and it just re-enters tomorrow's queue (production: 46% of
+        # words sat at interval=1d, never graduating). On a strong no-hint
+        # consecutive streak, jump the interval up a rung so the word leaves
+        # the daily queue and frees time for words that still need work.
+        cc = memory_state.consecutive_correct_count or 0
+        if cc >= GRADUATION_STREAK_THRESHOLD:
+            target_days = GRADUATION_INTERVAL_LADDER[-1]
+            for rung in GRADUATION_INTERVAL_LADDER:
+                if review_delay < timedelta(days=rung):
+                    target_days = rung
+                    break
+            jumped = timedelta(days=target_days)
+            if jumped > review_delay:
+                review_delay = jumped
 
     review_delay = adjust_delay_for_learning_item(review_delay, learning_item, memory_state, is_failure=not is_correct)
     if not is_correct:

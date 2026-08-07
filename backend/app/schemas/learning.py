@@ -160,6 +160,21 @@ class WordReviewRequest(BaseModel):
     review_task_id: UUID | None = None
     word: str = Field(min_length=1)
     score: int = Field(ge=0, le=5)
+    # Plan A (2026-08-07): optional letter-level similarity (0..1) between the
+    # expected word and the child's typed attempt, computed client-side. Used
+    # to upgrade a bare-miss (score 2) to a pass when the attempt is a clear
+    # near-miss (>= 0.8) — see create_word_review.
+    spelling_similarity: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Plan A (2026-08-07): optional letter-level similarity (0..1) between the
+    # expected word and the child's typed attempt, computed client-side. Used
+    # to upgrade a bare-miss (score 2) to a pass when the attempt is a clear
+    # near-miss (>= 0.8) — see create_word_review.
+    spelling_similarity: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Plan A (2026-08-07): optional letter-level similarity (0..1) between the
+    # expected word and the child's typed attempt, computed client-side. Used
+    # to upgrade a bare-miss (score 2) to a pass when the attempt is a clear
+    # near-miss (>= 0.8) — see create_word_review.
+    spelling_similarity: float | None = Field(default=None, ge=0.0, le=1.0)
     review_mode: str = Field(min_length=1, max_length=32)
     response_text: str | None = None
     duration_seconds: int = Field(default=0, ge=0)
