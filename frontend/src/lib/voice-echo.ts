@@ -34,7 +34,16 @@ export async function initVoiceEcho(): Promise<boolean> {
     return true;
   }
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // 儿童音量小、平板麦克风增益低：显式打开自动增益(AGC)把轻声拉高，
+    // 配合降噪/回声消除（模型音从扬声器播出，回声消除必须开）。
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+      },
+    });
     return true;
   } catch {
     mediaStream = null;
@@ -80,7 +89,9 @@ export function listenForVoice(
       source.connect(analyser);
       const buffer = new Uint8Array(analyser.fftSize);
 
-      const LOUD_RMS = 0.03;
+      // 0.03 对轻声朗读的孩子太苛刻（iPad 麦克风贴脸也常在 0.02 徘徊），
+      // 降到 0.015：搭配 AGC 与送 ASR 前的峰值归一化，轻读也能被听到。
+      const LOUD_RMS = 0.015;
       const PEAK_RMS = 0.12;
       const startedAt = Date.now();
       let loudMs = 0;
@@ -305,7 +316,9 @@ export function recordAndRecognize(
       const activeAnalyser = analyser;
       const buffer = new Uint8Array(activeAnalyser.fftSize);
 
-      const LOUD_RMS = 0.03;
+      // 同 listenForVoice：孩子轻读时 RMS 常低于 0.03，VAD 一直不触发，
+      // 8 秒超时后报"没听到声音"——这是"总是识别不出来"的主因。
+      const LOUD_RMS = 0.015;
       const startedAt = Date.now();
       let speechStartedAt = 0;
       let loudStreakMs = 0;
@@ -447,6 +460,22 @@ async function convertToWav(blob: Blob): Promise<Blob> {
         }
       }
       samples = mixed;
+    }
+  }
+  // 儿童录音音量普遍偏小，ASR 对低音量音频直接判"no valid speech"。
+  // 送识别前做峰值归一化：只放大不削减（峰值 < -6dBFS 时提升到 0.5），
+  // 纯静音（peak≈0）保持原样，交给 ASR 正常判 no-speech。
+  let peak = 0;
+  for (let i = 0; i < samples.length; i += 1) {
+    const abs = Math.abs(samples[i]);
+    if (abs > peak) {
+      peak = abs;
+    }
+  }
+  if (peak > 0.0005 && peak < 0.5) {
+    const gain = 0.5 / peak;
+    for (let i = 0; i < samples.length; i += 1) {
+      samples[i] *= gain;
     }
   }
   return encodeWavPcm16(samples, sampleRate);

@@ -2328,6 +2328,10 @@ async def check_pronunciation(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     result = score_pronunciation(expected, transcript)
+    if not result.heard_speech:
+        # 观测"总是识别不出来"：记录 no-speech 频次（不说话不计失败，但
+        # 高频出现说明采集链有问题——增益/VAD/设备）。
+        logger.info("pronunciation-check no-speech: expected=%.40s", expected)
     return PronunciationCheckResponse(
         transcript=transcript,
         score=round(result.score, 3),
