@@ -33,21 +33,30 @@ export async function initVoiceEcho(): Promise<boolean> {
   if (mediaStream) {
     return true;
   }
+  // 儿童音量小、平板麦克风增益低：优先请求自动增益(AGC)把轻声拉高，
+  // 配合降噪/回声消除（模型音从扬声器播出，回声消除必须开）。
+  // 全部用 ideal 而非裸值：裸值是 exact 语义，无法满足时抛
+  // OverconstrainedError（如立体声-only 外接麦给不了 channelCount:1），
+  // 会把整个语音功能弄没；ideal 拿不到也照常用。极端设备再兜底 {audio:true}。
+  const preferred: MediaStreamConstraints = {
+    audio: {
+      echoCancellation: { ideal: true },
+      noiseSuppression: { ideal: true },
+      autoGainControl: { ideal: true },
+      channelCount: { ideal: 1 },
+    },
+  };
   try {
-    // 儿童音量小、平板麦克风增益低：显式打开自动增益(AGC)把轻声拉高，
-    // 配合降噪/回声消除（模型音从扬声器播出，回声消除必须开）。
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        channelCount: 1,
-      },
-    });
+    mediaStream = await navigator.mediaDevices.getUserMedia(preferred);
     return true;
   } catch {
-    mediaStream = null;
-    return false;
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      return true;
+    } catch {
+      mediaStream = null;
+      return false;
+    }
   }
 }
 

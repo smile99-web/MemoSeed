@@ -72,6 +72,17 @@ class TestStudySessionWindows:
         windows = _build_study_windows(events)
         assert len(windows) == 2
 
+    def test_gap_exactly_at_threshold_splits(self):
+        # 拆分语义是 strict <：恰好 120s 也拆。后续调参最容易改错的边界，锁死。
+        events = [T0, T0 + timedelta(seconds=STUDY_SESSION_GAP_SECONDS)]
+        windows = _build_study_windows(events)
+        assert len(windows) == 2
+
+    def test_gap_one_second_under_threshold_merges(self):
+        events = [T0, T0 + timedelta(seconds=STUDY_SESSION_GAP_SECONDS - 1)]
+        windows = _build_study_windows(events)
+        assert len(windows) == 1
+
     def test_real_0729_pattern(self):
         # 复刻 2026-07-29 20 点档：连续心跳，但 24:36→33:18（522s）
         # 零事件 → 间隙只保留两端各 45s，中间全部剔除

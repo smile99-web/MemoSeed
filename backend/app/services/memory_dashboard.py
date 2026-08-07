@@ -1047,10 +1047,12 @@ def build_today_plan(db: Session, user_id: UUID) -> dict[str, object]:
     # words higher than the real queue, showing a misleading number on
     # the dashboard.
     from app.services.memory_scheduler import park_leech_words, park_mastered_words, park_stuck_words, park_cliff_words
+    # 漏词熔断最先执行,与 /review-items 保持一致(否则短周期 park 会先
+    # 抢走同时满足条件的漏词,计划页 due_count 与真实队列持续不符)。
+    park_leech_words(db, user_id, now_utc)
     park_mastered_words(db, user_id, now_utc)
     park_stuck_words(db, user_id, now_utc)
     park_cliff_words(db, user_id, now_utc)
-    park_leech_words(db, user_id, now_utc)
 
     due_count = db.scalar(
         select(func.count(MemoryState.id))

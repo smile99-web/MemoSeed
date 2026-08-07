@@ -17,6 +17,7 @@ from app.services.memory_scheduler import (
     calculate_review_priority,
     exceeded_daily_review_filter_clause,
     park_cliff_words,
+    park_leech_words,
     park_mastered_words,
     park_stuck_words,
     schedule_memory_review,
@@ -34,7 +35,9 @@ def get_review_queue(
 ) -> list[MemoryStateRead]:
     now = datetime.now(UTC)
     # Park plateaued words (R1), mastered words (A), and stuck words (C)
-    # before fetching the queue.
+    # before fetching the queue. 漏词熔断最先执行(与其它入口一致):
+    # 否则短周期 park 会先抢走同时满足条件的漏词。
+    park_leech_words(db, current_user.id, now)
     park_mastered_words(db, current_user.id, now)
     park_stuck_words(db, current_user.id, now)
     park_cliff_words(db, current_user.id, now)

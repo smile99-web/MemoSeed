@@ -18,6 +18,7 @@ from app.services.memory_scheduler import (
     FSRS_FACTOR,
     MIN_STABILITY_DAYS,
     compute_short_term_stability,
+    is_leech_word,
     same_day_next_interval,
     scheduled_stability_days,
 )
@@ -347,11 +348,23 @@ def schedule_micro_review_tasks_for_mistake(
     now: datetime | None = None,
 ) -> None:
     now = now or datetime.now(UTC)
-    cancel_future_pending_tasks(db, user_id, word_state.word)
 
     memory_state = None
     if word_state.memory_state_id is not None:
         memory_state = db.scalar(select(MemoryState).where(MemoryState.id == word_state.memory_state_id))
+    if memory_state is None and word_state.learning_item_id is not None:
+        memory_state = db.scalar(
+            select(MemoryState).where(MemoryState.learning_item_id == word_state.learning_item_id)
+        )
+
+    # 2026-08-07 漏词熔断: lapse>=30 的词不再生成微复习任务、不重置微复习
+    # 钟——否则藏在到期句子里被写错的漏词会立即被重新上弦,熔断形同虚设。
+    # 顺手清掉该词可能残存的待办任务。
+    if memory_state is not None and is_leech_word(memory_state.lapse_count):
+        cancel_future_pending_tasks(db, user_id, word_state.word)
+        return
+
+    cancel_future_pending_tasks(db, user_id, word_state.word)
 
     plan = build_micro_review_plan(now, word_state, error_type, memory_state)
     word_state.micro_review_stage += 1

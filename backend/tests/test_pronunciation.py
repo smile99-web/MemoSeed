@@ -75,6 +75,20 @@ def test_ultra_short_target_passes_on_any_speech():
         assert result.heard_speech is True
 
 
+def test_ultra_short_target_rejects_long_ambient_transcript():
+    # 2026-08-07: the frontend peak-normalizes recordings before ASR, so
+    # background speech (TV dialogue) returns as a real multi-word
+    # transcript. That must NOT earn a pass on a one-letter prompt — the
+    # child said nothing. It still counts as heard speech (a failed
+    # attempt), not as silence.
+    result = score_pronunciation("a", "and then she said hello to him")
+    assert result.passed is False
+    assert result.heard_speech is True
+    # Two-word noise bursts stay lenient — could be the child's own attempt.
+    result = score_pronunciation("go", "go go")
+    assert result.passed is True
+
+
 def test_word_order_hiccup_still_passes():
     result = score_pronunciation("what is your name", "what your is name")
     assert result.passed is True

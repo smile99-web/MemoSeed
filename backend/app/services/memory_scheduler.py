@@ -695,8 +695,17 @@ def park_chronic_failure_words(db: Session, user_id: UUID, now: datetime | None 
 # 排在单词队列最前,造成"哪个包都是这几个词"的现象。
 #
 # 本熔断只看累计失败次数,不看当前状态:lapse >= 30 的词条每次到期就直接
-# 推后 30 天(低频巩固)。之后每次到期再触发再推后,漏词出现频率被永久
-# 限制在每月一次,把学习时间还给有进展的词。
+# 推后 30 天。到期即推意味着这些词实际上不再出现在复习队列里(软退役),
+# 把学习时间还给有进展的词;若以后要救回某个词,手工重置其 lapse_count 即可。
+#
+# 调用顺序要求(2026-08-07 复核修复):park_leech_words 必须先于其它
+# park_* 调用——chronic(+7d)/stuck(+7d)/cliff(+14d) 若先执行,会把同时
+# 满足条件的漏词先推短周期,leech 的 next_review_at<=now 触发条件随后
+# 匹配不到,最差的漏词(lapse>=40 且连败)反而以 7 天周期空转。
+#
+# 视觉词豁免(同日复核):the/us/at/is 这类功能词靠语境高频见面、识别卡
+# 成本极低,永久隐藏没有收益;且它们的 lapse 全是旧拼写时代积累的
+# (当前强度 0.76-0.85),不是真悠悠球。
 LEECH_LAPSE_THRESHOLD = 30
 LEECH_RESCHEDULE_DAYS = 30
 
@@ -714,13 +723,15 @@ def park_leech_words(db: Session, user_id: UUID, now: datetime | None = None) ->
     """Push `next_review_at` to NOW + 30 days for yo-yo leech words.
 
     只在到期时触发(next_review_at <= now),未到期的词不动;到期即推 30 天,
-    幂等。同时把微复习时钟一并推后,避免漏词继续产生微复习任务。
+    幂等。微复习时钟按词文本匹配一并推后(不能只按 learning_item_id:
+    存在 link 缺失/同词多 item 的 WordMemoryState 行,漏推会让漏词经
+    微复习任务回流)。视觉词(SIGHT_WORDS)豁免。
     """
     from app.models.word_memory_state import WordMemoryState
     now = now or datetime.now(UTC)
     target_due = now + timedelta(days=LEECH_RESCHEDULE_DAYS)
-    leech_ids = (
-        select(LearningItem.id)
+    rows = db.execute(
+        select(LearningItem.id, LearningItem.english_text)
         .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
         .where(
             LearningItem.user_id == user_id,
@@ -728,7 +739,18 @@ def park_leech_words(db: Session, user_id: UUID, now: datetime | None = None) ->
             MemoryState.lapse_count >= LEECH_LAPSE_THRESHOLD,
             MemoryState.next_review_at <= now,
         )
-    )
+    ).all()
+    leech_ids: list[UUID] = []
+    leech_words: list[str] = []
+    for item_id, english_text in rows:
+        normalized = normalize_word(english_text or "")
+        if normalized and normalized in SIGHT_WORDS:
+            continue
+        leech_ids.append(item_id)
+        if normalized:
+            leech_words.append(normalized)
+    if not leech_ids:
+        return 0
     result = db.execute(
         update(MemoryState)
         .where(MemoryState.learning_item_id.in_(leech_ids))
@@ -738,7 +760,10 @@ def park_leech_words(db: Session, user_id: UUID, now: datetime | None = None) ->
         update(WordMemoryState)
         .where(
             WordMemoryState.user_id == user_id,
-            WordMemoryState.learning_item_id.in_(leech_ids),
+            or_(
+                WordMemoryState.learning_item_id.in_(leech_ids),
+                WordMemoryState.word.in_(leech_words),
+            ),
         )
         .values(next_micro_review_at=target_due)
     )

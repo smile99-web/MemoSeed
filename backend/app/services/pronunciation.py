@@ -125,13 +125,21 @@ def score_pronunciation(expected: str, transcript: str) -> PronunciationScore:
         return PronunciationScore(score=0.0, passed=False, heard_speech=False)
 
     expected_words = _words(expected)
+    actual_words = _words(transcript)
     # Ultra-short targets ("a", "I", "go") are beyond ASR's reliable
-    # resolution on child voices — any clear speech counts as a pass.
+    # resolution on child voices — any clear SHORT speech counts as a pass.
+    # 2026-08-07: the response must be proportionate to the prompt. The
+    # frontend now peak-normalizes recordings before ASR, so ambient speech
+    # (TV / family chatter) comes back as a real multi-word transcript, and
+    # unconditional "any speech passes" would award points when the child
+    # said nothing. A child answering a one-letter prompt produces a one- or
+    # two-word transcript; ambient chatter produces a long one.
     if 0 < len("".join(expected_words)) <= 2:
-        return PronunciationScore(score=1.0, passed=True, heard_speech=True)
+        if len(actual_words) <= 2:
+            return PronunciationScore(score=1.0, passed=True, heard_speech=True)
+        return PronunciationScore(score=0.0, passed=False, heard_speech=True)
 
     expected_norm = _normalize(expected)
-    actual_words = _words(transcript)
     coverage = _word_coverage(expected_words, actual_words)
     score = max(
         _char_ratio(expected_norm, transcript_norm),

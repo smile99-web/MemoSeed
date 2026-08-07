@@ -69,6 +69,7 @@ from app.services.memory_scheduler import (
     calculate_current_forget_risk,
     calculate_review_priority,
     exceeded_daily_review_filter_clause,
+    is_leech_word,
     park_chronic_failure_words,
     park_cliff_words,
     park_leech_words,
@@ -1027,12 +1028,15 @@ def list_due_review_items(
     stored_settings = get_private_model_settings(db, current_user.id)
     # Park plateaued (R1), mastered (A), and stuck (C) words before
     # building the due queue.
+    # 悠悠球漏词熔断必须最先执行(2026-08-07 复核): lapse>=30 到期即推 30 天。
+    # 若 stuck/cliff/chronic 先跑,同时满足条件的漏词会被先推 +7/14 天短周期,
+    # 熔断的 next_review_at<=now 触发条件就匹配不到它们,最差的漏词反而
+    # 以 7 天周期空转。
+    park_leech_words(db, current_user.id, now)
     park_mastered_words(db, current_user.id, now)
     park_stuck_words(db, current_user.id, now)
     park_cliff_words(db, current_user.id, now)
     park_chronic_failure_words(db, current_user.id, now)
-    # 悠悠球漏词熔断: lapse>=30 的词到期即推后 30 天(不看当前强度/连胜)。
-    park_leech_words(db, current_user.id, now)
     # P2: spread any oversized overdue backlog across the next few days, then
     # apply the daily review budget (distinct items already served today).
     # Without this, 280+ due items made "priority order" meaningless and the
@@ -2489,7 +2493,9 @@ def list_handwriting_items(
     today_start = now.astimezone(LOCAL_TIMEZONE).replace(
         hour=0, minute=0, second=0, microsecond=0
     ).astimezone(UTC)
-
+    # 2026-08-07 复核:手写入口此前不做任何 park,到期漏词(lapse>=30)在此
+    # 以最高优先级听写、提交后次日又到期——月频熔断在此入口变日频死循环。
+    park_leech_words(db, current_user.id, now)
     # 2026-08-04 fix: the "tested today" exclusion was doubly broken —
     # (a) it filtered only dictation/translation modes, missing
     #     sentence-handwriting and handwriting-both events;
@@ -2536,7 +2542,7 @@ def list_handwriting_items(
     )
     # 第一部分：单词复习（到期复习词优先 + 学过的最弱词补齐）
     word_statement = (
-        select(LearningItem, MemoryState.memory_strength, last_tested.c.last_tested_at, MemoryState.next_review_at)
+        select(LearningItem, MemoryState.memory_strength, last_tested.c.last_tested_at, MemoryState.next_review_at, MemoryState.lapse_count)
         .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
         .outerjoin(last_tested, last_tested.c.item_id == LearningItem.id)
         .where(
@@ -2545,9 +2551,12 @@ def list_handwriting_items(
             MemoryState.repetition_count > 0,
         )
     )
+    # 漏词(lapse>=30)不进手写队列——到期档会被熔断推走,"最弱补齐"档
+    # 也不许把它们捞回来,与复习队列的软退役口径保持一致。
     word_rows = [
         (item, strength, tested_at, next_review_at is not None and next_review_at <= now)
-        for item, strength, tested_at, next_review_at in db.execute(word_statement).all()
+        for item, strength, tested_at, next_review_at, lapse_count in db.execute(word_statement).all()
+        if not is_leech_word(lapse_count)
     ]
 
     # 第二部分：中考英语 第1课→第10课 的句子（学习内容，不要求学过）。
@@ -2612,6 +2621,9 @@ def list_daily_test_items(
     today_start = now.astimezone(LOCAL_TIMEZONE).replace(
         hour=0, minute=0, second=0, microsecond=0
     ).astimezone(UTC)
+    # 2026-08-07 复核:每日一测此前不做任何 park,漏词会经到期档/最弱补齐
+    # 档每天进测验,与复习队列的熔断口径矛盾。
+    park_leech_words(db, current_user.id, now)
 
     # 今日已测：手写提交记账在 word-memory 专属 item 上（id 与候选的课程
     # item 不同），所以 id 与归一化词文本都要收集，双重排除才不会漏。
@@ -2675,7 +2687,7 @@ def list_daily_test_items(
     ]
 
     studied_rows = db.execute(
-        select(LearningItem, MemoryState.memory_strength, MemoryState.next_review_at)
+        select(LearningItem, MemoryState.memory_strength, MemoryState.next_review_at, MemoryState.lapse_count)
         .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
         .where(
             LearningItem.user_id == current_user.id,
@@ -2683,7 +2695,7 @@ def list_daily_test_items(
             MemoryState.repetition_count > 0,
         )
     ).all()
-    strength_by_id = {item.id: (strength or 0.0) for item, strength, _nra in studied_rows}
+    strength_by_id = {item.id: (strength or 0.0) for item, strength, _nra, _lapse in studied_rows}
     # 视觉词（the, I, is, are...）不出每日一测——这些功能词太基础，
     # 写错只是笔迹问题不反映词汇掌握，不值得占 20 个测验位。
     _SIGHT_TEST_THRESHOLD = 0.70
@@ -2693,12 +2705,14 @@ def list_daily_test_items(
             return True
         return strength_by_id.get(item.id, 0.0) < _SIGHT_TEST_THRESHOLD
 
+    # 漏词(lapse>=30)不进每日一测的到期档和最弱补齐档——与复习队列的
+    # 软退役口径一致(今日所学 today_rows 不受影响:当天学当天测是正常反馈)。
     due_rows = sorted(
-        (item for item, _s, nra in studied_rows if nra is not None and nra <= now and _testable(item) and _not_retired_sight(item)),
+        (item for item, _s, nra, lapse in studied_rows if nra is not None and nra <= now and not is_leech_word(lapse) and _testable(item) and _not_retired_sight(item)),
         key=lambda item: strength_by_id.get(item.id, 0.0),
     )
     weak_rows = sorted(
-        (item for item, _s, _nra in studied_rows if _testable(item) and _not_retired_sight(item)),
+        (item for item, _s, _nra, lapse in studied_rows if not is_leech_word(lapse) and _testable(item) and _not_retired_sight(item)),
         key=lambda item: strength_by_id.get(item.id, 0.0),
     )
     # today_rows 也过滤——今天刚学过的 sight word 强度已够就不测。

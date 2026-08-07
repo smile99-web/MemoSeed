@@ -1,6 +1,6 @@
 """Learning Replay System: event recording, heatmap, hour/minute replay."""
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Iterable
 from uuid import UUID
 
@@ -158,81 +158,91 @@ def record_assisted_learning_event(
     return event
 
 
-# Track the last recorded minute per user to fill gaps between events
-_last_event_minute: dict[UUID, tuple[date, int, int]] = {}  # user_id -> (date, hour, minute)
+# Track the last recorded event per user to fill gaps between events.
+# user_id -> (local minute floor of the event, event.occurred_at)
+_last_event_mark: dict[UUID, tuple[datetime, datetime | None]] = {}
 
 
 def _fill_gap_minutes(db: Session, user_id: UUID, event: LearningEvent) -> None:
     """Fill minute_stats for minutes between the last event and this one.
 
-    If the last event was at 19:05 and this event is at 19:09, create filler
-    entries for minutes 19:06, 19:07, 19:08 with no events but with study_time.
+    If the last event was at 19:05:20 and this event is at 19:07:10, create a
+    filler entry for minute 19:06 with no events but with minimal study_time.
     This ensures the minute-level replay shows continuous study time, not just
     the exact minutes when reviews happened.
+
+    2026-08-07 复核重写：补占位的判定改用与学习时长会话窗口完全相同的
+    秒级口径（间隔 < STUDY_SESSION_GAP_SECONDS，按 occurred_at 墙钟计）。
+    旧版按本地分钟数差 <=3 判断：分钟差 3 实际墙钟 120-240 秒，会话窗口
+    必然拆分（该时段不计时长），却仍补 2 个零事件占位分钟——分钟级视图
+    显示"学过"、时长口径说"已停手"，同一张日报自相矛盾。统一后：凡补了
+    占位分钟的区间，其心跳必然也在会话窗口内被计时长，两种口径一致。
+    秒级比较还顺带修正了跨小时/跨午夜空档（旧版直接重置不补，与心跳
+    窗口的合并行为不一致）。
     """
-    prev = _last_event_minute.get(user_id)
-    if prev is None:
-        _last_event_minute[user_id] = (event.event_date, event.event_hour, event.event_minute)
-        return
-
-    prev_date, prev_hour, prev_minute = prev
-    # Reset if different date or hour
-    if prev_date != event.event_date or prev_hour != event.event_hour:
-        _last_event_minute[user_id] = (event.event_date, event.event_hour, event.event_minute)
-        return
-
-    curr_minute = event.event_minute
-    gap = curr_minute - prev_minute
-    # 2026-08-07：只有"思考间隙"级别（<=3 分钟）的空档才补占位分钟。
-    # 更大空档说明孩子已停下手，不再制造幻影分钟（家长实测：一小时 52 分钟
-    # 计时时长里 20 分钟零答题，占位分钟让空分钟在分钟级视图里显得"学过"）。
-    if gap <= 1 or gap > 3:
-        _last_event_minute[user_id] = (event.event_date, event.event_hour, event.event_minute)
-        return
-
-    # Fill all gap minutes with minimal study time (1s each — just to show continuity)
-    # The real study time comes from StudyTimeLog, not from gap estimates
-    gap_duration_ms = 1000
-    for gm in range(prev_minute + 1, curr_minute):
-        stmt = select(LearningMinuteStat).where(
-            LearningMinuteStat.user_id == user_id,
-            LearningMinuteStat.stat_date == event.event_date,
-            LearningMinuteStat.stat_hour == event.event_hour,
-            LearningMinuteStat.stat_minute == gm,
-        )
-        existing = db.scalar(stmt)
-        if existing is not None:
-            existing.study_duration_ms = (existing.study_duration_ms or 0) + gap_duration_ms
-            continue
-        stat = LearningMinuteStat(
-            user_id=user_id,
-            stat_date=event.event_date,
-            stat_hour=event.event_hour,
-            stat_minute=gm,
-            study_duration_ms=gap_duration_ms,
-            total_events=0,
-            spelling_events=0,
-            english_to_chinese_events=0,
-            chinese_to_english_events=0,
-            phrase_events=0,
-            sentence_events=0,
-            correct_events=0,
-            incorrect_events=0,
-        )
-        db.add(stat)
-        try:
-            with db.begin_nested():
-                db.flush()
-        except IntegrityError:
-            # Concurrent filler won the race — nothing more to do.
-            # CRITICAL: expunge the losing object. After a savepoint
-            # rollback SQLAlchemy keeps it in session.new, so the NEXT
-            # flush (outside any savepoint) would retry the INSERT, hit
-            # the unique index again, and poison the whole session —
-            # production: word-reviews 500 + lost answer (2026-07-30).
-            db.expunge(stat)
-            continue
-    _last_event_minute[user_id] = (event.event_date, event.event_hour, event.event_minute)
+    curr_floor = datetime.combine(
+        event.event_date, time(event.event_hour, event.event_minute)
+    )
+    prev = _last_event_mark.get(user_id)
+    prev_floor, prev_at = prev if prev is not None else (None, None)
+    occurred_at = event.occurred_at
+    # occurred_at 可能是 aware（测试/显式构造）或 naive（ORM 默认值）;
+    # 统一 strip 后求差——只要两条事件同源,差值就是正确的。
+    if (
+        prev_floor is not None
+        and prev_at is not None
+        and occurred_at is not None
+    ):
+        gap_seconds = (
+            occurred_at.replace(tzinfo=None) - prev_at.replace(tzinfo=None)
+        ).total_seconds()
+        if 0 < gap_seconds < STUDY_SESSION_GAP_SECONDS:
+            # Fill intermediate minutes with minimal study time (1s each —
+            # just to show continuity). The real study time comes from
+            # StudyTimeLog, not from gap estimates.
+            gap_duration_ms = 1000
+            mark = prev_floor + timedelta(minutes=1)
+            while mark < curr_floor:
+                stmt = select(LearningMinuteStat).where(
+                    LearningMinuteStat.user_id == user_id,
+                    LearningMinuteStat.stat_date == mark.date(),
+                    LearningMinuteStat.stat_hour == mark.hour,
+                    LearningMinuteStat.stat_minute == mark.minute,
+                )
+                existing = db.scalar(stmt)
+                if existing is not None:
+                    existing.study_duration_ms = (existing.study_duration_ms or 0) + gap_duration_ms
+                    mark += timedelta(minutes=1)
+                    continue
+                stat = LearningMinuteStat(
+                    user_id=user_id,
+                    stat_date=mark.date(),
+                    stat_hour=mark.hour,
+                    stat_minute=mark.minute,
+                    study_duration_ms=gap_duration_ms,
+                    total_events=0,
+                    spelling_events=0,
+                    english_to_chinese_events=0,
+                    chinese_to_english_events=0,
+                    phrase_events=0,
+                    sentence_events=0,
+                    correct_events=0,
+                    incorrect_events=0,
+                )
+                db.add(stat)
+                try:
+                    with db.begin_nested():
+                        db.flush()
+                except IntegrityError:
+                    # Concurrent filler won the race — nothing more to do.
+                    # CRITICAL: expunge the losing object. After a savepoint
+                    # rollback SQLAlchemy keeps it in session.new, so the NEXT
+                    # flush (outside any savepoint) would retry the INSERT, hit
+                    # the unique index again, and poison the whole session —
+                    # production: word-reviews 500 + lost answer (2026-07-30).
+                    db.expunge(stat)
+                mark += timedelta(minutes=1)
+    _last_event_mark[user_id] = (curr_floor, occurred_at)
 
 
 def _increment_minute_stat(db: Session, event: LearningEvent) -> None:
@@ -360,6 +370,8 @@ def _build_study_windows(event_times: list[datetime]) -> list[tuple[datetime, da
     windows = [(s - grace, e + grace) for s, e in sessions]
     # Edge grace can make adjacent windows overlap — merge them so the
     # two-pointer filter stays correct.
+    # 注：当前常量(120s gap / 45s grace)下拆分间隔 >=120s > 2*45s，窗口不会
+    # 重叠，此合并不可达；保留作为未来调参（grace > gap/2）时的防御。
     merged: list[list[datetime]] = []
     for start, end in windows:
         if merged and start <= merged[-1][1]:
@@ -437,7 +449,7 @@ def _active_study_seconds(db: Session, user_id: UUID, start_utc: datetime, end_u
 
     This is the product decision "没做题就不记录时间", tightened 2026-07-30:
     not just hours-with-events, but heartbeats must be near an actual learning
-    event (<300s gaps merged, ±150s edge grace). Used by build_heatmap and
+    event (<120s gaps merged, ±45s edge grace). Used by build_heatmap and
     build_study_time_summary so every "study time" number across the dashboard
     shares one definition (build_day_detail/build_hour_detail use the same
     filter via _study_seconds_grid).
@@ -565,7 +577,7 @@ def build_day_detail(db: Session, user_id: UUID, day: date) -> dict:
 
     # study_grid 已按"学习会话窗口"过滤（见 STUDY_SESSION_GAP_SECONDS），
     # 无事件小时的心跳基本已被剔除；这里再按有事件小时收敛一次，保证
-    # 全天总时长 = 展示出来的各小时之和（跨小时 ±150s 宽限的零头不悬空）。
+    # 全天总时长 = 展示出来的各小时之和（跨小时 ±45s 宽限的零头不悬空）。
     study_secs_by_hour: dict[int, float] = {}
     for (h, _m), secs in study_grid.items():
         if h in hours_map:
