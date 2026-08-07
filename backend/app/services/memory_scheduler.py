@@ -686,6 +686,66 @@ def park_chronic_failure_words(db: Session, user_id: UUID, now: datetime | None 
     return int(result.rowcount or 0)
 
 
+# --- 悠悠球漏词熔断 (2026-08-07) ---------------------------------------------
+# park_stuck_words 要求 strength < 0.3、park_chronic_failure_words 要求
+# 连续错 >= 3 —— 两者都只看"当前状态"。悠悠球式漏词(学会→遗忘→重学→再忘)
+# 每次回笼时已部分康复(strength 0.75-0.85、连胜中),永远不满足这两道门,
+# 于是一两个月内被反复复习 38-64 次仍不毕业:feel lapse=88、music=37、
+# books=31。这些词不属于任何课程(全局词库),在每个课程包的学习流程里都
+# 排在单词队列最前,造成"哪个包都是这几个词"的现象。
+#
+# 本熔断只看累计失败次数,不看当前状态:lapse >= 30 的词条每次到期就直接
+# 推后 30 天(低频巩固)。之后每次到期再触发再推后,漏词出现频率被永久
+# 限制在每月一次,把学习时间还给有进展的词。
+LEECH_LAPSE_THRESHOLD = 30
+LEECH_RESCHEDULE_DAYS = 30
+
+
+def is_leech_word(lapse_count: int | None) -> bool:
+    """悠悠球漏词判定:累计 lapse 达到熔断线即成立,无视当前强度/连胜。
+
+    与 is_stuck_word 的区别就在这里:stuck 看"现在弱",leech 看"反复失败
+    的总量"。一个词可以当前连胜(strength 高)但仍是 leech。
+    """
+    return (lapse_count or 0) >= LEECH_LAPSE_THRESHOLD
+
+
+def park_leech_words(db: Session, user_id: UUID, now: datetime | None = None) -> int:
+    """Push `next_review_at` to NOW + 30 days for yo-yo leech words.
+
+    只在到期时触发(next_review_at <= now),未到期的词不动;到期即推 30 天,
+    幂等。同时把微复习时钟一并推后,避免漏词继续产生微复习任务。
+    """
+    from app.models.word_memory_state import WordMemoryState
+    now = now or datetime.now(UTC)
+    target_due = now + timedelta(days=LEECH_RESCHEDULE_DAYS)
+    leech_ids = (
+        select(LearningItem.id)
+        .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
+        .where(
+            LearningItem.user_id == user_id,
+            LearningItem.item_type == "word",
+            MemoryState.lapse_count >= LEECH_LAPSE_THRESHOLD,
+            MemoryState.next_review_at <= now,
+        )
+    )
+    result = db.execute(
+        update(MemoryState)
+        .where(MemoryState.learning_item_id.in_(leech_ids))
+        .values(next_review_at=target_due)
+    )
+    db.execute(
+        update(WordMemoryState)
+        .where(
+            WordMemoryState.user_id == user_id,
+            WordMemoryState.learning_item_id.in_(leech_ids),
+        )
+        .values(next_micro_review_at=target_due)
+    )
+    db.commit()
+    return int(result.rowcount or 0)
+
+
 # --- R1: Learning-curve cliff detection --------------------------------------
 # The data shows a hard plateau: from 30 to 100 reviews, memory_strength
 # only improves from 0.68 to 0.70 — a 0.02 gain over 70 additional reviews.

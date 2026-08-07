@@ -71,6 +71,7 @@ from app.services.memory_scheduler import (
     exceeded_daily_review_filter_clause,
     park_chronic_failure_words,
     park_cliff_words,
+    park_leech_words,
     park_mastered_words,
     park_stuck_words,
     schedule_memory_review,
@@ -1030,6 +1031,8 @@ def list_due_review_items(
     park_stuck_words(db, current_user.id, now)
     park_cliff_words(db, current_user.id, now)
     park_chronic_failure_words(db, current_user.id, now)
+    # 悠悠球漏词熔断: lapse>=30 的词到期即推后 30 天(不看当前强度/连胜)。
+    park_leech_words(db, current_user.id, now)
     # P2: spread any oversized overdue backlog across the next few days, then
     # apply the daily review budget (distinct items already served today).
     # Without this, 280+ due items made "priority order" meaningless and the
@@ -1421,11 +1424,14 @@ def list_due_review_items(
             real_tests = intel.get("real_tests", 0)
             unknown_errs = intel.get("unknown_errors", 0)
 
-            # 改进2: lapse > 20 反复拼写失败 -> 只识别。数据: us lapse=138、
-            # let=132、start=122 仍 teaching 考拼写，同样模式失败100+次无学习
-            # 价值。降级到只识别重建 sound<->meaning，停止无效拼写空考。
+            # 改进2(2026-08-07 修订): lapse > 20 悠悠球词 -> 重教链。
+            # 旧版纯识别(不考产出)让高 lapse 词永远毕不了业:识别太简单
+            # 强度虚高(0.75-0.85),间隔拉长后产出能力其实没重建,到期再忘,
+            # 陷入"学会→遗忘→重学→再忘"循环(feel lapse=88)。改为完整
+            # 多模态重教: 两次识别热身 + 一次手写产出。配合 park_leech_words
+            # (lapse>=30 到期即推 30 天),高频回笼与无效空考都被遏止。
             if lapse > 20:
-                return ["listen_choose_chinese", "english_to_chinese"]
+                return ["listen_choose_chinese", "english_to_chinese", "handwriting_dictation"]
 
             if intel.get("intervention"):
                 return ["listen_choose_chinese", "handwriting_dictation"]
