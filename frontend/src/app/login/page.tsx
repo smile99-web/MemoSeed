@@ -6,7 +6,7 @@ import { FormEvent, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { login, saveAuthSession, validateEmail, validatePassword } from "@/lib/auth";
+import { login, saveAuthSession, validateEmail } from "@/lib/auth";
 
 interface LoginFormState {
   email: string;
@@ -28,9 +28,14 @@ export default function LoginPage() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
+    // 登录页不做注册强度校验：任何已存在的密码（含早期 <8 位）都必须能提交，
+    // 对错由服务器判定（2026-08-09 修复：validatePassword 曾把短密码登录
+    // 拦截在浏览器端，服务器永远收不到请求）。邮箱先 trim 再校验，
+    // 否则首尾空格会被误判"无效邮箱"同样拦截在浏览器端。
+    const trimmedEmail = form.email.trim();
     const nextErrors: LoginFormErrors = {
-      email: validateEmail(form.email) ?? undefined,
-      password: validatePassword(form.password) ?? undefined,
+      email: validateEmail(trimmedEmail) ?? undefined,
+      password: form.password ? undefined : "请输入密码",
     };
 
     if (nextErrors.email || nextErrors.password) {
@@ -42,7 +47,7 @@ export default function LoginPage() {
     setErrors({});
 
     try {
-      const auth = await login({ email: form.email.trim(), password: form.password });
+      const auth = await login({ email: trimmedEmail, password: form.password });
       saveAuthSession(auth);
       router.push("/");
     } catch (error) {
