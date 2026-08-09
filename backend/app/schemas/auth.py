@@ -8,6 +8,8 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     username: str = Field(min_length=2, max_length=80)
     password: str = Field(min_length=8, max_length=128)
+    # Optional invite code — enforced only when the server sets INVITE_CODE.
+    invite_code: str | None = Field(default=None, max_length=64)
 
 
 class LoginRequest(BaseModel):

@@ -292,9 +292,14 @@ def generate_dynamic_review_sentence(
     if not candidates:
         fb = _build_fallback_sentence(known_words, focus_words)
         candidates.append({"english_text": fb, "chinese_text": translate_sentence_or_fallback(fb, settings, timeout=DYNAMIC_SENTENCE_LLM_TIMEOUT)})
-
-    # Cache all generated candidates
-    _cache_sentences(db, words_hash, difficulty_level, candidates)
+    else:
+        # Cache only candidates with a real translation. A candidate whose
+        # translation failed carries the placeholder "AI 生成复习句" —
+        # caching it made that placeholder permanent for this word hash
+        # (2026-08-09 fix). Skipping the cache lets the next request retry.
+        cacheable = [c for c in candidates if c["chinese_text"] != TRANSLATION_FALLBACK_PLACEHOLDER]
+        if cacheable:
+            _cache_sentences(db, words_hash, difficulty_level, cacheable)
 
     primary = candidates[0]
     return DynamicSentenceResult(
@@ -379,8 +384,11 @@ def _build_fallback_sentence(known_words: list[str], focus_words: list[str]) -> 
     return _pick_fallback_template(focus_word, known_words)
 
 
+TRANSLATION_FALLBACK_PLACEHOLDER = "AI 生成复习句"
+
+
 def translate_sentence_or_fallback(sentence: str, settings: LlmTranslationSettings, timeout: int | None = None) -> str:
     try:
         return translate_english_to_chinese(sentence, settings, timeout=timeout)
     except ValueError:
-        return "AI 生成复习句"
+        return TRANSLATION_FALLBACK_PLACEHOLDER

@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.word_translation import WordTranslation
@@ -118,7 +119,23 @@ def ensure_word_translations(
                 chinese_text=chinese_text,
                 source="llm",
             )
-            db.add(translation)
+            try:
+                # Savepoint: a concurrent request caching the same new word
+                # loses the uq_word_translations_user_word race here and
+                # re-reads the winner instead of 500ing (2026-08-09 fix).
+                with db.begin_nested():
+                    db.add(translation)
+                    db.flush()
+            except IntegrityError:
+                db.expunge(translation)
+                translation = db.scalar(
+                    select(WordTranslation).where(
+                        WordTranslation.user_id == user_id,
+                        WordTranslation.word == word,
+                    )
+                )
+                if translation is None:  # pragma: no cover - defensive
+                    continue
         else:
             translation.course_id = translation.course_id or course_id
             translation.chinese_text = chinese_text

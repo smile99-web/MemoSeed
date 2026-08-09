@@ -4,6 +4,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.learning_item import LearningItem
@@ -96,8 +97,23 @@ def get_or_create_word_memory_state(
         learning_item_id=learning_item_id,
         memory_state_id=memory_state_id,
     )
-    db.add(word_state)
-    db.flush()
+    try:
+        # Savepoint so a concurrent insert of the same (user, word) loses the
+        # race WITHOUT poisoning the outer transaction — the winner's row is
+        # re-read below (uq_word_memory_states_user_word check-then-insert
+        # race, 2026-08-09 fix).
+        with db.begin_nested():
+            db.add(word_state)
+            db.flush()
+    except IntegrityError:
+        # The loser object is still pending after the savepoint rollback —
+        # expunge it or every later flush retries the doomed INSERT.
+        db.expunge(word_state)
+        word_state = db.scalar(
+            select(WordMemoryState).where(WordMemoryState.user_id == user_id, WordMemoryState.word == normalized_word)
+        )
+        if word_state is None:  # pragma: no cover - defensive; the winner must exist
+            raise
     return word_state
 
 

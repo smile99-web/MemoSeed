@@ -736,6 +736,11 @@ function StudyContent() {
   // disable real pronunciation checking for the REST OF THE SESSION —
   // every later card became a loudness free-pass.
   const echoManualUntilRef = useRef(0);
+  // Mid-prompt degradation unlocks the manual button immediately (the child
+  // already sat through TTS + record cycles). The echo effect re-run that
+  // follows would reset it to false — this one-shot marker tells that run to
+  // keep the unlock (2026-08-09 fix).
+  const echoManualReadyKeptRef = useRef(false);
   // 家长要求（2026-08-02）：跟读不再先领读。首次尝试只播"开始"提示音
   // 直接考；读错了才播正确示范再重录。"再听一遍"按钮通过此 ref 要求
   // 下一次 effect 运行先播示范。
@@ -2641,10 +2646,15 @@ function StudyContent() {
     const durationSeconds = Math.max(1, Math.round((activeStudyMsRef.current - courseRunStartedActiveMsRef.current) / 1000));
     const correctWordCount = courseRunCorrectWordKeysRef.current.size;
 
-    addCourseCompletion(courseId, durationSeconds, correctWordCount);
-    const accessToken = getAccessToken();
-    if (accessToken) {
-      void recordCourseCompletion(accessToken, courseId, durationSeconds, correctWordCount).catch(() => undefined);
+    // test/speak/handwrite modes have NO course (courseId === "") — recording
+    // a completion for them wrote a garbage `memoseed_course_completion_<user>_`
+    // localStorage key and POSTed an empty course_id (2026-08-09 fix).
+    if (courseId) {
+      addCourseCompletion(courseId, durationSeconds, correctWordCount);
+      const accessToken = getAccessToken();
+      if (accessToken) {
+        void recordCourseCompletion(accessToken, courseId, durationSeconds, correctWordCount).catch(() => undefined);
+      }
     }
     courseRunStartedActiveMsRef.current = activeStudyMsRef.current;
     courseRunCorrectWordKeysRef.current = new Set();
@@ -2865,9 +2875,6 @@ function StudyContent() {
     if (!accessToken || uniqueMistakenWords.length === 0) {
       return false;
     }
-    if (uniqueMistakenWords.length === 0) {
-      return false;
-    }
 
     try {
       const generatedSentence = await generateDynamicSentence(
@@ -2899,7 +2906,11 @@ function StudyContent() {
       };
       setItems((current) => {
         const nextItems = [...current];
-        nextItems.splice(currentIndex + 1, 0, dynamicItem);
+        // Insert after the child's CURRENT position, not the closure-frozen
+        // currentIndex: the LLM call above takes 10-30s and the child has
+        // usually advanced by now — the frozen index displaced the item the
+        // child was actively working on (2026-08-09 fix).
+        nextItems.splice(Math.min(currentIndexRef.current + 1, nextItems.length), 0, dynamicItem);
         return nextItems;
       });
       return true;
@@ -3163,6 +3174,7 @@ function StudyContent() {
     // plus full record/silence cycles — the mic had its chance, so the manual
     // button must be usable immediately (otherwise the card becomes a trap).
     setEchoManualReady(true);
+    echoManualReadyKeptRef.current = true;
     if (hint) {
       setFeedback(hint);
     }
@@ -3299,8 +3311,14 @@ function StudyContent() {
       // manual button stays available. The button starts DISABLED: it only
       // unlocks after the model TTS has played AND one listen window finished
       // without detecting a voice, so a silent one-click skip takes longer
-      // than just reading the text aloud.
-      setEchoManualReady(false);
+      // than just reading the text aloud. EXCEPT when this run follows a
+      // mid-prompt degradation — that path already made the child wait, so
+      // it pre-unlocked the button and we must not re-lock it (2026-08-09).
+      if (echoManualReadyKeptRef.current) {
+        echoManualReadyKeptRef.current = false;
+      } else {
+        setEchoManualReady(false);
+      }
       // Sustained-voice requirement scales with the text (~450ms/word):
       // shouting only the FIRST word (~350ms of voice) must NOT count as
       // "read the sentence" — that was the parent's bug report.
@@ -3744,7 +3762,11 @@ function StudyContent() {
           // Copying failed twice — show the full preview again.
           setCopyWordIndex(null);
           copyErrorsRef.current = 0;
+          const itemIdAtError = currentItemIdRef.current;
           void translateWordForHint(expectedWord).then((translatedWord) => {
+            // Item guard (same as the 3-errors path below): the child may
+            // have skipped to the next item during the translation.
+            if (currentItemIdRef.current !== itemIdAtError) return;
             showWordPreview(index, expectedWord, translatedWord ?? "");
           });
         } else {
@@ -3991,6 +4013,21 @@ function StudyContent() {
       return;
     }
 
+    // The child just answered the LAST word correctly while earlier required
+    // words are still blank (iPad: tap any input directly). Falling through
+    // to completion here logged a fake score-5 "all correct" and skipped
+    // practicing the blank words entirely — redirect focus to the first
+    // unfinished required word instead (2026-08-09 fix).
+    const firstIncomplete = getRequiredWordIndexes().find((wordIndex) => (
+      nextStatusesForAttempt[wordIndex] !== "skipped"
+      && normalizeTypedWord(nextAnswers[wordIndex] ?? "") !== normalizeTypedWord(currentWords[wordIndex] ?? "")
+    ));
+    if (firstIncomplete !== undefined) {
+      setActiveWordIndex(firstIncomplete);
+      window.setTimeout(() => inputRefs.current[firstIncomplete]?.focus(), 0);
+      return;
+    }
+
     void showWordMeaningsBeforeCompletion();
   }
 
@@ -4055,7 +4092,11 @@ function StudyContent() {
         void logWordMistake(learningItemId, expectedWord, mistakePracticeAnswer, accessToken, errorType, Math.min(MAX_REVIEW_DURATION_SECONDS, Math.max(1, Math.round((Date.now() - startedAt) / 1000)))).catch(() => undefined);
       }
       if (nextErrorCount === 3 || (errorType === "unknown" && nextErrorCount >= 2)) {
+        const itemIdAtError = currentItemIdRef.current;
         await playChineseThenEnglish(currentMistakePracticeTranslation, expectedWord);
+        // Item guard: the TTS above takes seconds — if the child skipped to
+        // the next item, the old word's preview must not land there.
+        if (currentItemIdRef.current !== itemIdAtError) return;
         showMistakePracticePreview(expectedWord);
         return;
       }
@@ -4097,8 +4138,10 @@ function StudyContent() {
 
     // All MISTAKE_PRACTICE_REQUIRED_CONSECUTIVE repetitions complete.
     // Reset the consecutive counter and transition to the meaning quiz.
+    // NOTE: no second recordSuccessfulWordSpelling here — this final
+    // repetition was already logged above (2026-08-09: it used to ALSO log a
+    // contradictory word-preview/score-3 record for the same keypress).
     setMistakePracticeConsecutiveCorrect(0);
-    recordSuccessfulWordSpelling(expectedWord, mistakePracticeAnswer, mistakePracticeErrorCount, true, true);
 
     // Guard: without a Chinese translation the meaning quiz would offer the
     // English word itself as the "correct" answer — skip the quiz instead.
@@ -4347,6 +4390,13 @@ function StudyContent() {
       return false;
     }
 
+    // Item guard for the await below: while translations load (up to ~2.5s)
+    // the child can press Enter/下一句 and land on a NEW item. The stale
+    // continuation must NOT hijack it — previously it mounted the old item's
+    // mistake practice over the new one, and advanceAfterMistakeMeaning then
+    // pre-filled every new-item word with the correct answer (2026-08-09 fix).
+    const itemIdAtStart = currentItemIdRef.current;
+
     let practiceTranslations = pendingMistakePracticeTranslationsRef.current;
     // Clear pending BEFORE awaiting translations so a re-entrant call during
     // the await sees empty words and returns immediately
@@ -4354,6 +4404,10 @@ function StudyContent() {
     const hasMissingTranslation = words.some((word) => !practiceTranslations[word]);
     if (hasMissingTranslation) {
       practiceTranslations = { ...practiceTranslations, ...(await translateMistakePracticeWords(words)) };
+    }
+
+    if (currentItemIdRef.current !== itemIdAtStart) {
+      return false;
     }
 
     setMistakePracticeWords(words);
@@ -5078,6 +5132,11 @@ function StudyContent() {
                       variant="secondary"
                       className={actionButtonClass}
                       onMouseDown={keepStudyInputFocus}
+                      // Disabled on success: replaying the model TTS starts a
+                      // fresh listen cycle whose pass would double-count the
+                      // read-aloud (points + 开口次数) in the 1.2s advance
+                      // window (2026-08-09 fix).
+                      disabled={echoStatus === "success"}
                       onClick={() => {
                         // Replay the model TTS (also restarts the recording).
                         // 家长要求首次不领读，所以这个按钮是孩子主动要示范

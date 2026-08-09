@@ -67,6 +67,14 @@ def register(
     db: Annotated[Session, Depends(get_db)],
     user_agent: Annotated[str | None, Header(alias="User-Agent")] = None,
 ) -> AuthResponse:
+    # Optional invite-code gate (2026-08-09): active only when INVITE_CODE is
+    # configured. Open registration on the public domain let any stranger
+    # create an account and burn the server's paid TTS/LLM keys.
+    from app.core.config import settings as app_settings
+    required_code = (app_settings.invite_code or "").strip()
+    if required_code and (payload.invite_code or "").strip() != required_code:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="邀请码不正确")
+
     existing_user = db.scalar(select(User).where(or_(User.email == payload.email, User.username == payload.username)))
     if existing_user is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email or username already exists")

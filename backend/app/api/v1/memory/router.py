@@ -26,7 +26,7 @@ from app.services.ai_review_advisor import generate_review_advice, get_todays_re
 from app.schemas.review import MistakeLogRead, ReviewLogRead
 from app.services.fsrs_fitting import fit_user_fsrs_parameters
 from app.services.learning_replay import record_learning_event
-from app.services.memory_scheduler import ASSISTED_REVIEW_MODES, schedule_memory_review
+from app.services.memory_scheduler import ASSISTED_REVIEW_MODES, LOCAL_TIMEZONE, schedule_memory_review
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -430,9 +430,12 @@ def get_points_heatmap(
 
     if year is not None and (year < 2000 or year > 2100):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="year must be 2000-2100")
-    target_year = year or datetime.now(UTC).year
-    start_dt = datetime(target_year, 1, 1, tzinfo=UTC)
-    end_dt = datetime(target_year + 1, 1, 1, tzinfo=UTC)
+    # Year window must use LOCAL (Asia/Shanghai) Jan-1 boundaries — the rows
+    # are bucketed by Shanghai date below, so UTC boundaries dropped the 8
+    # hours around New Year from EVERY year (2026-08-09 fix).
+    target_year = year or datetime.now(LOCAL_TIMEZONE).year
+    start_dt = datetime(target_year, 1, 1, tzinfo=LOCAL_TIMEZONE)
+    end_dt = datetime(target_year + 1, 1, 1, tzinfo=LOCAL_TIMEZONE)
 
     # Bucket by Asia/Shanghai — func.date() alone uses UTC and attributes
     # evening points (local next day) to the previous day.
@@ -482,6 +485,17 @@ def get_points_summary_endpoint(
     return get_points_summary(db, current_user.id)
 
 
+# Client-awardable points are deliberately closed-world (2026-08-09): the only
+# client-driven award in the product is the echo read-aloud bonus (+2, capped
+# at 20/day). Previously this endpoint accepted ANY points_change/reason, so
+# a child opening DevTools could mint 999999 points and break the whole
+# incentive system. The server now decides both the amount and the daily cap;
+# the client's points_change is ignored.
+READ_ALOUD_AWARD_REASON = "read-aloud"
+READ_ALOUD_POINTS_PER_READ = 2
+READ_ALOUD_DAILY_POINTS_CAP = 20
+
+
 @router.post("/points/award")
 def award_points_endpoint(
     payload: PointsAwardRequest,
@@ -489,7 +503,21 @@ def award_points_endpoint(
     db: Annotated[Session, Depends(get_db)],
 ) -> dict:
     from app.services.points_service import award_points
-    result = award_points(db, current_user.id, payload.points_change, payload.reason, payload.detail, payload.learning_item_id)
+    if payload.reason != READ_ALOUD_AWARD_REASON:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unsupported points reason")
+    today_start = datetime.now(LOCAL_TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0)
+    awarded_today = db.scalar(
+        select(func.coalesce(func.sum(PointsLog.points_changed), 0)).where(
+            PointsLog.user_id == current_user.id,
+            PointsLog.reason == READ_ALOUD_AWARD_REASON,
+            PointsLog.created_at >= today_start,
+        )
+    ) or 0
+    if awarded_today >= READ_ALOUD_DAILY_POINTS_CAP:
+        # Cap reached — no-op award returns the current state without logging.
+        result = award_points(db, current_user.id, 0, payload.reason, payload.detail, payload.learning_item_id)
+    else:
+        result = award_points(db, current_user.id, READ_ALOUD_POINTS_PER_READ, payload.reason, (payload.detail or "")[:200] or None, payload.learning_item_id)
     db.commit()  # award_points only flushes; without this the award rolls back
     return result
 

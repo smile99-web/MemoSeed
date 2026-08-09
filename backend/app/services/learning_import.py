@@ -317,13 +317,17 @@ def _are_phonetically_similar(word1: str, word2: str) -> bool:
     return dist <= 1
 
 
-def resequence_course_items(db: Session, user_id: UUID, course_id: UUID) -> None:
+def resequence_course_items(db: Session, user_id: UUID, course_id: UUID, *, commit: bool = True) -> None:
     """Auto-assign sort_order for all items in a course.
 
     Sequencing rules:
     1. Sort by difficulty_level ASC, then word length ASC, then alphabetical.
     2. Separate confusingly similar words (edit-distance check) by at least 2 positions.
     3. Assign sequential sort_order and unit_label based on difficulty tiers.
+
+    commit=False is for callers mid-transaction (course-package import): an
+    internal commit would persist a partially-imported package that the
+    caller's error handling then claims was "not imported at all".
     """
     items = db.scalars(
         select(LearningItem).where(
@@ -382,4 +386,7 @@ def resequence_course_items(db: Session, user_id: UUID, course_id: UUID) -> None
         item.unit_label = unit_label
         unit_counters[level] += 1
 
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()

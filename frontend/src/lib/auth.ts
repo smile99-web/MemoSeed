@@ -1,4 +1,5 @@
 import { apiRequest } from "@/lib/api";
+import { getApiBaseUrl } from "@/lib/api-base-url";
 
 export interface AuthUser {
   id: string;
@@ -23,6 +24,8 @@ export interface RegisterPayload {
   email: string;
   username: string;
   password: string;
+  // Optional — only checked when the server configures INVITE_CODE.
+  invite_code?: string;
 }
 
 export interface LoginPayload {
@@ -139,10 +142,22 @@ async function refreshAccessTokenOnce(): Promise<string | null> {
   }
 
   try {
-    const tokens = await apiRequest<TokenPair, { refresh_token: string }>("/auth/refresh", {
+    // Bare fetch — NOT apiRequest. On a 401 apiRequest would call
+    // getFreshAccessToken() → refreshAccessToken(), which returns THIS very
+    // in-flight refresh promise: a circular await that never settles. With an
+    // expired refresh token (e.g. iPad untouched for 90+ days) every authed
+    // request hung forever and the app sat on "正在加载" until a manual
+    // page reload (2026-08-09 fix).
+    const response = await fetch(`${getApiBaseUrl()}/auth/refresh`, {
       method: "POST",
-      body: { refresh_token: refreshToken },
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+      cache: "no-store",
     });
+    if (!response.ok) {
+      throw new Error(`Refresh failed: ${response.status}`);
+    }
+    const tokens = (await response.json()) as TokenPair;
     window.localStorage.setItem(accessTokenKey, tokens.access_token);
     window.localStorage.setItem(refreshTokenKey, tokens.refresh_token);
     return tokens.access_token;

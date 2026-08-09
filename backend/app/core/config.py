@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     # (one per device) so login on a new device does NOT kick older devices.
     jwt_refresh_token_expire_days: int = Field(default=90, alias="JWT_REFRESH_TOKEN_EXPIRE_DAYS")
 
+    # Optional registration invite code. Empty (default) = open registration
+    # (dev/tests). Set INVITE_CODE in production to stop strangers from
+    # registering and burning the server's paid TTS/LLM keys.
+    invite_code: str = Field(default="", alias="INVITE_CODE")
+
     ai_provider: str | None = Field(default=None, alias="AI_PROVIDER")
     ai_base_url: str | None = Field(default=None, alias="AI_BASE_URL")
     ai_api_key: str | None = Field(default=None, alias="AI_API_KEY")

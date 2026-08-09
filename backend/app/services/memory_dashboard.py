@@ -241,17 +241,18 @@ def build_memory_dashboard(db: Session, user_id: UUID, course_id: UUID | None = 
     for learning_item_id, review_mode, error_type, is_correct, reviewed_at in review_rows:
         for word in item_word_map.get(learning_item_id, set()):
             stats = get_word_stats(word_stats, word)
-            # Skip error_type_counts aggregation when the word already has a
-            # WordMemoryState row — that row is the canonical per-word
-            # aggregate and was updated by sync_word_memory_from_review at
-            # review time. Re-counting from ReviewLog here would
-            # triple-count the same event.
-            if word not in words_with_state:
-                stats.error_type_counts = stats.error_type_counts or {}
-                if error_type:
-                    stats.error_type_counts[error_type] = stats.error_type_counts.get(error_type, 0) + 1
             stats.review_count += 1
             stats.last_reviewed_at = reviewed_at
+            if word in words_with_state:
+                # WordMemoryState is the canonical per-word aggregate for
+                # these words (merged above via max()). Replaying the same
+                # review history on top double-counted every mode/consecutive
+                # counter — the words_with_state guard used to cover only
+                # error_type_counts (2026-08-09 fix).
+                continue
+            stats.error_type_counts = stats.error_type_counts or {}
+            if error_type:
+                stats.error_type_counts[error_type] = stats.error_type_counts.get(error_type, 0) + 1
             if not is_correct:
                 stats.consecutive_error_count += 1
                 stats.consecutive_correct_count = 0
@@ -692,7 +693,19 @@ def compute_study_streak(db: Session, user_id: UUID) -> dict[str, object]:
         local_date = recorded_at.astimezone(LOCAL_TIMEZONE).date()
         study_dates[local_date] = study_dates.get(local_date, 0) + int(duration_seconds or 0)
 
-    active_dates = {d for d, secs in study_dates.items() if secs >= 300}
+    # A day only counts as "studied" when it ALSO has real learning events.
+    # Raw heartbeats alone can be phantom time (an abandoned echo card kept
+    # the 10s heartbeat alive for 69 minutes on 2026-07-28) — that used to
+    # light up 0-answer days and inflate the streak (2026-08-09 fix).
+    event_dates = {
+        row[0].astimezone(LOCAL_TIMEZONE).date()
+        for row in db.execute(
+            select(LearningEvent.occurred_at).where(LearningEvent.user_id == user_id)
+        ).all()
+        if row[0] is not None
+    }
+
+    active_dates = {d for d, secs in study_dates.items() if secs >= 300 and d in event_dates}
 
     current_streak = 0
     check_date = today
@@ -738,15 +751,17 @@ def build_daily_report(db: Session, user_id: UUID, report_date: date | None = No
     review_count = len(today_reviews)
     correct_count = sum(1 for r in today_reviews if r.is_correct)
     accuracy_rate = round(correct_count / review_count, 2) if review_count else 0.0
-    # Use StudyTimeLog (real per-session time) instead of ReviewLog.duration_seconds (always 0)
-    study_minutes_rows = db.execute(
-        select(func.coalesce(func.sum(StudyTimeLog.duration_seconds), 0))
-        .where(StudyTimeLog.user_id == user_id, StudyTimeLog.recorded_at >= day_start_utc, StudyTimeLog.recorded_at < day_end_utc)
-    ).scalar() or 0
-    study_minutes = study_minutes_rows // 60
+    # Event-anchored study time (session windows) — the same definition every
+    # other dashboard number uses since 2026-08-07. Raw heartbeat sums
+    # included idle/phantom minutes (2026-08-09 fix).
+    study_minutes = _active_study_seconds(db, user_id, day_start_utc, day_end_utc) // 60
     words_practiced = len({r.learning_item_id for r in today_reviews})
 
-    # New words practiced today: items where the review was the first correct recall (repetition_count == 1)
+    # New words practiced today: first-ever review happened today. The old
+    # MemoryState.repetition_count == 1 filter compared against the CURRENT
+    # cumulative count, so a new word answered correctly twice in one day
+    # vanished from "new words" (2026-08-09 fix; mirrors build_today_progress).
+    EarlierReview = aliased(ReviewLog)
     new_words_practiced = db.scalar(
         select(func.count(func.distinct(ReviewLog.learning_item_id))).where(
             ReviewLog.user_id == user_id,
@@ -754,11 +769,10 @@ def build_daily_report(db: Session, user_id: UUID, report_date: date | None = No
             ReviewLog.reviewed_at < day_end_utc,
             ReviewLog.is_correct.is_(True),
             ReviewLog.score >= 3,
-            ReviewLog.learning_item_id.in_(
-                select(MemoryState.learning_item_id).where(
-                    MemoryState.repetition_count == 1,
-                    MemoryState.last_reviewed_at >= day_start_utc,
-                )
+            ~exists().where(
+                EarlierReview.user_id == user_id,
+                EarlierReview.learning_item_id == ReviewLog.learning_item_id,
+                EarlierReview.reviewed_at < day_start_utc,
             ),
         )
     ) or 0
@@ -1325,14 +1339,19 @@ def generate_ai_daily_report(db: Session, user_id: UUID, report_date: date | Non
     report_data = build_daily_report(db, user_id, report_date)
     raw = report_data.pop("_raw", {})
 
-    # Delete old record so regenerate always reflects current state
+    # Delete old record so regenerate always reflects current state — but
+    # PRESERVE the AI review recommendations: they are written separately by
+    # ai_review_advisor, and check_and_generate_daily_report will not re-add
+    # them once today's row exists (2026-08-09 fix).
     existing = db.scalar(
         select(AiDailyReport).where(
             AiDailyReport.user_id == user_id,
             AiDailyReport.report_date == report_data["report_date"],
         )
     )
+    preserved_recommendations: dict = {}
     if existing is not None:
+        preserved_recommendations = existing.review_recommendations or {}
         db.delete(existing)
         db.flush()
 
@@ -1348,6 +1367,7 @@ def generate_ai_daily_report(db: Session, user_id: UUID, report_date: date | Non
             high_forget_risk_count=raw.get("high_forget_risk_count", 0),  # type: ignore[arg-type]
             summary=report_data["summary"],
             next_day_strategy=report_data["next_day_strategy"],
+            review_recommendations=preserved_recommendations,
         )
     )
     db.commit()
@@ -1379,11 +1399,14 @@ def check_and_generate_daily_report(db: Session, user_id: UUID) -> bool:
     if existing is not None:
         return False
 
-    today_has_study = db.scalar(
-        select(func.count(StudyTimeLog.id)).where(StudyTimeLog.user_id == user_id, StudyTimeLog.recorded_at >= today_start_utc)
+    # Trigger on REAL learning events, not raw heartbeats — phantom heartbeat
+    # time (e.g. an abandoned echo card) used to fire a report for a day with
+    # zero answered questions (2026-08-09 fix).
+    today_has_events = db.scalar(
+        select(func.count(LearningEvent.id)).where(LearningEvent.user_id == user_id, LearningEvent.occurred_at >= today_start_utc)
     ) or 0
 
-    if today_has_study == 0:
+    if today_has_events == 0:
         return False
 
     generate_ai_daily_report(db, user_id, today)
@@ -1468,15 +1491,12 @@ def build_review_forecast(db: Session, user_id: UUID) -> dict[str, object]:
         day_counts[day_key] = day_counts.get(day_key, 0) + 1
     peak_day = max(day_counts.items(), key=lambda x: x[1]) if day_counts else ("-", 0)
 
-    # Efficiency: compute from real study time (not review_log.duration_seconds which is usually 0)
+    # Efficiency: event-anchored study time (session windows), the same
+    # definition used everywhere else since 2026-08-07. The raw heartbeat
+    # sum here used to overstate seconds-per-item, inflating every forecast
+    # minute below (2026-08-09 fix).
     week_ago = now - timedelta(days=7)
-    recent_study = db.scalars(
-        select(StudyTimeLog.duration_seconds).where(
-            StudyTimeLog.user_id == user_id,
-            StudyTimeLog.recorded_at >= week_ago,
-        )
-    ).all()
-    total_study_seconds = sum(recent_study) if recent_study else 0
+    total_study_seconds = _active_study_seconds(db, user_id, week_ago, now)
     avg_daily_seconds = round(total_study_seconds / 7)
     avg_daily_minutes = round(avg_daily_seconds / 60)
 
@@ -1519,7 +1539,9 @@ def build_review_forecast(db: Session, user_id: UUID) -> dict[str, object]:
     if total_backlog > 50:
         actions.append(f"复习积压{total_backlog}词（{today_count}词今日到期），建议每天坚持复习清理积压")
     elif load_level == "overload":
-        actions.append(f"明日{week_count}词到期压力较大，建议今天提前复习一部分分散压力")
+        # tomorrow_count (not week_count) — load_level is bucketed by
+        # tomorrow's due count, the message must match (2026-08-09 fix).
+        actions.append(f"明日{tomorrow_count}词到期压力较大，建议今天提前复习一部分分散压力")
     elif load_level == "heavy":
         actions.append(f"明日{tomorrow_count}词到期，建议今天多复习15分钟减轻明天负担")
     if tomorrow_high_risk > 0:

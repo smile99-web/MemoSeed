@@ -139,7 +139,7 @@ def call_llm_generate(settings: LlmTranslationSettings, prompt: str, timeout: in
 def _dispatch_llm_generate(settings: LlmTranslationSettings, prompt: str, timeout: int | None = None) -> str:
     provider = settings.provider.strip().lower()
     if provider in {"ollama", "local"}:
-        return call_ollama_generate(settings.base_url, settings.model, prompt)
+        return call_ollama_generate(settings.base_url, settings.model, prompt, timeout=timeout)
     if provider in {"deepseek", "openai", "qwen"}:
         return call_openai_chat_completion(settings.base_url, settings.model, settings.api_key, prompt, timeout=timeout)
     raise ValueError(f"Unsupported LLM provider: {settings.provider}")
@@ -179,7 +179,7 @@ def _env_fallback_settings() -> LlmTranslationSettings | None:
     return _env_fallback_cache  # type: ignore[return-value]
 
 
-def call_ollama_generate(base_url: str, model: str, prompt: str) -> str:
+def call_ollama_generate(base_url: str, model: str, prompt: str, timeout: int | None = None) -> str:
     if not base_url.strip():
         raise ValueError("LLM base URL is required")
     if not model.strip():
@@ -188,18 +188,20 @@ def call_ollama_generate(base_url: str, model: str, prompt: str) -> str:
     errors: list[str] = []
     for candidate_base_url in get_candidate_base_urls(base_url.strip()):
         try:
-            return request_ollama_generate(candidate_base_url, model.strip(), prompt)
+            return request_ollama_generate(candidate_base_url, model.strip(), prompt, timeout=timeout)
         except (HTTPError, URLError, TimeoutError, ValueError) as exc:
             errors.append(f"{candidate_base_url}: {exc}")
 
     raise ValueError("LLM translation failed: " + "; ".join(errors))
 
 
-def request_ollama_generate(base_url: str, model: str, prompt: str) -> str:
+def request_ollama_generate(base_url: str, model: str, prompt: str, timeout: int | None = None) -> str:
     url = base_url.rstrip("/") + "/api/generate"
     payload = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode("utf-8")
     request = Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
-    with urlopen(request, timeout=10) as response:
+    # Honor the caller's per-call timeout (dynamic sentences tighten it to
+    # 12s); 10s is just the default for legacy callers.
+    with urlopen(request, timeout=timeout if timeout is not None else 10) as response:
         body = json.loads(response.read().decode("utf-8"))
 
     generated_text = body.get("response")

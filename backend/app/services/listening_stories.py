@@ -231,11 +231,13 @@ def generate_stories(
     if len(words) < 20:
         raise ValueError(f"练过的单词太少（{len(words)} 个），无法编故事——先学习更多单词")
 
-    # 已存在的主题不重复生成
-    existing_titles = {
-        row[0] for row in db.execute(select(ListeningStory.title).where(ListeningStory.user_id == user_id)).all()
+    # 已存在的主题不重复生成 — match the exact theme column, not a substring
+    # of the LLM-generated title (a differently-worded title like "小明在学校
+    # 的一天" slipped past the title check and regenerated the same theme).
+    existing_themes = {
+        row[0] for row in db.execute(select(ListeningStory.theme).where(ListeningStory.user_id == user_id)).all()
     }
-    themes = [t for t in STORY_THEMES if not any(t in title for title in existing_titles)]
+    themes = [t for t in STORY_THEMES if t not in existing_themes]
     if not themes:
         themes = list(STORY_THEMES)
 

@@ -13,6 +13,7 @@ interface RegisterFormState {
   username: string;
   password: string;
   confirmPassword: string;
+  inviteCode: string;
 }
 
 interface RegisterFormErrors {
@@ -30,6 +31,7 @@ export default function RegisterPage() {
     username: "",
     password: "",
     confirmPassword: "",
+    inviteCode: "",
   });
   const [errors, setErrors] = useState<RegisterFormErrors>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -57,6 +59,7 @@ export default function RegisterPage() {
         email: form.email.trim(),
         username: form.username.trim(),
         password: form.password,
+        invite_code: form.inviteCode.trim() || undefined,
       });
       saveAuthSession(auth);
       router.push("/");
@@ -135,6 +138,21 @@ export default function RegisterPage() {
                 onChange={(event) => setForm((current) => ({ ...current, confirmPassword: event.target.value }))}
               />
               {errors.confirmPassword ? <p className="text-sm text-red-600 ipad:text-base">{errors.confirmPassword}</p> : null}
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium ipad:text-base" htmlFor="invite-code">
+                邀请码（选填）
+              </label>
+              <input
+                id="invite-code"
+                type="text"
+                autoComplete="off"
+                placeholder="如果管理员提供了邀请码，请填写"
+                className="input-tech h-10 w-full rounded-xl border border-input bg-white/70 px-3 text-sm outline-none focus:border-cyan-400 ipad:h-12 ipad:px-4 ipad:text-base"
+                value={form.inviteCode}
+                onChange={(event) => setForm((current) => ({ ...current, inviteCode: event.target.value }))}
+              />
             </div>
 
             {errors.form ? <p className="text-sm text-red-600 ipad:text-base">{errors.form}</p> : null}

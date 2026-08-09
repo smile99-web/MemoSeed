@@ -517,6 +517,9 @@ VALID_WORD_ERROR_TYPES: frozenset[str] = frozenset({
     "missing-letter",
     "extra-letter",
     "unknown",
+    # voice_practice giveups report "pronunciation" — without whitelist entry
+    # they were silently relabeled "spelling", corrupting the error profile.
+    "pronunciation",
 })
 
 
@@ -993,8 +996,10 @@ def list_due_review_items(
 ) -> list[LearningItemRead]:
     """List due review items.
 
-    When interleave=True, review tasks and new items are interleaved (1:2 ratio)
-    and review tasks are capped to avoid front-loading fatigue.
+    The interleave parameter is kept for API compatibility but no longer
+    changes the queue shape (2026-08-09: the interleave branch had been
+    unreachable dead code — the sentence_review_items block above always
+    returned first — so it was removed rather than left as a trap).
 
     When focus=True (recommended for struggling learners), only the top 7
     highest-priority words are returned, each with 3 different review modes
@@ -1729,29 +1734,10 @@ def list_due_review_items(
         # Clamp to capped_limit
         return review_items[:capped_limit] if len(review_items) > capped_limit else review_items
 
-    if interleave and task_review_items and sentence_review_items:
-        # Interleave: pattern of 1 review → 2 sentence items → 1 review → ...
-        review_items: list[LearningItemRead] = []
-        review_idx = 0
-        sentence_idx = 0
-        while len(review_items) < capped_limit:
-            if review_idx < len(task_review_items):
-                review_items.append(task_review_items[review_idx])
-                review_idx += 1
-            if len(review_items) >= capped_limit:
-                break
-            for _ in range(2):
-                if sentence_idx < len(sentence_review_items):
-                    review_items.append(sentence_review_items[sentence_idx])
-                    sentence_idx += 1
-                if len(review_items) >= capped_limit:
-                    break
-            if review_idx >= len(task_review_items) and sentence_idx >= len(sentence_review_items):
-                break
-        voice_items = _build_voice_practice_items(db, current_user.id, review_items)
-        if voice_items:
-            review_items = _interleave_voice(review_items, voice_items, step=6)
-        return review_items
+    # NOTE: the former `if interleave and task_review_items and
+    # sentence_review_items:` branch was unreachable dead code (the
+    # `if sentence_review_items:` block above always returns) and has been
+    # removed (2026-08-09). All frontend callers pass interleave=false.
 
     review_items: list[LearningItemRead] = task_review_items[:]
     for item_read in sentence_review_items:
@@ -2853,10 +2839,11 @@ async def check_handwriting(
         )
     try:
         from app.services.points_service import POINTS_CORRECT_NO_HINT, POINTS_WRONG, award_points
-        if result.review_log.is_correct:
-            award_points(db, current_user.id, POINTS_CORRECT_NO_HINT, "handwriting_correct", f"手写正确 +{POINTS_CORRECT_NO_HINT}", word_item.id)
-        else:
-            award_points(db, current_user.id, POINTS_WRONG, "handwriting_wrong", f"手写错误 {POINTS_WRONG}", word_item.id)
+        with db.begin_nested():
+            if result.review_log.is_correct:
+                award_points(db, current_user.id, POINTS_CORRECT_NO_HINT, "handwriting_correct", f"手写正确 +{POINTS_CORRECT_NO_HINT}", word_item.id)
+            else:
+                award_points(db, current_user.id, POINTS_WRONG, "handwriting_wrong", f"手写错误 {POINTS_WRONG}", word_item.id)
     except Exception:
         pass  # points failure should never block learning
     try:
@@ -2977,7 +2964,18 @@ def create_word_review(
             payload.learning_item_id, _w, learning_item is not None,
         )
 
-    word_item = get_or_create_word_memory_item(db, current_user.id, payload.word, learning_item)
+    # 2026-08-09 fix (same class of bug the handwriting path fixed on
+    # 2026-08-04): voice_practice read-alouds submit the WHOLE sentence as
+    # `word`. Minting a word-type word-memory item for a sentence pollutes
+    # word metrics and eats daily queue budget with an unservable ghost item
+    # (its >24-char Chinese fails sentence validation, yet it still takes a
+    # due_rows slot). Book the review on the resolved real item instead; only
+    # genuine single words get a word-memory twin.
+    is_sentence_word_payload = " " in (payload.word or "").strip()
+    if is_sentence_word_payload and learning_item is not None:
+        word_item = learning_item
+    else:
+        word_item = get_or_create_word_memory_item(db, current_user.id, payload.word, learning_item)
     review_mode = payload.review_mode.strip()[:32]
     error_type = normalize_word_error_type(payload.error_type) if payload.error_type else None
 
@@ -3002,21 +3000,25 @@ def create_word_review(
     # recorded for the replay timeline.
     if review_mode in ASSISTED_REVIEW_MODES:
         now_utc = datetime.now(UTC)
-        word_state = get_or_create_word_memory_state(db, current_user.id, word_item.english_text, word_item.id)
-        word_state.last_reviewed_at = now_utc
-        if review_mode == "word-preview":
-            word_state.hidden_recall_correct_count += 1
-            word_state.last_answer_seen_at = now_utc
-        db.add(word_state)
+        if not is_sentence_word_payload:
+            word_state = get_or_create_word_memory_state(db, current_user.id, word_item.english_text, word_item.id)
+            word_state.last_reviewed_at = now_utc
+            if review_mode == "word-preview":
+                word_state.hidden_recall_correct_count += 1
+                word_state.last_answer_seen_at = now_utc
+            db.add(word_state)
         complete_word_review_task(db, current_user.id, payload.review_task_id, True)
         try:
             from app.services.points_service import POINTS_CORRECT_HINTED, POINTS_CORRECT_PREVIEW, award_points
-            if review_mode == "word-hinted":
-                award_points(db, current_user.id, POINTS_CORRECT_HINTED, "word_hinted", f"提示后正确拼写 +{POINTS_CORRECT_HINTED}", word_item.id)
-            elif review_mode == "word-preview":
-                award_points(db, current_user.id, POINTS_CORRECT_PREVIEW, "word_preview", f"预览后正确拼写 +{POINTS_CORRECT_PREVIEW}", word_item.id)
-            else:
-                award_points(db, current_user.id, POINTS_CORRECT_HINTED, "word_assisted", f"辅助练习 +{POINTS_CORRECT_HINTED}", word_item.id)
+            # Savepoint containment: a points failure must not poison the
+            # session (PendingRollbackError → 500 → client retry double-counts).
+            with db.begin_nested():
+                if review_mode == "word-hinted":
+                    award_points(db, current_user.id, POINTS_CORRECT_HINTED, "word_hinted", f"提示后正确拼写 +{POINTS_CORRECT_HINTED}", word_item.id)
+                elif review_mode == "word-preview":
+                    award_points(db, current_user.id, POINTS_CORRECT_PREVIEW, "word_preview", f"预览后正确拼写 +{POINTS_CORRECT_PREVIEW}", word_item.id)
+                else:
+                    award_points(db, current_user.id, POINTS_CORRECT_HINTED, "word_assisted", f"辅助练习 +{POINTS_CORRECT_HINTED}", word_item.id)
         except Exception:
             pass  # points failure should never block learning
         try:
@@ -3071,14 +3073,9 @@ def create_word_review(
         # can read it (record_learning_event skips logs with reviewed_at=None).
         db.refresh(log_only_review_log)
         complete_word_review_task(db, current_user.id, payload.review_task_id, log_only_review_log.is_correct)
-        try:
-            from app.services.points_service import POINTS_CORRECT_NO_HINT, POINTS_WRONG, award_points
-            if log_only_review_log.is_correct:
-                award_points(db, current_user.id, POINTS_CORRECT_NO_HINT, "word_correct", f"正确拼写 +{POINTS_CORRECT_NO_HINT}", word_item.id)
-            else:
-                award_points(db, current_user.id, POINTS_WRONG, "word_wrong", f"拼写错误 {POINTS_WRONG}", word_item.id)
-        except Exception:
-            pass  # points failure should never block learning
+        # 2026-08-09: NO points in the capped branch. The cap exists to stop
+        # same-word farming (production: 136 attempts/day on one word) —
+        # awarding +10 per capped attempt let exactly that loop print points.
         try:
             from app.services.learning_replay import record_learning_event
             capped_ms = min(int(payload.duration_seconds or 0) * 1000, 5 * 60 * 1000)
@@ -3101,14 +3098,14 @@ def create_word_review(
         encoding_stage=payload.encoding_stage,
         encoding_duration_ms=payload.encoding_duration_ms,
     )
-    word_state = sync_word_memory_from_review(db, current_user.id, word_item.english_text, result.memory_state, review_mode, result.review_log.is_correct, error_type)
+    word_state = None if is_sentence_word_payload else sync_word_memory_from_review(db, current_user.id, word_item.english_text, result.memory_state, review_mode, result.review_log.is_correct, error_type)
 
     # Plan E (2026-08-07): confusable-word bookkeeping. When the child fails a
     # word by typing a DIFFERENT word they are also studying (e.g. writes
     # "here" for "hear"), tag the target word's error_type_counts with
     # `confusable:<typed>` so the parent's word-detail error breakdown shows
     # the confusion, and log the pair for later contrast re-teaching.
-    if not result.review_log.is_correct:
+    if word_state is not None and not result.review_log.is_correct:
         typed = normalize_word((payload.response_text or "").strip())
         target = normalize_word(word_item.english_text or "")
         if typed and target and typed != target and " " not in typed:
@@ -3134,16 +3131,19 @@ def create_word_review(
         # Award points for correct word review
         try:
             from app.services.points_service import POINTS_CORRECT_HINTED, POINTS_CORRECT_NO_HINT, POINTS_CORRECT_PREVIEW, POINTS_PERFECT_SENTENCE, award_points
-            if review_mode.startswith("word-recall"):
-                award_points(db, current_user.id, POINTS_CORRECT_NO_HINT, "word_correct", f"无提示正确拼写 +{POINTS_CORRECT_NO_HINT}", word_item.id)
-            elif review_mode.startswith("word-hinted"):
-                award_points(db, current_user.id, POINTS_CORRECT_HINTED, "word_hinted", f"提示后正确拼写 +{POINTS_CORRECT_HINTED}", word_item.id)
-            elif review_mode.startswith("word-preview"):
-                award_points(db, current_user.id, POINTS_CORRECT_PREVIEW, "word_preview", f"预览后正确拼写 +{POINTS_CORRECT_PREVIEW}", word_item.id)
-            elif review_mode.startswith("sentence-spelling") and review_score >= 5:
-                award_points(db, current_user.id, POINTS_PERFECT_SENTENCE, "perfect_sentence", f"整句完全正确 +{POINTS_PERFECT_SENTENCE}", word_item.id)
-            else:
-                award_points(db, current_user.id, POINTS_CORRECT_NO_HINT, "word_correct", f"正确拼写 +{POINTS_CORRECT_NO_HINT}", word_item.id)
+            # Savepoint containment: a points failure must not poison the
+            # session (PendingRollbackError → 500 → client retry double-counts).
+            with db.begin_nested():
+                if review_mode.startswith("word-recall"):
+                    award_points(db, current_user.id, POINTS_CORRECT_NO_HINT, "word_correct", f"无提示正确拼写 +{POINTS_CORRECT_NO_HINT}", word_item.id)
+                elif review_mode.startswith("word-hinted"):
+                    award_points(db, current_user.id, POINTS_CORRECT_HINTED, "word_hinted", f"提示后正确拼写 +{POINTS_CORRECT_HINTED}", word_item.id)
+                elif review_mode.startswith("word-preview"):
+                    award_points(db, current_user.id, POINTS_CORRECT_PREVIEW, "word_preview", f"预览后正确拼写 +{POINTS_CORRECT_PREVIEW}", word_item.id)
+                elif review_mode.startswith("sentence-spelling") and review_score >= 5:
+                    award_points(db, current_user.id, POINTS_PERFECT_SENTENCE, "perfect_sentence", f"整句完全正确 +{POINTS_PERFECT_SENTENCE}", word_item.id)
+                else:
+                    award_points(db, current_user.id, POINTS_CORRECT_NO_HINT, "word_correct", f"正确拼写 +{POINTS_CORRECT_NO_HINT}", word_item.id)
         except Exception:
             pass  # points failure should never block learning
     if not result.review_log.is_correct:
@@ -3152,12 +3152,13 @@ def create_word_review(
         # words in context and needs immediate practice. Word-only
         # review in the focus mode already provides 3 modes per word,
         # so no extra tasks are needed there.
-        if review_mode == "sentence-spelling":
+        if review_mode == "sentence-spelling" and word_state is not None:
             schedule_micro_review_tasks_for_mistake(db, current_user.id, word_state, learning_item.chinese_text if learning_item else word_item.english_text, learning_item.id if learning_item else None, error_type or "spelling")
         # Deduct points for wrong answer
         try:
             from app.services.points_service import POINTS_WRONG, award_points
-            award_points(db, current_user.id, POINTS_WRONG, "word_wrong", f"拼写错误 {POINTS_WRONG}", word_item.id)
+            with db.begin_nested():
+                award_points(db, current_user.id, POINTS_WRONG, "word_wrong", f"拼写错误 {POINTS_WRONG}", word_item.id)
         except Exception:
             pass  # points failure should never block learning
     # Learning Replay: record event with the actual review duration.

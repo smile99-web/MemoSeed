@@ -33,6 +33,7 @@ from app.schemas.reports import (
     WordHistoryResponse,
 )
 from app.services.memory_dashboard import (
+    LOCAL_TIMEZONE,
     build_daily_report,
     build_error_breakdown,
     build_retention_curve,
@@ -81,7 +82,9 @@ def get_today_plan_settings(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> DailyPlanRead:
-    today = date.today()
+    # Local-day (Asia/Shanghai), not server-local: the VPS runs US time, so
+    # date.today() created/read a "yesterday" plan row during Beijing mornings.
+    today = datetime.now(LOCAL_TIMEZONE).date()
     plan = db.scalar(select(DailyPlan).where(DailyPlan.user_id == current_user.id, DailyPlan.plan_date == today))
     if plan is None:
         plan = DailyPlan(
@@ -418,11 +421,14 @@ def import_user_data(
         for t in db.scalars(select(WordReviewTask).where(WordReviewTask.user_id == current_user.id)).all()
     }
     for row in as_rows(payload.get("word_review_tasks")):
-        word = str(row.get("word") or "").strip().lower()
+        # Same VARCHAR guards as word_memory_states above (2026-08-04) —
+        # word(120)/task_type(40)/status(24)/source(120) are bounded columns;
+        # an overlong hand-edited import value must truncate, not 500.
+        word = str(row.get("word") or "").strip().lower()[:120]
         if not word:
             continue
         due_at = parse_datetime(row.get("due_at")) or datetime.now(UTC)
-        task_key = (word, str(row.get("task_type") or "chinese_to_english"), due_at)
+        task_key = (word, str(row.get("task_type") or "chinese_to_english")[:40], due_at)
         if task_key in existing_task_keys:
             continue
         existing_task_keys.add(task_key)
@@ -432,13 +438,13 @@ def import_user_data(
                 word_memory_state_id=id_maps["word_memory_states"].get(str(row.get("word_memory_state_id"))) if row.get("word_memory_state_id") else None,
                 learning_item_id=id_maps["learning_items"].get(str(row.get("learning_item_id"))) if row.get("learning_item_id") else None,
                 word=word,
-                task_type=str(row.get("task_type") or "chinese_to_english"),
+                task_type=str(row.get("task_type") or "chinese_to_english")[:40],
                 prompt_text=str(row.get("prompt_text") or word),
                 expected_answer=str(row.get("expected_answer") or word),
                 choices=row.get("choices") if isinstance(row.get("choices"), list) else [],
                 priority_score=as_float(row.get("priority_score"), 1.0),
-                status=str(row.get("status") or "pending"),
-                source=str(row.get("source") or "import"),
+                status=str(row.get("status") or "pending")[:24],
+                source=str(row.get("source") or "import")[:120],
                 due_at=due_at,
                 completed_at=parse_datetime(row.get("completed_at")),
             )

@@ -628,12 +628,25 @@ def park_stuck_words(db: Session, user_id: UUID, now: datetime | None = None) ->
         .values(next_review_at=target_due)
     )
     # Also push micro-review clock forward so parked words don't keep
-    # generating new micro-review tasks while resting.
+    # generating new micro-review tasks while resting. Match by word text
+    # too (same fix as park_leech_words): WordMemoryState rows with a
+    # missing/duplicate learning_item_id link would otherwise keep an old
+    # next_micro_review_at and leak the parked word back via micro tasks.
+    stuck_words = [
+        w for w in (
+            normalize_word(t or "")
+            for t in db.scalars(select(LearningItem.english_text).where(LearningItem.id.in_(stuck_ids_subquery))).all()
+        )
+        if w
+    ]
     db.execute(
         update(WordMemoryState)
         .where(
             WordMemoryState.user_id == user_id,
-            WordMemoryState.learning_item_id.in_(stuck_ids_subquery),
+            or_(
+                WordMemoryState.learning_item_id.in_(stuck_ids_subquery),
+                WordMemoryState.word.in_(stuck_words),
+            ),
         )
         .values(next_micro_review_at=target_due)
     )
@@ -847,11 +860,24 @@ def park_cliff_words(db: Session, user_id: UUID, now: datetime | None = None) ->
         .where(MemoryState.learning_item_id.in_(cliff_ids_subquery))
         .values(next_review_at=target_due)
     )
+    # Match by word text too (same fix as park_leech_words): unlinked or
+    # duplicate-linked WordMemoryState rows would otherwise leak the parked
+    # word back via micro-review tasks.
+    cliff_words = [
+        w for w in (
+            normalize_word(t or "")
+            for t in db.scalars(select(LearningItem.english_text).where(LearningItem.id.in_(cliff_ids_subquery))).all()
+        )
+        if w
+    ]
     db.execute(
         update(WordMemoryState)
         .where(
             WordMemoryState.user_id == user_id,
-            WordMemoryState.learning_item_id.in_(cliff_ids_subquery),
+            or_(
+                WordMemoryState.learning_item_id.in_(cliff_ids_subquery),
+                WordMemoryState.word.in_(cliff_words),
+            ),
         )
         .values(next_micro_review_at=target_due)
     )
@@ -1136,12 +1162,15 @@ def same_day_next_interval(sts: float, target_retrievability: float) -> timedelt
     """Compute the same-day review interval derived from STS exponential decay.
 
     Solves  STS * exp(-t * ln(2) / half_life) = target_retrievability  for t,
-    clamped to [2, 360] minutes.
+    clamped to [10, 360] minutes. The floor was 2 minutes until 2026-08-09:
+    with sts clamped to [0,1] and targets >= 0.90, the early retrievability
+    rungs mathematically always produced the 2-minute floor — a rapid-fire
+    re-test loop that violates P10's MIN_FAILURE_RETRY_MINUTES=10 rule.
     """
     if sts <= target_retrievability:
-        return timedelta(minutes=2.0)
+        return timedelta(minutes=10.0)
     interval_minutes = -(CHILD_STS_HALF_LIFE_MINUTES / log(2)) * log(target_retrievability / sts)
-    clamped_minutes = clamp(interval_minutes, 2.0, 360.0)
+    clamped_minutes = clamp(interval_minutes, 10.0, 360.0)
     return timedelta(minutes=clamped_minutes)
 
 
@@ -1371,12 +1400,17 @@ def update_memory_counters(memory_state: MemoryState, is_correct: bool, review_m
             memory_state.context_correct_count += 1
         return
 
-    # Do NOT reset consecutive_correct_count on a single error.
-    # The child HAS spelled this word correctly before — one slip
-    # doesn't erase that. The previous behavior (reset to 0) caused
-    # words to get stuck in the "difficult" loop: one error erased
-    # all progress, the mastery check failed, and the word kept
-    # re-appearing with minimal intervals.
+    # 2026-08-09: reset the consecutive-correct streak on failure. The
+    # 2026-08-04 "never reset" rule dated from when the MASTERY check read
+    # this counter (one slip erased all mastery evidence — words got stuck
+    # in the difficult loop). derive_word_status no longer uses it (it gates
+    # on consecutive_error_count <= 1), so the counter's remaining consumers
+    # — the graduation interval jump and the stuck/cliff park recovery gates
+    # — all expect a true STREAK ("in a row"). Left unreset it was a
+    # lifetime cumulative count: any word with 3+ lifetime corrects got a
+    # graduation jump on every success, and the parks' cc==0 recovery gate
+    # never fired for any word the child had ever answered correctly.
+    memory_state.consecutive_correct_count = 0
     memory_state.consecutive_error_count += 1
 
 
@@ -1644,10 +1678,14 @@ def schedule_memory_review(
     # mastered 词失败一次 interval 崩到 1 天 -> 第二天又考 -> 每天考10+次）。
     # 用 review 前 memory_strength 判断（>=0.85 覆盖 mastered + 高强度 near）。
     from app.models.word_memory_state import WordMemoryState
+    # Use learning_item.id, NOT the learning_item_id parameter: the synthetic-
+    # id fallback above may have re-resolved `learning_item` by word text, in
+    # which case the parameter is a non-existent UUID and this query always
+    # missed — silently disabling the mastered/sight-word interval floors.
     pre_word_state = db.scalar(
         select(WordMemoryState).where(
             WordMemoryState.user_id == user_id,
-            WordMemoryState.learning_item_id == learning_item_id,
+            WordMemoryState.learning_item_id == learning_item.id,
         )
     )
     if pre_word_state is not None and pre_word_state.status == "mastered":

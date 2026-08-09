@@ -187,8 +187,10 @@ class ReviewForecastResponse(BaseModel):
 
 class PointsAwardRequest(BaseModel):
     points_change: int
-    reason: str
-    detail: str | None = None
+    # reason is whitelisted server-side (currently only "read-aloud"); bound
+    # the length so an oversized value can't DataError the String(64) column.
+    reason: str = Field(min_length=1, max_length=64)
+    detail: str | None = Field(default=None, max_length=200)
     learning_item_id: UUID | None = None
 
 class PointsLogEntry(BaseModel):

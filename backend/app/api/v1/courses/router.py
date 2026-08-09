@@ -137,20 +137,22 @@ def import_course_package(
         package_name = f"{base_name} ({suffix})"
         suffix += 1
 
-    package = CoursePackage(
-        user_id=current_user.id,
-        name=package_name,
-        description=payload.package.description.strip(),
-    )
-    db.add(package)
-    db.commit()
-    db.refresh(package)
-
     # Single-transaction import (2026-08-04): previously each course was
     # committed separately, so an IntegrityError mid-loop left the package
     # and earlier courses committed (partial import; the retry then
     # duplicated courses as "name (2)"). Flush per course, commit once.
+    # 2026-08-09: the package row must also live INSIDE the transaction
+    # (it used to commit above the try), and resequence_course_items must
+    # not commit per course (its internal db.commit() re-broke the
+    # single-transaction guarantee it was called from).
     try:
+        package = CoursePackage(
+            user_id=current_user.id,
+            name=package_name,
+            description=payload.package.description.strip(),
+        )
+        db.add(package)
+        db.flush()
         items_count = 0
         imported_courses: list[Course] = []
         course_id_map: dict[UUID, UUID] = {}
@@ -186,7 +188,7 @@ def import_course_package(
                 db.add(item)
                 items_count += 1
             db.flush()
-            resequence_course_items(db, current_user.id, course.id)
+            resequence_course_items(db, current_user.id, course.id, commit=False)
 
         for index, export_course in enumerate(payload.courses):
             if export_course.prerequisite_course_id is None or index >= len(imported_courses):
