@@ -22,8 +22,26 @@ export class ApiRequestError extends Error {
 
 export async function parseApiError(response: Response): Promise<string> {
   try {
-    const body = (await response.json()) as ApiErrorResponse;
-    return body.detail ?? `API request failed: ${response.status}`;
+    const body = (await response.json()) as { detail?: unknown };
+    const detail = body.detail;
+    if (typeof detail === "string") {
+      return detail;
+    }
+    // FastAPI 422 的 detail 是 [{loc, msg, ...}] 数组 —— 直接渲染会显示
+    // [object Object]（2026-08-09 登录页实测）。提取每条 msg 拼接。
+    if (Array.isArray(detail)) {
+      const messages = detail
+        .map((item) =>
+          item && typeof item === "object" && "msg" in item
+            ? String((item as { msg: unknown }).msg)
+            : String(item),
+        )
+        .filter(Boolean);
+      if (messages.length > 0) {
+        return messages.join("；");
+      }
+    }
+    return `API request failed: ${response.status}`;
   } catch {
     return `API request failed: ${response.status}`;
   }

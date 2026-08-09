@@ -14,7 +14,10 @@ class RegisterRequest(BaseModel):
 
 class LoginRequest(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
+    # 登录不做注册强度校验（min_length=8 会把早期短密码账号挡在 422，
+    # 且前端把 422 数组 detail 显示成 [object Object]）。对错由
+    # verify_password 判定，统一返回 401（2026-08-09 修复）。
+    password: str = Field(min_length=1, max_length=128)
 
 
 class RefreshTokenRequest(BaseModel):
