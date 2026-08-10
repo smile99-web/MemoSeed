@@ -18,6 +18,7 @@ from app.services.memory_scheduler import (
     FSRS_DECAY,
     FSRS_FACTOR,
     MIN_STABILITY_DAYS,
+    SIGHT_WORDS,
     compute_short_term_stability,
     is_leech_word,
     same_day_next_interval,
@@ -377,6 +378,12 @@ def schedule_micro_review_tasks_for_mistake(
     # 钟——否则藏在到期句子里被写错的漏词会立即被重新上弦,熔断形同虚设。
     # 顺手清掉该词可能残存的待办任务。
     if memory_state is not None and is_leech_word(memory_state.lapse_count):
+        cancel_future_pending_tasks(db, user_id, word_state.word)
+        return
+
+    # 2026-08-10 视觉词豁免: sight words 已退休（08-03 决议），句中拼写
+    # 也不再考它们——写错 the/with 不该再铸造回炉微任务挤占复习队列。
+    if normalize_word(word_state.word or "") in SIGHT_WORDS:
         cancel_future_pending_tasks(db, user_id, word_state.word)
         return
 

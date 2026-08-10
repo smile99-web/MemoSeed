@@ -696,7 +696,12 @@ def list_learning_items(
             status_by_word = {ws.word: (ws.memory_strength or 0.0, ws.status or "") for ws in course_word_states}
             weak_status_by_word = {
                 w: v for w, v in ((w, status_by_word.get(w, (0.0, ""))) for w in sentence_words)
-                if v[1] in ("teaching", "difficult", "")
+                # Sight words never become cloze/warmup targets: they are
+                # given text in sentence spelling (2026-08-10). Their
+                # perpetual "difficult" status (from forced re-typing
+                # failures) used to make EVERY sentence blank the/a/is
+                # instead of its real vocabulary.
+                if v[1] in ("teaching", "difficult", "") and w not in SIGHT_WORDS
             }
         for item, _ms in item_rows:
             if item.item_type != "sentence":

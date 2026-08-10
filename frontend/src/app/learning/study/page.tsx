@@ -13,6 +13,7 @@ import { Course, listCoursePackages, listCourses } from "@/lib/courses";
 import { generateDynamicSentence, generateLearningEncouragement, getWordTranslations, LearningItem, listDailyTestItems, listDueReviewItems, listHandwritingItems, listLearningItems, listSpeakItems, logReadAloudEvent, logWordMistake, logWordReview, translateLearningText, checkHandwriting, type HandwritingTaskType } from "@/lib/learning";
 import { fetchWithAuth, parseApiError } from "@/lib/api";
 import { getApiBaseUrl } from "@/lib/api-base-url";
+import { isSightWord } from "@/lib/sight-words";
 import { recordCourseCompletion, recordStudyTime, rotateFocusWord, scheduleMemoryReview, getReviewAdvice, generateReviewAdvice, awardPoints } from "@/lib/memory";
 import {
   getEchoCountToday,
@@ -798,12 +799,32 @@ function StudyContent() {
   // P2-2: Milestone tracking
   const [milestoneMessage, setMilestoneMessage] = useState<string | null>(null);
   const totalMasteredRef = useRef(0);
+  // Mirrors sightWordIndexSet for use inside non-memoized imperative code
+  // (checkWord) where a stale closure must never re-enable judging a
+  // sight word. Reassigned on every render from the memo above.
+  const sightWordIndexesRef = useRef<ReadonlySet<number>>(new Set());
 
   const currentItem = items[currentIndex] ?? null;
   currentItemIdRef.current = currentItem?.id ?? "";
   // Phonics: extract sound family from source tag for display
   const currentPhonicsFamily = isPhonics ? ((currentItem?.source || "").match(/^phonics:(\w+)/) || [])[1] || null : null;
   const currentWords = useMemo(() => tokenizeEnglish(currentItem?.english_text ?? ""), [currentItem]);
+  // Sight words (the/a/is/...) in SENTENCE spelling are given, not typed:
+  // they are learned through exposure and were burning ~1000 review events
+  // (~19h) per week in keyboard re-typing + mistake loops (2026-08-10).
+  // Only applies to multi-word items — a standalone word task types its word.
+  const sightWordIndexSet = useMemo(() => {
+    const indexes = new Set<number>();
+    if (currentWords.length > 1) {
+      currentWords.forEach((word, index) => {
+        if (isSightWord(word)) {
+          indexes.add(index);
+        }
+      });
+    }
+    return indexes;
+  }, [currentWords]);
+  sightWordIndexesRef.current = sightWordIndexSet;
   const dynamicReviewWords = useMemo(() => getDynamicReviewWords(currentItem), [currentItem]);
   const dynamicReviewWordIndexes = useMemo(() => {
     const reviewWordSet = new Set(dynamicReviewWords);
@@ -1405,8 +1426,14 @@ function StudyContent() {
 
   const getRequiredWordIndexes = useCallback(function getRequiredWordIndexes(): number[] {
     if (respellWordIndexesRef.current.length > 0) return respellWordIndexesRef.current;
-    return isDynamicFillBlankItem ? dynamicReviewWordIndexes : currentWords.map((_, index) => index);
-  }, [currentWords, dynamicReviewWordIndexes, isDynamicFillBlankItem]);
+    const base = isDynamicFillBlankItem ? dynamicReviewWordIndexes : currentWords.map((_, index) => index);
+    // Sight words are pre-filled (given) in sentence spelling — exclude them
+    // from the required set so the child only types content words. Guard: if
+    // EVERY word is a sight word, fall back to typing them all rather than
+    // making the item vacuously complete.
+    const filtered = base.filter((index) => !sightWordIndexSet.has(index));
+    return filtered.length > 0 ? filtered : base;
+  }, [currentWords, dynamicReviewWordIndexes, isDynamicFillBlankItem, sightWordIndexSet]);
 
   function areRequiredWordAnswersComplete(nextAnswers: string[], nextStatuses = wordStatuses): boolean {
     return getRequiredWordIndexes().every((wordIndex) => (
@@ -1927,9 +1954,11 @@ function StudyContent() {
     const hintLetter = (currentItem?.review_prompt || "").startsWith("首字母:")
       ? (currentItem?.review_prompt || "").slice(4)
       : "";
-    setWordAnswers(currentWords.map((_w, i) => (i === 0 && hintLetter) ? hintLetter : ""));
+    // Sight words in sentence spelling start pre-filled + correct (given
+    // text, rendered as static chips — see sightWordIndexSet).
+    setWordAnswers(currentWords.map((w, i) => sightWordIndexesRef.current.has(i) ? w : (i === 0 && hintLetter) ? hintLetter : ""));
     wordJudgedRef.current.clear();
-    setWordStatuses(currentWords.map(() => "idle"));
+    setWordStatuses(currentWords.map((_w, i) => sightWordIndexesRef.current.has(i) ? "correct" : "idle"));
     setWordErrorCounts(currentWords.map(() => 0));
     setWordConsecutiveCorrect(currentWords.map(() => 0));
     clearWordMeaningReview();
@@ -3725,6 +3754,13 @@ function StudyContent() {
     if (!expectedWord) {
       return;
     }
+    // Sight words in sentence spelling are given text (no input rendered).
+    // The window-level keyboard fallback can land here with a sight index
+    // before focus settles on the first required word — never judge them
+    // (a "correct" judgment would log a fake word-context review event).
+    if (sightWordIndexesRef.current.has(index)) {
+      return;
+    }
 
     // Ignore empty submissions — don't count them as mistakes
     const currentRawAnswer = inputRefs.current[index]?.value ?? wordAnswers[index] ?? "";
@@ -5073,7 +5109,7 @@ function StudyContent() {
                     const isRespellRound = respellWordIndexesRef.current.length > 0;
                     const isRespellTarget = isRespellRound && respellWordIndexesRef.current.includes(index);
                     const isRespellNonTarget = isRespellRound && !respellWordIndexesRef.current.includes(index);
-                    const shouldShowInput = (!isDynamicFillBlankItem && !isRespellNonTarget) || isDynamicBlank;
+                    const shouldShowInput = ((!isDynamicFillBlankItem && !isRespellNonTarget) || isDynamicBlank) && !sightWordIndexSet.has(index);
                     return (
                       <WordInput
                         key={`${word}-${index}`}
