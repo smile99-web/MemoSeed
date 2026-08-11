@@ -1,5 +1,6 @@
 import json
 import logging
+import random
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -158,6 +159,16 @@ GENERIC_WORD_DISTRACTORS = [
     "喜欢",
     "知道",
 ]
+def generic_word_distractors() -> list[str]:
+    """Shuffled copy of the generic fallback pool.
+
+    2026-08-11 修复：兜底池此前按固定顺序取前 5 个，DB 干扰项查询失败/不足时
+    每道题的干扰项都是同一组（老师/学生/朋友/书/学校），只有正确答案在变。
+    现在每次洗牌，兜底场景下干扰项也逐题随机。
+    """
+    pool = list(GENERIC_WORD_DISTRACTORS)
+    random.shuffle(pool)
+    return pool
 BASIC_WORD_TRANSLATIONS = {
     "a": "一个",
     "an": "一个",
@@ -305,7 +316,7 @@ def _enrich_review_choices(
         if len(rebuilt) >= 6:
             return rebuilt, correct_answer
 
-    for choice in GENERIC_WORD_DISTRACTORS:
+    for choice in generic_word_distractors():
         if choice and choice != correct_answer and choice not in rebuilt:
             rebuilt.append(choice)
         if len(rebuilt) >= 6:
@@ -874,8 +885,8 @@ def _enrich_choices_for_word(
         if len(rebuilt) >= 6:
             return rebuilt, correct_answer
 
-    # Step 3: fallback to GENERIC_WORD_DISTRACTORS
-    for choice in GENERIC_WORD_DISTRACTORS:
+    # Step 3: fallback to the (shuffled) generic distractor pool
+    for choice in generic_word_distractors():
         if choice and choice != correct_answer and choice not in rebuilt:
             rebuilt.append(choice)
         if len(rebuilt) >= 6:

@@ -121,6 +121,30 @@ const WORD_ENGLISH_TTS_OPTIONS: TtsSynthesisOptions = {
   speechRate: 0,
 };
 
+// 选择题兜底干扰项池：仅在后端没有给出足够中文选项时使用。每题 Fisher-Yates
+// 随机抽 5 个——旧实现固定取前 5 个（老师/学生/学校/书/朋友），导致“听英文选
+// 中文”每题的干扰项永远一样（2026-08-11 家长反馈）。
+const FALLBACK_CHINESE_DISTRACTORS: readonly string[] = [
+  "老师", "学生", "学校", "书", "朋友",
+  "猫", "狗", "鱼", "鸟", "花", "树",
+  "苹果", "香蕉", "面包", "米饭", "牛奶", "水",
+  "红色", "蓝色", "绿色", "黄色", "白色", "黑色",
+  "大", "小", "高", "快", "慢",
+  "爸爸", "妈妈", "姐姐", "哥哥", "同学",
+  "家", "公园", "商店", "医院",
+  "桌子", "椅子", "门", "窗",
+  "唱歌", "跳舞", "跑步", "游泳",
+  "昨天", "今天", "明天", "早上", "晚上",
+];
+function sampleChineseDistractors(correctAnswer: string, count = 5): string[] {
+  const pool = FALLBACK_CHINESE_DISTRACTORS.filter((word) => word !== correctAnswer);
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  return pool.slice(0, count);
+}
+
 function normalizeChoiceAnswer(value: string | null | undefined): string {
   return (value ?? "").trim().replace(/\s+/g, "");
 }
@@ -588,27 +612,9 @@ function StudyContent() {
   const [mistakeMeaningQuizCorrect, setMistakeMeaningQuizCorrect] = useState<string>("");
   const buildMeaningQuizOptions = useCallback(function buildMeaningQuizOptions(correctTranslation: string): string[] {
     // Reuse the same 6-option pattern as the existing choice-review
-    // tasks (see choiceReviewOptions memo above). The pool of
-    // child-friendly Chinese distractors mirrors the frontend fallback
-    // used for english_to_chinese / listen_choose_chinese tasks.
-    const distractorPool = [
-      "老师", "学生", "学校", "书", "朋友",
-      "猫", "狗", "鱼", "鸟", "花", "树",
-      "苹果", "香蕉", "面包", "米饭", "牛奶", "水",
-      "红色", "蓝色", "绿色", "黄色", "白色", "黑色",
-      "大", "小", "高", "快", "慢",
-      "爸爸", "妈妈", "姐姐", "哥哥", "同学",
-      "家", "公园", "商店", "医院",
-      "桌子", "椅子", "门", "窗",
-      "唱歌", "跳舞", "跑步", "游泳",
-      "昨天", "今天", "明天", "早上", "晚上",
-    ].filter((w) => w !== correctTranslation);
-    // Fisher-Yates shuffle then take 5 distractors
-    for (let i = distractorPool.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [distractorPool[i], distractorPool[j]] = [distractorPool[j], distractorPool[i]];
-    }
-    const options = [correctTranslation, ...distractorPool.slice(0, 5)];
+    // tasks (see choiceReviewOptions memo above). Distractors come from
+    // the shared fallback pool, freshly sampled on every quiz.
+    const options = [correctTranslation, ...sampleChineseDistractors(correctTranslation, 5)];
     // Shuffle the final 6 so the correct answer isn't always option #1
     for (let i = options.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -943,11 +949,12 @@ function StudyContent() {
     const choicesWithAnswer = correctAnswer && !fallbackChoices.some((choice) => isCorrectChoiceAnswer(choice, correctAnswer))
       ? [correctAnswer, ...fallbackChoices]
       : fallbackChoices;
-    // Prefer backend-provided choices (4+ items) over frontend 3-item fallback
+    // Prefer backend-provided choices (4+ items) over the frontend fallback.
     if (choicesWithAnswer.length >= 4) {
       return rotateChoices(choicesWithAnswer, `${currentItem.id}-${currentFocusedReviewWord}`);
     }
-    const translatedChoices = correctAnswer ? [correctAnswer, "老师", "学生", "学校", "书", "朋友"].filter((choice, index, values) => values.indexOf(choice) === index) : [];
+    // Fallback: 5 distractors randomly sampled per question — never a fixed set.
+    const translatedChoices = correctAnswer ? [correctAnswer, ...sampleChineseDistractors(correctAnswer, 5)] : [];
     return rotateChoices(translatedChoices.length > 0 ? translatedChoices : choicesWithAnswer, `${currentItem.id}-${currentFocusedReviewWord}`);
   }, [currentFocusedReviewWord, currentItem, isChoiceReviewTask, reviewTaskWordTranslation]);
   // Sync the ref at RENDER time (not in useEffect) so the keydown
