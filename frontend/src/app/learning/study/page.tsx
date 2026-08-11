@@ -61,6 +61,7 @@ import {
 
 import HintDisplay from "./components/HintDisplay";
 import { WORD_DICTIONARY } from "@/lib/word-dictionary";
+import { DAILY_FLOW_PHASES, DailyFlowState, loadDailyFlow, saveDailyFlow } from "@/lib/daily-flow";
 import MiniCelebrationConfetti from "./components/MiniCelebrationConfetti";
 import CelebrationModal, { type CelebrationSummary, type NextCourseTarget, type TestReportEntry } from "./components/CelebrationModal";
 import WordInput from "./components/WordInput";
@@ -472,6 +473,8 @@ function StudyContent() {
   const packageIdFromUrl = searchParams.get("package_id") ?? "";
   const courseName = searchParams.get("course_name") ?? "本课";
   const studyMode = normalizeStudyMode(searchParams.get("mode"));
+  // 今日学习流程开关：仅 URL 带 flow=daily 时启用流程引擎，否则一切行为不变。
+  const isDailyFlow = searchParams.get("flow") === "daily";
   const device = useDevice();
   const router = useRouter();
   const pathname = usePathname();
@@ -689,6 +692,18 @@ function StudyContent() {
   const [aiRecommendedWords, setAiRecommendedWords] = useState<string[]>([]);
   const [aiReasoning, setAiReasoning] = useState("");
   const [celebrationSummary, setCelebrationSummary] = useState<CelebrationSummary | null>(null);
+  // —— 今日学习流程（daily flow）状态：仅 isDailyFlow 时参与渲染/逻辑 ——
+  // dailyFlowRef 与 dailyFlow 同步（ref 供 1s tick / useCallback 闭包读取）。
+  const [dailyFlow, setDailyFlow] = useState<DailyFlowState | null>(null);
+  const dailyFlowRef = useRef<DailyFlowState | null>(null);
+  // 进入当前阶段时的 activeStudyMsRef 快照：阶段有效时长 = 存储累计 + 增量。
+  const phaseStartActiveMsRef = useRef(0);
+  // 阶段时间/配额已到点，等待当前卡片完成后过场（不打断孩子做题）。
+  const pendingPhaseAdvanceRef = useRef(false);
+  // 过场卡打开期间冻结阶段计时。
+  const flowAdvancingRef = useRef(false);
+  const [flowTransition, setFlowTransition] = useState<{ fromIndex: number; toIndex: number } | null>(null);
+  const [flowCountdown, setFlowCountdown] = useState(5);
   // Immersive (沉浸) mode defaults OFF — user must click the "沉浸模式"
   // button to enable it. Previously this defaulted ON, but the forced
   // fullscreen view hid the page chrome (course info, progress
@@ -1917,6 +1932,147 @@ function StudyContent() {
     router.push(queryString ? `${pathname}?${queryString}` : pathname);
   }
 
+  // —— 今日学习流程引擎（isDailyFlow 时启用）——
+
+  // 构造切到某阶段 mode 的 URL：保留 course/flow 等参数；全局阶段
+  // （review/test）按 switchStudyMode 的规则去掉课程参数。
+  function buildDailyFlowPhaseUrl(targetMode: StudyMode): string {
+    const params = new URLSearchParams(searchParams.toString());
+    if (targetMode === "mix") {
+      params.delete("mode");
+    } else {
+      params.set("mode", targetMode);
+    }
+    if (targetMode === "review" || targetMode === "test") {
+      params.delete("course_id");
+      params.delete("package_id");
+      params.delete("course_name");
+    }
+    params.set("flow", "daily");
+    const queryString = params.toString();
+    return queryString ? `${pathname}?${queryString}` : pathname;
+  }
+
+  function persistDailyFlow(next: DailyFlowState) {
+    dailyFlowRef.current = next;
+    saveDailyFlow(next);
+    setDailyFlow(next);
+  }
+
+  // 阶段推进：结算当前阶段用时；最后阶段（每日一测）→ 完成流程，
+  // 否则 phaseIndex+1 并打开过场卡。空队列跳阶段 / 时间到 / 配额满共用此入口。
+  const beginDailyFlowPhaseAdvance = useCallback(function beginDailyFlowPhaseAdvance() {
+    const flow = dailyFlowRef.current;
+    if (!flow || flow.done || flowAdvancingRef.current) {
+      return;
+    }
+    pendingPhaseAdvanceRef.current = false;
+    const phaseDurationsMs = flow.phaseDurationsMs.slice();
+    phaseDurationsMs[flow.phaseIndex] =
+      flow.phaseElapsedMs + Math.max(0, activeStudyMsRef.current - phaseStartActiveMsRef.current);
+    if (flow.phaseIndex >= DAILY_FLOW_PHASES.length - 1) {
+      persistDailyFlow({ ...flow, phaseElapsedMs: 0, phaseDurationsMs, done: true });
+      return;
+    }
+    flowAdvancingRef.current = true;
+    persistDailyFlow({ ...flow, phaseIndex: flow.phaseIndex + 1, phaseElapsedMs: 0, phaseDurationsMs });
+    setFlowTransition({ fromIndex: flow.phaseIndex, toIndex: flow.phaseIndex + 1 });
+    setFlowCountdown(5);
+  }, []);
+
+  // 过场卡确认（或 5 秒倒计时结束）→ 切到下一阶段的 mode。
+  function continueDailyFlowTransition() {
+    if (!flowAdvancingRef.current) {
+      return;
+    }
+    flowAdvancingRef.current = false;
+    setFlowTransition(null);
+    phaseStartActiveMsRef.current = activeStudyMsRef.current;
+    const flow = dailyFlowRef.current;
+    if (!flow || flow.done) {
+      return;
+    }
+    const target = DAILY_FLOW_PHASES[flow.phaseIndex];
+    if (target.mode !== studyMode) {
+      router.replace(buildDailyFlowPhaseUrl(target.mode));
+    }
+  }
+
+  // 退出流程：去掉 flow 参数，停留在当前模式（进度已持久化，明天/重进可续）。
+  function exitDailyFlow() {
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete("flow");
+    const queryString = params.toString();
+    router.replace(queryString ? `${pathname}?${queryString}` : pathname);
+  }
+
+  // 挂载时恢复当日进度；URL mode 与存储阶段不符 → replace 到正确阶段
+  // （保留 course_id/package_id/course_name/flow 参数）。
+  useEffect(() => {
+    if (!isDailyFlow) {
+      return;
+    }
+    const loaded = loadDailyFlow();
+    dailyFlowRef.current = loaded;
+    setDailyFlow(loaded);
+    phaseStartActiveMsRef.current = activeStudyMsRef.current;
+    if (!loaded.done) {
+      const phase = DAILY_FLOW_PHASES[loaded.phaseIndex];
+      if (phase.mode !== studyMode) {
+        router.replace(buildDailyFlowPhaseUrl(phase.mode));
+      }
+    }
+    // 仅在挂载时执行一次：studyMode/router 等取挂载时的值即可。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 过场卡 5 秒自动继续倒计时。
+  useEffect(() => {
+    if (!flowTransition) {
+      return;
+    }
+    if (flowCountdown <= 0) {
+      continueDailyFlowTransition();
+      return;
+    }
+    const timer = window.setTimeout(() => setFlowCountdown((current) => current - 1), 1000);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flowTransition, flowCountdown]);
+
+  // 空队列自动跳阶段：当前阶段没有可学内容（复习队列空 / 课程没内容）时
+  // 不停留，1.5s 后直接过场；最后阶段（每日一测）空队列 → 直接完成流程。
+  useEffect(() => {
+    if (!isDailyFlow || !dailyFlow || dailyFlow.done || flowTransition) {
+      return;
+    }
+    if (isLoading || errorMessage || items.length > 0) {
+      return;
+    }
+    const phase = DAILY_FLOW_PHASES[dailyFlow.phaseIndex];
+    if (phase.needsCourse && !courseId) {
+      return;
+    }
+    const timer = window.setTimeout(() => beginDailyFlowPhaseAdvance(), 1500);
+    return () => window.clearTimeout(timer);
+  }, [isDailyFlow, dailyFlow, flowTransition, isLoading, errorMessage, items.length, courseId, beginDailyFlowPhaseAdvance]);
+
+  // 每日一测成绩单（celebration）出现 = 测验队列完成 → 流程完成。
+  useEffect(() => {
+    if (!isDailyFlow || !celebrationSummary) {
+      return;
+    }
+    const flow = dailyFlowRef.current;
+    if (!flow || flow.done || DAILY_FLOW_PHASES[flow.phaseIndex].key !== "test") {
+      return;
+    }
+    const phaseDurationsMs = flow.phaseDurationsMs.slice();
+    phaseDurationsMs[flow.phaseIndex] =
+      flow.phaseElapsedMs + Math.max(0, activeStudyMsRef.current - phaseStartActiveMsRef.current);
+    persistDailyFlow({ ...flow, phaseElapsedMs: 0, phaseDurationsMs, done: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [celebrationSummary, isDailyFlow]);
+
   const flushStudyTime = useCallback(async function flushStudyTime(force = false) {
     if (isFlushingStudyTimeRef.current) {
       return;
@@ -1948,6 +2104,8 @@ function StudyContent() {
     activeStudyMsRef.current = 0;
     pendingStudyMsRef.current = 0;
     courseRunStartedActiveMsRef.current = 0;
+    // 今日学习流程：学习时钟归零时阶段计时基准同步归零（阶段累计值存在存储里）。
+    phaseStartActiveMsRef.current = 0;
     courseRunCorrectWordKeysRef.current = new Set();
     // Focus-mode correct streaks are per-course: same-named words in another
     // course must not inherit old counts
@@ -2005,6 +2163,20 @@ function StudyContent() {
 
       activeStudyMsRef.current += elapsedMs;
       pendingStudyMsRef.current += elapsedMs;
+      // 今日学习流程：阶段有效时长到点 → 标记待推进（不打断当前卡片，
+      // 在下一张卡片完成时过场）。过场卡打开 / 阶段缺课程时不累计。
+      if (isDailyFlow && !pendingPhaseAdvanceRef.current && !flowAdvancingRef.current) {
+        const flow = dailyFlowRef.current;
+        if (flow && !flow.done) {
+          const phase = DAILY_FLOW_PHASES[flow.phaseIndex];
+          if (!(phase.needsCourse && !courseId)) {
+            const phaseElapsedMs = flow.phaseElapsedMs + Math.max(0, activeStudyMsRef.current - phaseStartActiveMsRef.current);
+            if (phaseElapsedMs >= phase.minutes * 60_000) {
+              pendingPhaseAdvanceRef.current = true;
+            }
+          }
+        }
+      }
       const nextSeconds = Math.floor(activeStudyMsRef.current / 1000);
       setActiveStudySeconds((current) => (current === nextSeconds ? current : nextSeconds));
       if (pendingStudyMsRef.current >= STUDY_TIME_FLUSH_SECONDS * 1000) {
@@ -2014,6 +2186,16 @@ function StudyContent() {
 
     function flushWhenLeaving() {
       void flushStudyTime(true);
+      // 今日学习流程：离开/刷新前把当前阶段已累计的有效时长存回 localStorage，
+      // 重进时从断点继续计时。
+      const flow = dailyFlowRef.current;
+      if (isDailyFlow && flow && !flow.done && !flowAdvancingRef.current) {
+        persistDailyFlow({
+          ...flow,
+          phaseElapsedMs: flow.phaseElapsedMs + Math.max(0, activeStudyMsRef.current - phaseStartActiveMsRef.current),
+        });
+        phaseStartActiveMsRef.current = activeStudyMsRef.current;
+      }
     }
 
     window.addEventListener("keydown", markStudyActivity);
@@ -2793,6 +2975,30 @@ function StudyContent() {
       return;
     }
 
+    // 今日学习流程：learn 阶段完成一张单词卡（非选择卡）→ 计入新词配额
+    // （normalizeEnglishKey 去重）；达到配额 → 标记待推进。
+    if (isDailyFlow && options.completedCurrentItem) {
+      const flow = dailyFlowRef.current;
+      const item = currentItemRef.current;
+      if (flow && !flow.done && item?.item_type === "word") {
+        const phase = DAILY_FLOW_PHASES[flow.phaseIndex];
+        const isChoiceTask =
+          item.review_task_type === "listen_choose_chinese" ||
+          item.review_task_type === "english_to_chinese" ||
+          item.review_task_type === "match_translation";
+        if (phase.key === "learn" && !isChoiceTask) {
+          const wordKey = normalizeEnglishKey(item.english_text || "");
+          if (wordKey && !flow.learnWords.includes(wordKey)) {
+            const learnWords = [...flow.learnWords, wordKey];
+            persistDailyFlow({ ...flow, learnWords });
+            if (phase.wordQuota && learnWords.length >= phase.wordQuota) {
+              pendingPhaseAdvanceRef.current = true;
+            }
+          }
+        }
+      }
+    }
+
     startVoiceSequence();
     setCurrentIndex((index) => {
       const nextIndex = index + 1;
@@ -2841,7 +3047,11 @@ function StudyContent() {
       }
       return wrappedIndex;
     });
-  }, [courseId, isFocusMode, items, items.length, showCourseCompletion, startVoiceSequence, studyMode]);
+    // 今日学习流程：阶段时间/配额已到点 → 在卡片完成推进处过场到下一阶段。
+    if (isDailyFlow && options.completedCurrentItem && pendingPhaseAdvanceRef.current) {
+      window.setTimeout(beginDailyFlowPhaseAdvance, 0);
+    }
+  }, [beginDailyFlowPhaseAdvance, courseId, isDailyFlow, isFocusMode, items, items.length, showCourseCompletion, startVoiceSequence, studyMode]);
 
   const isGeneratedItem = useCallback(function isGeneratedItem(item: LearningItem): boolean {
     return item.id.startsWith("generated-") || Boolean(item.review_task_id);
@@ -4804,6 +5014,11 @@ function StudyContent() {
   const actionButtonClass = isStudyFullscreen
     ? "min-w-28 ipad:min-w-32 ipad:px-5 ipad:text-base ipad-lg:min-w-36 ipad-lg:text-lg"
     : "min-w-32 ipad:min-w-32 ipad:text-sm ipad-lg:min-w-36 ipad-lg:text-base";
+  // 今日学习流程：当前阶段需要课程但 URL 无 course_id → 显示选课引导卡，
+  // 不渲染学习区（引擎侧也不计时、不触发空队列跳阶段）。
+  const flowNeedsCourse = Boolean(
+    isDailyFlow && dailyFlow && !dailyFlow.done && DAILY_FLOW_PHASES[dailyFlow.phaseIndex].needsCourse && !courseId,
+  );
   const displayChinesePrompt = isHandwritingItem
     // Translation/both tasks: showing the Chinese gloss would leak the answer
     // the child must write. Dictation keeps the gloss as the "which word" hint.
@@ -4861,7 +5076,49 @@ function StudyContent() {
       `}</style>
       <MiniCelebrationConfetti key={`streak-${streakCelebrateKey}`} triggerKey={streakCelebrateKey} />
       <MiniCelebrationConfetti key={`milestone-${milestoneCelebrateKey}`} triggerKey={milestoneCelebrateKey} speakMessage="太厉害了！" />
-      {(() => {
+      {isDailyFlow && dailyFlow ? (
+        // 今日学习流程进度头：flow 中替换模式切换行（不允许手动切模式）。
+        <div className="mx-4 mt-3 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-cyan-300/60 bg-cyan-50/70 px-4 py-2.5 shadow-soft backdrop-blur-xl ipad:mx-6 ipad:mt-4 ipad:px-5 ipad:py-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-bold text-cyan-700 ipad:text-base">🚀 今日流程</span>
+            {DAILY_FLOW_PHASES.map((phase, index) => {
+              const isPhaseDone = dailyFlow.done || index < dailyFlow.phaseIndex;
+              const isCurrentPhase = !dailyFlow.done && index === dailyFlow.phaseIndex;
+              const currentPhaseElapsedMs = isCurrentPhase
+                ? dailyFlow.phaseElapsedMs + Math.max(0, activeStudySeconds * 1000 - phaseStartActiveMsRef.current)
+                : 0;
+              const progressText = isCurrentPhase
+                ? phase.wordQuota
+                  ? ` ${dailyFlow.learnWords.length}/${phase.wordQuota} 个`
+                  : ` ${Math.floor(currentPhaseElapsedMs / 60000)}/${phase.minutes} 分钟`
+                : "";
+              return (
+                <span
+                  key={phase.key}
+                  className={`rounded-full border px-3 py-1 text-xs font-bold ipad:text-sm ${
+                    isPhaseDone
+                      ? "border-emerald-300/70 bg-emerald-50 text-emerald-700"
+                      : isCurrentPhase
+                        ? "animate-pulse border-cyan-400/80 bg-white text-cyan-700 shadow-sm"
+                        : "border-slate-200 bg-slate-50/80 text-slate-400"
+                  }`}
+                >
+                  {isPhaseDone ? "✓ " : ""}{phase.icon} {phase.label}{progressText}
+                </span>
+              );
+            })}
+          </div>
+          <Button
+            className="h-7 px-2.5 text-xs ipad:h-8 ipad:px-3 ipad:text-sm"
+            onClick={exitDailyFlow}
+            onMouseDown={keepStudyInputFocus}
+            type="button"
+            variant="outline"
+          >
+            退出流程
+          </Button>
+        </div>
+      ) : (() => {
         const modeConfig: Record<StudyMode, { label: string; description: string; color: string; bg: string; border: string }> = {
           review: {
             label: "📚 单词复习",
@@ -4939,6 +5196,58 @@ function StudyContent() {
       })()}
       <main className={isStudyFullscreen ? "flex min-h-[100dvh] flex-col overflow-y-auto bg-gradient-to-b from-white/90 via-cyan-50/80 to-violet-50/85 text-slate-950" : "flex min-h-[100dvh] flex-col overflow-y-auto text-slate-950"}>
       {celebrationSummary ? <CelebrationModal nextCourse={nextCourse} summary={celebrationSummary} testReport={studyMode === "test" ? testResults : null} /> : null}
+      {flowTransition ? (
+        // 今日学习流程阶段过场卡（glass-card 风格，无 confetti）。
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/45 px-6 backdrop-blur-sm">
+          <div className="glass-card animate-pop-in relative w-full max-w-md p-7 text-center ipad:max-w-lg ipad:p-10">
+            <div className="pointer-events-none absolute -top-20 left-1/2 h-44 w-72 -translate-x-1/2 rounded-full bg-cyan-300/35 blur-3xl" />
+            <div className="relative">
+              <p className="text-5xl">✅</p>
+              <h2 className="mt-3 text-2xl font-bold tracking-tight text-slate-900 ipad:text-3xl">
+                {DAILY_FLOW_PHASES[flowTransition.fromIndex].label} 完成！
+              </h2>
+              <p className="mt-3 text-sm text-slate-600 ipad:text-base">
+                接下来：{DAILY_FLOW_PHASES[flowTransition.toIndex].icon} {DAILY_FLOW_PHASES[flowTransition.toIndex].label}
+                （约 {DAILY_FLOW_PHASES[flowTransition.toIndex].minutes} 分钟
+                {DAILY_FLOW_PHASES[flowTransition.toIndex].wordQuota ? ` / 目标 ${DAILY_FLOW_PHASES[flowTransition.toIndex].wordQuota} 个` : ""}）
+              </p>
+              <Button
+                className="mt-6 animate-glow-pulse ipad:px-6 ipad:text-base"
+                onClick={continueDailyFlowTransition}
+                type="button"
+              >
+                开始 →（{flowCountdown}s）
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {isDailyFlow && dailyFlow?.done ? (
+        // 今日学习流程完成卡：各阶段用时 + 数据看板入口。
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/45 px-6 backdrop-blur-sm">
+          <div className="glass-card animate-pop-in relative max-h-[92dvh] w-full max-w-md overflow-y-auto p-7 text-center ipad:max-w-lg ipad:p-10">
+            <div className="pointer-events-none absolute -top-20 left-1/2 h-44 w-72 -translate-x-1/2 rounded-full bg-amber-300/35 blur-3xl" />
+            <div className="relative">
+              <p className="text-5xl">🎉</p>
+              <h2 className="mt-3 text-2xl font-bold tracking-tight text-slate-900 ipad:text-3xl">今日学习全部完成！</h2>
+              <ul className="mx-auto mt-5 flex max-w-xs flex-col gap-2 text-left text-sm text-slate-700 ipad:text-base">
+                {DAILY_FLOW_PHASES.map((phase, index) => (
+                  <li key={phase.key} className="flex items-center justify-between rounded-xl border border-white/70 bg-white/70 px-4 py-2">
+                    <span>{phase.icon} {phase.label}</span>
+                    <span className="font-mono font-semibold text-slate-900">
+                      {formatStudyDuration(Math.round((dailyFlow.phaseDurationsMs[index] ?? 0) / 1000))}
+                      {phase.wordQuota ? ` · ${dailyFlow.learnWords.length} 个新词` : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <Button asChild className="mt-6 animate-glow-pulse ipad:px-6 ipad:text-base">
+                <Link href="/dashboard">去看看数据看板</Link>
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {focusRotatedMessage ? (
         <div className="fixed left-1/2 top-6 z-40 -translate-x-1/2 animate-bounce rounded-full bg-emerald-500 px-6 py-3 text-base font-bold text-white shadow-lg ipad:px-8 ipad:py-4 ipad:text-lg">
           ✅ {focusRotatedMessage}
@@ -5008,14 +5317,28 @@ function StudyContent() {
       ) : null}
 
       <section className={isStudyFullscreen ? "flex min-h-0 flex-1 items-center justify-center overflow-visible px-4 py-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] ipad:px-8 ipad:py-6 ipad-lg:px-10 ipad-lg:py-8" : "flex min-h-0 flex-1 items-start justify-center overflow-visible px-4 py-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] ipad:px-5 ipad:py-4 ipad-lg:px-6 ipad-lg:py-5"}>
-        {isLoading ? <p className="text-lg font-bold text-muted-foreground ipad:text-xl">正在加载学习内容...</p> : null}
-        {!isLoading && errorMessage ? (
+        {isLoading && !flowNeedsCourse ? <p className="text-lg font-bold text-muted-foreground ipad:text-xl">正在加载学习内容...</p> : null}
+        {flowNeedsCourse && dailyFlow ? (
+          // 今日学习流程：learn/sentence 阶段需要课程 → 引导去课程页选择
+          // （课程页链接会带 flow=daily 回到本页继续流程）。
+          <div className="mx-auto flex max-w-md flex-col items-center gap-4 rounded-2xl border border-cyan-200/70 bg-white/80 px-6 py-8 text-center shadow-soft backdrop-blur-xl ipad:px-8 ipad:py-10">
+            <p className="text-5xl">{DAILY_FLOW_PHASES[dailyFlow.phaseIndex].icon}</p>
+            <p className="text-lg font-bold text-slate-800 ipad:text-xl">请先去选择课程</p>
+            <p className="text-sm text-slate-600 ipad:text-base">
+              「{DAILY_FLOW_PHASES[dailyFlow.phaseIndex].label}」阶段需要一个课程才能开始，选好课程后会自动回到今日流程。
+            </p>
+            <Button asChild className="mt-2 animate-glow-pulse ipad:px-5 ipad:text-base">
+              <Link href="/learning?flow=daily">📚 去选择课程</Link>
+            </Button>
+          </div>
+        ) : null}
+        {!isLoading && !flowNeedsCourse && errorMessage ? (
           <div className="flex flex-col items-center gap-3">
             <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 ipad:px-6 ipad:py-4 ipad:text-base">{errorMessage}</p>
             <Button variant="outline" onClick={() => window.location.reload()}>重新加载</Button>
           </div>
         ) : null}
-        {!isLoading && !errorMessage && !currentItem ? (
+        {!isLoading && !flowNeedsCourse && !errorMessage && !currentItem ? (
           studyMode === "test" ? (
             // 每日一测空队列：没有可测的词（还没学过词，或今天已全部测完）。
             // 引导孩子去学新课程新单词 —— 学到的词明天就会进测验。
@@ -5032,7 +5355,7 @@ function StudyContent() {
           )
         ) : null}
 
-        {!isLoading && !errorMessage && currentItem ? (
+        {!isLoading && !flowNeedsCourse && !errorMessage && currentItem ? (
           <div className={isStudyFullscreen ? "w-full max-w-7xl text-center" : "w-full max-w-6xl rounded-2xl border border-white/70 bg-white/75 px-5 py-5 text-center shadow-soft backdrop-blur-xl ipad:px-6 ipad:py-5 ipad-lg:px-8 ipad-lg:py-6"}>
             {!isStudyFullscreen ? (
               <div className="flex justify-center gap-3 text-sm font-medium text-slate-500 ipad:text-sm">

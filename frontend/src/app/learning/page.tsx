@@ -2,7 +2,8 @@
 
 import { BookOpen, ChevronRight, FolderOpen } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -51,7 +52,11 @@ function sumStats(stats: CourseCompletionStats[]): CourseCompletionStats {
   );
 }
 
-export default function LearningStartPage() {
+function LearningStartContent() {
+  // 今日学习流程：从 study 页"去选择课程"进入时带 flow=daily，
+  // 课程链接需要把 flow=daily 带回 study 页继续流程。
+  const searchParams = useSearchParams();
+  const flowSuffix = searchParams.get("flow") === "daily" ? "&flow=daily" : "";
   const [packages, setPackages] = useState<CoursePackage[]>([]);
   const [selectedPackageId, setSelectedPackageId] = useState("");
   const [courseRows, setCourseRows] = useState<CourseWithItems[]>([]);
@@ -421,10 +426,10 @@ export default function LearningStartPage() {
               <div className="grid gap-4 md:grid-cols-2">
                 {courseRows.map(({ course, itemCount, previewItems, completionStats }) => {
                   const studyHref = itemCount > 0
-                    ? `/learning/study?course_id=${course.id}&package_id=${course.package_id}&course_name=${encodeURIComponent(course.name)}`
+                    ? `/learning/study?course_id=${course.id}&package_id=${course.package_id}&course_name=${encodeURIComponent(course.name)}${flowSuffix}`
                     : "#";
                   const learnHref = itemCount > 0
-                    ? `/learning/study?course_id=${course.id}&package_id=${course.package_id}&course_name=${encodeURIComponent(course.name)}&mode=learn`
+                    ? `/learning/study?course_id=${course.id}&package_id=${course.package_id}&course_name=${encodeURIComponent(course.name)}&mode=learn${flowSuffix}`
                     : "#";
                   return (
                   <div
@@ -504,5 +509,13 @@ export default function LearningStartPage() {
         </div>
       </section>
     </main>
+  );
+}
+
+export default function LearningStartPage() {
+  return (
+    <Suspense fallback={<main className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">正在加载课程...</main>}>
+      <LearningStartContent />
+    </Suspense>
   );
 }

@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { AuthUser, clearAuthSession, getAccessToken, getAuthUser, isAuthenticated } from "@/lib/auth";
+import { DAILY_FLOW_PHASES, DailyFlowState, loadDailyFlow } from "@/lib/daily-flow";
 import { translateLearningText } from "@/lib/learning";
 import { getPointsSummary, PointsSummary } from "@/lib/memory";
 import {
@@ -125,11 +126,14 @@ export default function HomePage() {
   const [isTestingLocalModels, setIsTestingLocalModels] = useState(false);
   const [isTestingNetworkModels, setIsTestingNetworkModels] = useState(false);
   const [modelSettings, setModelSettings] = useState<ModelSettings>(defaultModelSettings);
+  // 今日学习流程进度（localStorage，客户端挂载后读取，避免 SSR 水合不一致）。
+  const [dailyFlow, setDailyFlow] = useState<DailyFlowState | null>(null);
 
   useEffect(() => {
     const user = isAuthenticated() ? getAuthUser() : null;
     setCurrentUser(user);
     setModelSettings(getModelSettings());
+    setDailyFlow(loadDailyFlow());
     setHasLoadedSession(true);
     if (user) {
       void loadPersistedModelSettings().then(setModelSettings);
@@ -722,13 +726,17 @@ export default function HomePage() {
             {isLoggedIn ? (
               <>
                 <Button asChild size="lg" className="animate-glow-pulse ipad:text-lg ipad:px-6 ipad:py-6">
+                  {dailyFlow?.done ? (
+                    <Link href="/dashboard">今日已完成 ✅</Link>
+                  ) : (
+                    <Link href="/learning/study?flow=daily&mode=review">🚀 开始今日学习</Link>
+                  )}
+                </Button>
+                <Button asChild size="lg" variant="secondary" className="ipad:text-lg ipad:px-6 ipad:py-6">
                   <Link href="/learning/study?mode=review&ai=1&phonics=1">📚 单词复习</Link>
                 </Button>
                 <Button asChild size="lg" variant="secondary" className="ipad:text-lg ipad:px-6 ipad:py-6">
                   <Link href="/learning">📝 新句子学</Link>
-                </Button>
-                <Button asChild variant="outline" className="ipad:text-lg ipad:px-6 ipad:py-6">
-                  <Link href="/learning">开始学习</Link>
                 </Button>
                 <Button asChild size="lg" variant="outline" className="ipad:text-lg ipad:px-6 ipad:py-6">
                   <Link href="/grammar">📐 语法练习</Link>
@@ -756,6 +764,20 @@ export default function HomePage() {
               </Button>
             ) : null}
           </div>
+          {isLoggedIn && hasLoadedSession ? (
+            <p className="relative mt-3 text-xs text-muted-foreground ipad:text-sm">
+              今日流程：复习 30′ → 新词 20 个 → 句子 30′ → 每日一测
+              {dailyFlow && !dailyFlow.done && (dailyFlow.phaseIndex > 0 || dailyFlow.learnWords.length > 0 || dailyFlow.phaseElapsedMs > 0) ? (
+                <span className="font-semibold text-cyan-700">
+                  {" · 进行中："}
+                  {DAILY_FLOW_PHASES[dailyFlow.phaseIndex].label}
+                  {DAILY_FLOW_PHASES[dailyFlow.phaseIndex].wordQuota
+                    ? ` ${dailyFlow.learnWords.length}/${DAILY_FLOW_PHASES[dailyFlow.phaseIndex].wordQuota} 个`
+                    : ""}
+                </span>
+              ) : null}
+            </p>
+          ) : null}
         </div>
 
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4 ipad:grid-cols-2">
