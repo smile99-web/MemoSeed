@@ -161,6 +161,15 @@ export async function fitFsrsParameters(accessToken: string): Promise<FsrsFitRes
   return (await response.json()) as FsrsFitResponse;
 }
 
+export async function getMasteredWords(accessToken: string): Promise<string[]> {
+  const response = await fetchWithAuth(`${getApiBaseUrl()}/memory/mastered-words`, { cache: "no-store" }, accessToken);
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  const data = (await response.json()) as { words?: string[] };
+  return Array.isArray(data.words) ? data.words : [];
+}
+
 export async function recordStudyTime(accessToken: string, durationSeconds: number, courseId?: string): Promise<void> {
   const response = await fetchWithAuth(
     `${getApiBaseUrl()}/memory/study-time`,

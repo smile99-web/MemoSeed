@@ -320,15 +320,18 @@ def _increment_minute_stat(db: Session, event: LearningEvent) -> None:
 # 2026-08-07 收紧（300s/150s → 120s/45s）：家长实测一小时内记录 52 分钟
 # 学习时长，其中 20 分钟零答题——300s 间隙容差让"5 分钟内做过一题"的
 # 所有分钟全计，回声卡空转（TTS→录音→ASR 重试，不产生任何学习事件）
-# 又持续刷新前端活动时钟，空分钟被整段吞入。120s 仍覆盖"读题+思考+
-# 听一遍示范音"的正常节奏，超出即视为暂停。
+# 又持续刷新前端活动时钟，空分钟被整段吞入。
 #
-# 背景：2026-07-29 20 点档心跳连续跑了 46 分钟，但其中 8.7 / 11.2 分钟的
-# 长区间零学习事件——回声卡状态迁移（TTS→录音→ASR→重试）每次都刷新前端
-# 活动时钟，重试循环空转时计时器永不停；任何按键/触摸也能在零提交的情况下
-# 无限续命。事件是"真实学习行为"的唯一硬证据，所以时长必须锚定在事件上。
-STUDY_SESSION_GAP_SECONDS = 120
-STUDY_SESSION_EDGE_GRACE_SECONDS = 45
+# 2026-08-11 回调（120s/45s → 180s/75s）：收紧过度。生产数据显示单科
+# 拼写/手写卡平均耗时 70-80s，孩子卡在一道题上超过 2 分钟时事件链断裂，
+# 中间真实的书写/思考心跳被整段剔除——一周 764 分钟原始活跃心跳只计入
+# 546 分钟（71%），家长反馈"学了很久却没有有效学习时间"。180s 间隙仍
+# 能拆分"走开又回来"（事件间隔超 3 分钟），75s 首尾宽限覆盖长题卡的
+# 读题与收尾；零事件的空转区间（07-29 事故的根因）依旧全部被剔除。
+# 注意保持 2*grace < gap：否则恰好间隔 gap 的两个事件产生的窗口边缘
+# 相触合并，拆分语义被宽限抵消。
+STUDY_SESSION_GAP_SECONDS = 180
+STUDY_SESSION_EDGE_GRACE_SECONDS = 75
 
 # 事件查询的边界外扩：会话可能跨天/跨查询区间，边界外一个窗口宽度内的事件
 # 会影响区间内会话的归属判定
@@ -370,8 +373,8 @@ def _build_study_windows(event_times: list[datetime]) -> list[tuple[datetime, da
     windows = [(s - grace, e + grace) for s, e in sessions]
     # Edge grace can make adjacent windows overlap — merge them so the
     # two-pointer filter stays correct.
-    # 注：当前常量(120s gap / 45s grace)下拆分间隔 >=120s > 2*45s，窗口不会
-    # 重叠，此合并不可达；保留作为未来调参（grace > gap/2）时的防御。
+    # 注：常量保持 2*grace < gap（180s gap / 75s grace），拆分间隔 > 2*grace，
+    # 窗口不会重叠，此合并不可达；保留作为未来调参（grace > gap/2）时的防御。
     merged: list[list[datetime]] = []
     for start, end in windows:
         if merged and start <= merged[-1][1]:
@@ -418,7 +421,7 @@ def _study_seconds_grid(db: Session, user_id: UUID, day: date) -> dict[tuple[int
     filtered to study-session windows (see STUDY_SESSION_GAP_SECONDS).
 
     StudyTimeLog is the authoritative source for study time: the frontend
-    heartbeat pauses after 10s of inactivity and flushes on visibilitychange.
+    heartbeat pauses after 30s of inactivity and flushes on visibilitychange.
     But activity alone is not proof of study (echo retry churn / idle tapping
     keep the clock alive with zero answers), so heartbeats only count when
     anchored to real learning events. Event-level duration_ms is never used:

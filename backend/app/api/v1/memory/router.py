@@ -4,7 +4,7 @@ from uuid import UUID
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import and_, case, func, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -113,6 +113,32 @@ def get_today_progress(
     db: Annotated[Session, Depends(get_db)],
 ) -> TodayProgressResponse:
     return build_today_progress(db, current_user.id)
+
+
+@router.get("/mastered-words")
+def get_mastered_words(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """Words the child already knows — the frontend pre-fills them in sentence
+    spelling (like sight words) so study time goes to words still being learned.
+
+    2026-08-11: 家长反馈孩子在简单词上耗时过长。生产数据里已掌握词仍要在
+    每句话里逐个键盘敲一遍（70-80s/词的打字节奏），是纯摩擦。判定口径与
+    modes_for_word 的 T4-T5（直通产出档）一致：mastered / near_mastered
+    或强度 ≥0.85。
+    """
+    rows = db.scalars(
+        select(WordMemoryState.word).where(
+            WordMemoryState.user_id == current_user.id,
+            or_(
+                WordMemoryState.status.in_(("mastered", "near_mastered")),
+                WordMemoryState.memory_strength >= 0.85,
+            ),
+        )
+    ).all()
+    words = sorted({(w or "").strip().lower() for w in rows if w and w.strip()})
+    return {"words": words}
 
 
 @router.get("/review-forecast", response_model=ReviewForecastResponse)

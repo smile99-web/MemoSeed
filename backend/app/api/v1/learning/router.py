@@ -1389,14 +1389,17 @@ def list_due_review_items(
         # — these give the child a chance to succeed before attempting
         # the harder production mode.
         # 手写化（2026-08-02）：产出环节统一为手写听写，键盘拼写下线。
-        BASE_MODES = [
-            "listen_choose_chinese",    # 听音选中文
-            "english_to_chinese",       # 看英文选中文
-            "handwriting_dictation",    # 听发音+看中文 → 手写英文
-        ]
+        # 题型集合见 modes_for_word 各链路（识别：listen_choose_chinese /
+        # english_to_chinese；产出：handwriting_dictation）。
         # N1: the new-word bootstrap chain — recognition first, handwritten
         # production last. Stage index = number of REAL tests so far.
-        N1_BOOTSTRAP_MODES = ["listen_choose_chinese", "english_to_chinese", "handwriting_dictation"]
+        # 2026-08-11: 每阶段只出一种题 → 新词要到第 3 次课才第一次手写，
+        # 家长反馈"手写和英选中频率太低"。改为每阶段一条短链：首次接触
+        # 双识别（听选+英选中），第二次起意思确认 + 手写产出。
+        N1_BOOTSTRAP_CHAINS = [
+            ["listen_choose_chinese", "english_to_chinese"],
+            ["english_to_chinese", "handwriting_dictation"],
+        ]
 
         # Build per-word intelligence from WordMemoryState to drive
         # dynamic question selection (Phase 1 optimization).
@@ -1409,10 +1412,11 @@ def list_due_review_items(
               T1/T2 recognition : listen_choose_chinese, english_to_chinese
               T3-T5 production  : handwriting_dictation（手写听写，2026-08-02
                                   起取代全部键盘拼写类型）
-            P1: intervention words (chronic failures) get assisted forms ONLY.
-            Re-failing the same production test for the 100th time teaches
-            nothing — the breakthrough path rebuilds the sound<->letter
-            mapping with recognition and one handwritten attempt.
+            P1: intervention words (chronic failures) get recognition-first
+            chains with a single handwritten attempt. Re-failing the same
+            production test for the 100th time teaches nothing — the
+            breakthrough path rebuilds the sound<->letter mapping with
+            recognition and one handwritten attempt.
 
             视觉词快速通道（2026-08-03）：日常高频功能词不需要手写考。
             强度 ≥0.75 的视觉词直接从队列排除——它们在每句话里都会出现，
@@ -1448,16 +1452,18 @@ def list_due_review_items(
                 return ["listen_choose_chinese", "english_to_chinese", "handwriting_dictation"]
 
             if intel.get("intervention"):
-                return ["listen_choose_chinese", "handwriting_dictation"]
-            # N1: new-word bootstrap. Words with < 3 REAL tests get a fixed
+                # 2026-08-11: 补 english_to_chinese——慢性失败词的意思重建
+                # 不能只靠听音一种识别，且家长要求提高英选中频率。
+                return ["listen_choose_chinese", "english_to_chinese", "handwriting_dictation"]
+            # N1: new-word bootstrap. Words with few REAL tests get a fixed
             # recognition-first chain — one stage per queue fetch — instead of
             # being thrown straight into spelling production. Data behind
             # this: 165 of 217 recent new words had their FIRST real test be
             # a spelling failure (0% pass), and none ever saw a recognition
             # test first. Failing a new word on first contact is the most
             # demotivating possible introduction.
-            if real_tests < len(N1_BOOTSTRAP_MODES):
-                return [N1_BOOTSTRAP_MODES[real_tests]]
+            if real_tests < len(N1_BOOTSTRAP_CHAINS):
+                return N1_BOOTSTRAP_CHAINS[real_tests]
 
             # 改进3+4: 拼写失败率高或 unknown 多 -> 回识别 + 一次手写。
             # 改进3: 真测试正确率 <50%（lapse/real_tests>0.5 且 real_tests>=5）
@@ -1469,12 +1475,16 @@ def list_due_review_items(
 
             status_value = intel.get("status", "")
             strength = intel.get("strength", 0)
-            # T4-T5: near/mastery — straight to production, no scaffold.
+            # T4-T5: near/mastery — quick meaning check, then production.
+            # 2026-08-11: 补 english_to_chinese 作为产出前的意思确认（~20s，
+            # 选对再写才有意义；选错说明"假掌握"，应尽早暴露）。家长反馈
+            # 英选中频率太低。
             if status_value in ("mastered", "near_mastered") or strength >= 0.90:
-                return ["handwriting_dictation"]
+                return ["english_to_chinese", "handwriting_dictation"]
             # T3-T4: consolidating — recognition warm-up, then production.
+            # 2026-08-11: 识别热身从单一听选改为听选+英选中双识别。
             if status_value == "consolidating" or strength >= 0.6:
-                return ["listen_choose_chinese", "handwriting_dictation"]
+                return ["listen_choose_chinese", "english_to_chinese", "handwriting_dictation"]
             # T1-T3: teaching / difficult / unknown — recognition first.
             return ["listen_choose_chinese", "english_to_chinese", "handwriting_dictation"]
 

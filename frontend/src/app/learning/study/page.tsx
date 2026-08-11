@@ -14,7 +14,7 @@ import { generateDynamicSentence, generateLearningEncouragement, getWordTranslat
 import { fetchWithAuth, parseApiError } from "@/lib/api";
 import { getApiBaseUrl } from "@/lib/api-base-url";
 import { isSightWord } from "@/lib/sight-words";
-import { recordCourseCompletion, recordStudyTime, rotateFocusWord, scheduleMemoryReview, getReviewAdvice, generateReviewAdvice, awardPoints } from "@/lib/memory";
+import { recordCourseCompletion, recordStudyTime, rotateFocusWord, scheduleMemoryReview, getMasteredWords, getReviewAdvice, generateReviewAdvice, awardPoints } from "@/lib/memory";
 import {
   getEchoCountToday,
   getPhonicsTip,
@@ -72,7 +72,12 @@ const itemTypeLabels: Record<LearningItem["item_type"], string> = {
   sentence: "句子",
 };
 
-const STUDY_IDLE_TIMEOUT_MS = 10_000;
+// 2026-08-11: 10s → 30s。10s 看门狗把"读题+思考"当成离开——孩子看一句
+// 英文、在心里拼一遍再动手，轻松超过 10s 无键盘/指针事件，计时暂停，
+// 这段最真实的思考时间从未写入有效学习时长（家长反馈"学了很久没计时"
+// 的主要来源）。30s 仍能在孩子真正走开后快速停表（每次离开最多虚记
+// 30s），又不会惩罚正常思考节奏。
+const STUDY_IDLE_TIMEOUT_MS = 30_000;
 // While the echo card (听音跟读) is up the child listens + reads aloud and
 // produces no key/pointer events, so the normal 10s watchdog must not pause
 // the timer. But the exemption must stay BOUNDED: a child who walks away
@@ -535,12 +540,15 @@ function StudyContent() {
   const [mistakePracticeErrorCount, setMistakePracticeErrorCount] = useState(0);
   const [wordConsecutiveCorrect, setWordConsecutiveCorrect] = useState<number[]>([]);
   const [mistakePracticeConsecutiveCorrect, setMistakePracticeConsecutiveCorrect] = useState(0);
-  // P17: 2 consecutive correct (was 3) — one re-proof after a mistake is
-  // enough before the meaning quiz; the third re-type was pure grind.
-  const MISTAKE_PRACTICE_REQUIRED_CONSECUTIVE = 2;
-  // Meaning-quiz sub-state: after the child spells the same word correctly
-  // 3 times in a row, we show a Chinese-meaning multiple-choice question
-  // for that word before advancing to the next one.
+  // 2026-08-11: 1 consecutive correct (was 2, P17; originally 3) — 家长反馈
+  // "英文选中文意思"出现太少。错词每拼对一次就立即考一次中文意思（
+  // english_to_chinese 选择），意思题从"连对奖励"变成每个错词的必过环节；
+  // 意思答错再回到拼写也只需再对 1 次。拼写复证由复习队列的手写听写承担，
+  // 不在这里重复磨键盘。
+  const MISTAKE_PRACTICE_REQUIRED_CONSECUTIVE = 1;
+  // Meaning-quiz sub-state: after the child spells the word correctly
+  // (MISTAKE_PRACTICE_REQUIRED_CONSECUTIVE in a row), we show a
+  // Chinese-meaning multiple-choice question before advancing.
   const [mistakeMeaningQuizOptions, setMistakeMeaningQuizOptions] = useState<string[]>([]);
   const [mistakeMeaningQuizSelected, setMistakeMeaningQuizSelected] = useState<string | null>(null);
   const [mistakeMeaningQuizCorrect, setMistakeMeaningQuizCorrect] = useState<string>("");
@@ -799,32 +807,59 @@ function StudyContent() {
   // P2-2: Milestone tracking
   const [milestoneMessage, setMilestoneMessage] = useState<string | null>(null);
   const totalMasteredRef = useRef(0);
-  // Mirrors sightWordIndexSet for use inside non-memoized imperative code
+  // 已掌握词集合（2026-08-11 简单词减负）：句子拼写中预填免打字。
+  // 每节课拉一次；拉取失败 → 空集合 → 行为与旧版一致（全部手打）。
+  const [masteredWordSet, setMasteredWordSet] = useState<ReadonlySet<string>>(new Set());
+  // Mirrors givenWordIndexSet for use inside non-memoized imperative code
   // (checkWord) where a stale closure must never re-enable judging a
-  // sight word. Reassigned on every render from the memo above.
-  const sightWordIndexesRef = useRef<ReadonlySet<number>>(new Set());
+  // given word. Reassigned on every render from the memo above.
+  const givenWordIndexesRef = useRef<ReadonlySet<number>>(new Set());
 
   const currentItem = items[currentIndex] ?? null;
   currentItemIdRef.current = currentItem?.id ?? "";
   // Phonics: extract sound family from source tag for display
   const currentPhonicsFamily = isPhonics ? ((currentItem?.source || "").match(/^phonics:(\w+)/) || [])[1] || null : null;
   const currentWords = useMemo(() => tokenizeEnglish(currentItem?.english_text ?? ""), [currentItem]);
-  // Sight words (the/a/is/...) in SENTENCE spelling are given, not typed:
-  // they are learned through exposure and were burning ~1000 review events
-  // (~19h) per week in keyboard re-typing + mistake loops (2026-08-10).
+  // Given words in SENTENCE spelling are pre-filled, not typed:
+  // - sight words (the/a/is/...) — learned through exposure; they were
+  //   burning ~1000 review events (~19h) per week in keyboard re-typing +
+  //   mistake loops (2026-08-10 视觉词退休);
+  // - mastered words (2026-08-11 简单词减负) — words the child already
+  //   knows (mastered/near_mastered or strength ≥0.85, fetched once per
+  //   session from /memory/mastered-words) were still being keyboard-typed
+  //   in every sentence at 70-80s/word: pure friction on simple vocabulary
+  //   with zero learning value.
   // Only applies to multi-word items — a standalone word task types its word.
-  const sightWordIndexSet = useMemo(() => {
+  const givenWordIndexSet = useMemo(() => {
     const indexes = new Set<number>();
     if (currentWords.length > 1) {
       currentWords.forEach((word, index) => {
-        if (isSightWord(word)) {
+        if (isSightWord(word) || masteredWordSet.has(normalizeEnglishKey(word))) {
           indexes.add(index);
         }
       });
     }
     return indexes;
-  }, [currentWords]);
-  sightWordIndexesRef.current = sightWordIndexSet;
+  }, [currentWords, masteredWordSet]);
+  givenWordIndexesRef.current = givenWordIndexSet;
+
+  useEffect(() => {
+    const token = getAccessToken();
+    if (!token) {
+      return;
+    }
+    let cancelled = false;
+    getMasteredWords(token)
+      .then((words) => {
+        if (!cancelled) {
+          setMasteredWordSet(new Set(words));
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const dynamicReviewWords = useMemo(() => getDynamicReviewWords(currentItem), [currentItem]);
   const dynamicReviewWordIndexes = useMemo(() => {
     const reviewWordSet = new Set(dynamicReviewWords);
@@ -1427,13 +1462,13 @@ function StudyContent() {
   const getRequiredWordIndexes = useCallback(function getRequiredWordIndexes(): number[] {
     if (respellWordIndexesRef.current.length > 0) return respellWordIndexesRef.current;
     const base = isDynamicFillBlankItem ? dynamicReviewWordIndexes : currentWords.map((_, index) => index);
-    // Sight words are pre-filled (given) in sentence spelling — exclude them
-    // from the required set so the child only types content words. Guard: if
-    // EVERY word is a sight word, fall back to typing them all rather than
-    // making the item vacuously complete.
-    const filtered = base.filter((index) => !sightWordIndexSet.has(index));
+    // Given words (sight + mastered) are pre-filled in sentence spelling —
+    // exclude them from the required set so the child only types words still
+    // being learned. Guard: if EVERY word is given, fall back to typing them
+    // all rather than making the item vacuously complete.
+    const filtered = base.filter((index) => !givenWordIndexSet.has(index));
     return filtered.length > 0 ? filtered : base;
-  }, [currentWords, dynamicReviewWordIndexes, isDynamicFillBlankItem, sightWordIndexSet]);
+  }, [currentWords, dynamicReviewWordIndexes, isDynamicFillBlankItem, givenWordIndexSet]);
 
   function areRequiredWordAnswersComplete(nextAnswers: string[], nextStatuses = wordStatuses): boolean {
     return getRequiredWordIndexes().every((wordIndex) => (
@@ -1954,11 +1989,11 @@ function StudyContent() {
     const hintLetter = (currentItem?.review_prompt || "").startsWith("首字母:")
       ? (currentItem?.review_prompt || "").slice(4)
       : "";
-    // Sight words in sentence spelling start pre-filled + correct (given
-    // text, rendered as static chips — see sightWordIndexSet).
-    setWordAnswers(currentWords.map((w, i) => sightWordIndexesRef.current.has(i) ? w : (i === 0 && hintLetter) ? hintLetter : ""));
+    // Given words (sight + mastered) in sentence spelling start pre-filled +
+    // correct (given text, rendered as static chips — see givenWordIndexSet).
+    setWordAnswers(currentWords.map((w, i) => givenWordIndexesRef.current.has(i) ? w : (i === 0 && hintLetter) ? hintLetter : ""));
     wordJudgedRef.current.clear();
-    setWordStatuses(currentWords.map((_w, i) => sightWordIndexesRef.current.has(i) ? "correct" : "idle"));
+    setWordStatuses(currentWords.map((_w, i) => givenWordIndexesRef.current.has(i) ? "correct" : "idle"));
     setWordErrorCounts(currentWords.map(() => 0));
     setWordConsecutiveCorrect(currentWords.map(() => 0));
     clearWordMeaningReview();
@@ -3754,11 +3789,11 @@ function StudyContent() {
     if (!expectedWord) {
       return;
     }
-    // Sight words in sentence spelling are given text (no input rendered).
-    // The window-level keyboard fallback can land here with a sight index
-    // before focus settles on the first required word — never judge them
-    // (a "correct" judgment would log a fake word-context review event).
-    if (sightWordIndexesRef.current.has(index)) {
+    // Given words (sight + mastered) in sentence spelling are given text (no
+    // input rendered). The window-level keyboard fallback can land here with
+    // a given index before focus settles on the first required word — never
+    // judge them (a "correct" judgment would log a fake word-context event).
+    if (givenWordIndexesRef.current.has(index)) {
       return;
     }
 
@@ -4115,7 +4150,7 @@ function StudyContent() {
 
     const isCorrect = normalizedAnswer === normalizeTypedWord(expectedWord);
     if (!isCorrect) {
-      // Reset progress — the child must get 3 consecutive correct.
+      // Reset progress — the child must re-earn the consecutive-correct streak.
       setMistakePracticeConsecutiveCorrect(0);
       const nextErrorCount = mistakePracticeErrorCount + 1;
       const errorType = classifySpellingError(expectedWord, mistakePracticeAnswer);
@@ -4280,7 +4315,7 @@ function StudyContent() {
 
     if (!isCorrect) {
       // Wrong meaning — go back to spelling. Reset consecutive counter
-      // so the child must re-earn the 3 correct spellings before the
+      // so the child must re-earn the correct spelling(s) before the
       // meaning quiz is shown again.
       setMistakePracticeConsecutiveCorrect(0);
       setMistakePracticeErrorCount(0);
@@ -5109,7 +5144,7 @@ function StudyContent() {
                     const isRespellRound = respellWordIndexesRef.current.length > 0;
                     const isRespellTarget = isRespellRound && respellWordIndexesRef.current.includes(index);
                     const isRespellNonTarget = isRespellRound && !respellWordIndexesRef.current.includes(index);
-                    const shouldShowInput = ((!isDynamicFillBlankItem && !isRespellNonTarget) || isDynamicBlank) && !sightWordIndexSet.has(index);
+                    const shouldShowInput = ((!isDynamicFillBlankItem && !isRespellNonTarget) || isDynamicBlank) && !givenWordIndexSet.has(index);
                     return (
                       <WordInput
                         key={`${word}-${index}`}
