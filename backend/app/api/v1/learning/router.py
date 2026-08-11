@@ -2801,6 +2801,228 @@ def list_daily_test_items(
     return test_items
 
 
+# —— 今日学习流程（daily flow）内容端点 ——
+# 2026-08-11 流程重构：复习30词 → 新词20个 → 句子30句 → 每日一测，全部计数制。
+# 新词与句子都来自「中考英语」课程包：新词按包内句子首次出现顺序收割（无记忆
+# 状态的真新词优先，不足时用最弱的在学词补齐）；句子按课序取未练过的。完成的
+# 内容当天即带记忆状态，第二天重进自然得到下一批任务——"按算法重新安排"。
+ZHONGKAO_PACKAGE_NAME = "中考英语"
+DAILY_FLOW_NEW_WORD_LIMIT = 20
+DAILY_FLOW_SENTENCE_LIMIT = 30
+
+
+def _resolve_daily_flow_package(db: Session, user_id: UUID) -> CoursePackage | None:
+    """Locate the user's 中考英语 course package (exact name, then any 中考 package)."""
+    packages = db.scalars(
+        select(CoursePackage).where(CoursePackage.user_id == user_id)
+    ).all()
+    for package in packages:
+        if (package.name or "") == ZHONGKAO_PACKAGE_NAME:
+            return package
+    for package in packages:
+        if "中考" in (package.name or ""):
+            return package
+    return None
+
+
+def _daily_flow_package_sentences(db: Session, user_id: UUID, package_id: UUID) -> list[LearningItem]:
+    """All sentence items of the package, flattened in course order (第N课 numeric),
+    then in-item sort order."""
+    courses = db.scalars(
+        select(Course).where(Course.user_id == user_id, Course.package_id == package_id)
+    ).all()
+
+    def course_order_key(course: Course) -> tuple[int, datetime]:
+        digits = "".join(character for character in (course.name or "") if character.isdigit())
+        return (int(digits) if digits else 1_000_000, course.created_at)
+
+    ordered_courses = sorted(courses, key=course_order_key)
+    course_ids = [course.id for course in ordered_courses]
+    if not course_ids:
+        return []
+    rows = db.scalars(
+        select(LearningItem)
+        .where(
+            LearningItem.user_id == user_id,
+            LearningItem.course_id.in_(course_ids),
+            LearningItem.item_type == "sentence",
+        )
+        .order_by(LearningItem.sort_order.asc(), LearningItem.created_at.asc())
+    ).all()
+    by_course: dict[UUID, list[LearningItem]] = {course_id: [] for course_id in course_ids}
+    for row in rows:
+        if row.course_id in by_course:
+            by_course[row.course_id].append(row)
+    return [row for course_id in course_ids for row in by_course[course_id]]
+
+
+@router.get("/daily-flow/new-words", response_model=list[LearningItemRead])
+def list_daily_flow_new_words(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: int = DAILY_FLOW_NEW_WORD_LIMIT,
+) -> list[LearningItemRead]:
+    """今日流程·新单词阶段：从「中考英语」课程包的句子里收割新词。
+    每词连续四关，按听说读写顺序：听音选中文 → 跟读 → 看词选中文 → 手写。
+    真新词（无记忆状态）按包内首次出现顺序优先；不足时用包内最弱的在学词
+    补齐；全部掌握后返回更少甚至空队列（前端对空队列自动跳过该阶段）。
+    """
+    capped_limit = max(1, min(limit, 40))
+    package = _resolve_daily_flow_package(db, current_user.id)
+    if package is None:
+        return []
+    sentences = _daily_flow_package_sentences(db, current_user.id, package.id)
+    candidate_words: list[str] = []
+    seen_words: set[str] = set()
+    for sentence_item in sentences:
+        for raw_word in tokenize_words(sentence_item.english_text or ""):
+            word = normalize_word(raw_word)
+            if not word or len(word) < 2 or word in seen_words or word in SIGHT_WORDS:
+                continue
+            seen_words.add(word)
+            candidate_words.append(word)
+    if not candidate_words:
+        return []
+    word_states = db.scalars(
+        select(WordMemoryState).where(
+            WordMemoryState.user_id == current_user.id,
+            WordMemoryState.word.in_(candidate_words),
+        )
+    ).all()
+    state_by_word = {state.word: state for state in word_states}
+    fresh_words = [word for word in candidate_words if word not in state_by_word]
+    picked = fresh_words[:capped_limit]
+    if len(picked) < capped_limit:
+        # 新词不足 → 包内最弱的在学词补齐（已掌握/近掌握的不碰，它们留给复习）。
+        weak_states = sorted(
+            (
+                state
+                for state in word_states
+                if state.word not in picked and (state.status or "") in {"teaching", "difficult", "consolidating"}
+            ),
+            key=lambda state: state.memory_strength or 0.0,
+        )
+        for state in weak_states:
+            picked.append(state.word)
+            if len(picked) >= capped_limit:
+                break
+    if not picked:
+        return []
+    stored_settings = get_private_model_settings(db, current_user.id)
+    translation_settings = build_llm_translation_settings(None, None, None, None, stored_settings)
+    translations = ensure_word_translations(db, current_user.id, picked, translation_settings)
+    now = datetime.now(UTC)
+    items: list[LearningItemRead] = []
+    for word in picked:
+        # Transient probe item: _enrich_choices_for_word only reads
+        # english/chinese text off it — nothing is persisted here.
+        probe = LearningItem(
+            user_id=current_user.id,
+            course_id=None,
+            item_type="word",
+            english_text=word,
+            chinese_text=translations.get(word, "") or "",
+        )
+        choices, correct_answer = _enrich_choices_for_word(db, current_user.id, word, probe, translation_settings)
+        if not choices or not correct_answer:
+            continue
+        # 听说读写四关：听音选中文（听）→ 跟读（说）→ 看词选中文（读）→ 手写（写）。
+        gates: list[tuple[str, str | None, list[str], str | None]] = [
+            ("listen_choose_chinese", "听英文发音，选择正确的中文意思", choices, correct_answer),
+            ("voice_practice", "🎤 跟我读一遍", [], word),
+            ("english_to_chinese", f"选择 {word} 的中文意思", choices, correct_answer),
+            ("handwriting_dictation", None, [], None),
+        ]
+        for gate_index, (gate_type, gate_prompt, gate_choices, gate_answer) in enumerate(gates):
+            items.append(
+                LearningItemRead(
+                    id=uuid4(),
+                    source_item_id=None,
+                    user_id=current_user.id,
+                    course_id=None,
+                    item_type="word",
+                    english_text=word,
+                    chinese_text=correct_answer,
+                    difficulty_level=3,
+                    source=f"每日流程·新词·第{gate_index + 1}关",
+                    review_task_type=gate_type,
+                    review_prompt=gate_prompt,
+                    review_choices=gate_choices,
+                    review_answer=gate_answer,
+                    focus_words=[word],
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    return items
+
+
+@router.get("/daily-flow/sentences", response_model=list[LearningItemRead])
+def list_daily_flow_sentences(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: int = DAILY_FLOW_SENTENCE_LIMIT,
+) -> list[LearningItemRead]:
+    """今日流程·句子阶段：「中考英语」课程包内未练过的 30 个句子。
+    按课序/句序排列；练过（repetition_count > 0）的句子不再出现。每个句子带
+    focus_words（弱词预热 + 完形填空），与课程学习同一套听说读写体验：
+    听句子发音 → 弱词跟读 → 看句理解 → 完形拼写。
+    """
+    capped_limit = max(1, min(limit, 60))
+    package = _resolve_daily_flow_package(db, current_user.id)
+    if package is None:
+        return []
+    sentences = _daily_flow_package_sentences(db, current_user.id, package.id)
+    if not sentences:
+        return []
+    sentence_ids = [item.id for item in sentences]
+    memory_states = db.scalars(
+        select(MemoryState).where(MemoryState.learning_item_id.in_(sentence_ids))
+    ).all()
+    repetitions_by_id = {state.learning_item_id: state.repetition_count or 0 for state in memory_states}
+    fresh_sentences = [item for item in sentences if repetitions_by_id.get(item.id, 0) <= 0][:capped_limit]
+    if not fresh_sentences:
+        return []
+    # 弱词标记（与 /items 的 N2/N4 同一规则）：无记忆状态或在学/困难的非视觉词
+    # 进 focus_words —— 前端据此先预热跟读、再只对弱词做完形填空。
+    sentence_words: set[str] = set()
+    for item in fresh_sentences:
+        sentence_words.update(
+            word for word in (normalize_word(raw) for raw in tokenize_words(item.english_text or "")) if word
+        )
+    weak_status_by_word: dict[str, tuple[float, str]] = {}
+    if sentence_words:
+        word_states = db.scalars(
+            select(WordMemoryState).where(
+                WordMemoryState.user_id == current_user.id,
+                WordMemoryState.word.in_(list(sentence_words)),
+            )
+        ).all()
+        status_by_word = {state.word: (state.memory_strength or 0.0, state.status or "") for state in word_states}
+        weak_status_by_word = {
+            word: value
+            for word, value in ((word, status_by_word.get(word, (0.0, ""))) for word in sentence_words)
+            if value[1] in ("teaching", "difficult", "") and word not in SIGHT_WORDS
+        }
+    result: list[LearningItemRead] = []
+    for item in fresh_sentences:
+        weak = [
+            word
+            for word in (normalize_word(raw) for raw in tokenize_words(item.english_text or ""))
+            if word and word in weak_status_by_word
+        ]
+        if weak:
+            weak.sort(key=lambda word: weak_status_by_word[word][0])
+            result.append(
+                LearningItemRead.model_validate(item).model_copy(
+                    update={"focus_words": weak[:2], "review_task_type": "cloze_sentence"}
+                )
+            )
+        else:
+            result.append(LearningItemRead.model_validate(item))
+    return result
+
+
 @router.post("/handwriting-check", response_model=HandwritingCheckResponse)
 async def check_handwriting(
     payload: HandwritingCheckRequest,

@@ -91,27 +91,27 @@ const savedSecretPlaceholder = "••••••••（已保存，重新输
 
 const workflowCards = [
   {
-    title: "热身复习",
-    description: "昨天错题、高遗忘风险、即将到期内容。",
-    minutes: "10 分钟",
+    title: "复习单词",
+    description: "到期复习词，听说读写四种方式各练一遍。",
+    minutes: "30 个词",
     icon: Repeat2,
   },
   {
-    title: "新内容学习",
-    description: "新单词与常用短语，控制每日认知负荷。",
-    minutes: "20 分钟",
+    title: "学习新单词",
+    description: "中考英语课程包新词：听音选义、跟读、看词选义、手写。",
+    minutes: "20 个词",
     icon: GraduationCap,
   },
   {
-    title: "句子训练",
-    description: "中译英、拼写、填空，强化主动回忆。",
-    minutes: "20 分钟",
+    title: "练习句子",
+    description: "中考英语课程包句子：听句、弱词跟读、完形拼写。",
+    minutes: "30 个句子",
     icon: Brain,
   },
   {
-    title: "错题强化",
-    description: "今日错误当天再次出现，拼写重新输入。",
-    minutes: "10 分钟",
+    title: "每日一测",
+    description: "每词三关：听音选意思 → 看词选意思 → 手写英文，最后跟读。",
+    minutes: "20 个词",
     icon: CalendarClock,
   },
 ] as const;
@@ -766,13 +766,13 @@ export default function HomePage() {
           </div>
           {isLoggedIn && hasLoadedSession ? (
             <p className="relative mt-3 text-xs text-muted-foreground ipad:text-sm">
-              今日流程：复习 30′ → 新词 20 个 → 句子 30′ → 每日一测
-              {dailyFlow && !dailyFlow.done && (dailyFlow.phaseIndex > 0 || dailyFlow.learnWords.length > 0 || dailyFlow.phaseElapsedMs > 0) ? (
+              今日流程：复习 30 词 → 新词 20 个（中考） → 句子 30 句（中考） → 每日一测
+              {dailyFlow && !dailyFlow.done && (dailyFlow.phaseIndex > 0 || dailyFlow.completedKeys.length > 0 || dailyFlow.phaseElapsedMs > 0) ? (
                 <span className="font-semibold text-cyan-700">
                   {" · 进行中："}
                   {DAILY_FLOW_PHASES[dailyFlow.phaseIndex].label}
-                  {DAILY_FLOW_PHASES[dailyFlow.phaseIndex].wordQuota
-                    ? ` ${dailyFlow.learnWords.length}/${DAILY_FLOW_PHASES[dailyFlow.phaseIndex].wordQuota} 个`
+                  {DAILY_FLOW_PHASES[dailyFlow.phaseIndex].quota
+                    ? ` ${dailyFlow.completedKeys.length}/${DAILY_FLOW_PHASES[dailyFlow.phaseIndex].quota} ${DAILY_FLOW_PHASES[dailyFlow.phaseIndex].quotaUnit ?? ""}`
                     : ""}
                 </span>
               ) : null}

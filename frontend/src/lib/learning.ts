@@ -681,6 +681,43 @@ export async function listDailyTestItems(accessToken: string, limit = 20): Promi
   return (await response.json()) as LearningItem[];
 }
 
+// 今日流程·新单词阶段：中考英语课程包内的新词，每词听说读写四关
+// （听音选中文 → 跟读 → 看词选中文 → 手写）。
+export async function listDailyFlowNewWords(accessToken: string, limit = 20): Promise<LearningItem[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/learning/daily-flow/new-words?${params.toString()}`,
+    {
+      cache: "no-store",
+    },
+    accessToken,
+  );
+
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+
+  return (await response.json()) as LearningItem[];
+}
+
+// 今日流程·句子阶段：中考英语课程包内未练过的句子（带弱词预热/完形填空）。
+export async function listDailyFlowSentences(accessToken: string, limit = 30): Promise<LearningItem[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/learning/daily-flow/sentences?${params.toString()}`,
+    {
+      cache: "no-store",
+    },
+    accessToken,
+  );
+
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+
+  return (await response.json()) as LearningItem[];
+}
+
 export type HandwritingTaskType = "handwriting_dictation" | "handwriting_translation" | "handwriting_both";
 
 export interface HandwritingCheckPayload {
