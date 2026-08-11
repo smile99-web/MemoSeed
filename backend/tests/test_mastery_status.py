@@ -93,6 +93,8 @@ def make_mastered_word_memory_state(*, consecutive_correct_count=3, consecutive_
         hidden_recall_correct_count=1,
         no_hint_correct_date_count=no_hint_correct_date_count,
         last_answer_seen_at=None,
+        # 新鲜 streak（2026-08-11 derive 新鲜度门控）：测试默认词刚被测过
+        last_reviewed_at=datetime.now(timezone.utc),
     )
 
 

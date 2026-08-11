@@ -39,6 +39,8 @@ def _ws(**over):
         no_hint_correct_date_count=0,
         last_answer_seen_at=None,
         priority_score=0.3,
+        # 新鲜 streak（2026-08-11 derive 新鲜度门控）
+        last_reviewed_at=datetime.now(timezone.utc),
     )
     base.update(over)
     return SimpleNamespace(**base)

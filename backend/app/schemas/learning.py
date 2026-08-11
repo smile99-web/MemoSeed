@@ -176,6 +176,9 @@ class WordReviewRequest(BaseModel):
     # near-miss (>= 0.8) — see create_word_review.
     spelling_similarity: float | None = Field(default=None, ge=0.0, le=1.0)
     review_mode: str = Field(min_length=1, max_length=32)
+    # 2026-08-11: 复习来源场景。每日一测的提交带 "daily-test"——测试队列
+    # "今日已测不重出"靠它区分测试提交与日常复习（两者共用 review_mode）。
+    context: str | None = Field(default=None, max_length=16)
     response_text: str | None = None
     duration_seconds: int = Field(default=0, ge=0)
     error_type: str | None = Field(default=None, max_length=32)
@@ -263,6 +266,8 @@ class HandwritingCheckRequest(BaseModel):
     expected_english: str = Field(default="", max_length=200)
     expected_chinese: str = Field(default="", max_length=200)
     duration_seconds: int = Field(default=0, ge=0, le=600)
+    # 2026-08-11: 复习来源场景（"daily-test" = 每日一测），见 WordReviewRequest。
+    context: str | None = Field(default=None, max_length=16)
 
 
 class HandwritingCheckResponse(BaseModel):

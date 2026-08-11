@@ -62,7 +62,7 @@ import {
 import HintDisplay from "./components/HintDisplay";
 import { WORD_DICTIONARY } from "@/lib/word-dictionary";
 import MiniCelebrationConfetti from "./components/MiniCelebrationConfetti";
-import CelebrationModal, { type CelebrationSummary, type NextCourseTarget } from "./components/CelebrationModal";
+import CelebrationModal, { type CelebrationSummary, type NextCourseTarget, type TestReportEntry } from "./components/CelebrationModal";
 import WordInput from "./components/WordInput";
 import HandwritingCanvas, { type HandwritingCanvasHandle } from "@/components/handwriting-canvas";
 
@@ -103,7 +103,7 @@ const DIFFICULT_WORD_CONFIRMATION_COUNT = 3;
 const INITIAL_REVIEW_QUEUE_LIMIT = 200;
 const INITIAL_SPEAK_QUEUE_LIMIT = 20;
 const INITIAL_HANDWRITE_QUEUE_LIMIT = 16;
-// 每日一测：每天 20 个词（听发音写英文+中文）。
+// 每日一测：每天 20 个词，每词连续三关（听音选中文 → 看英文选中文 → 手写英文）。
 const INITIAL_TEST_QUEUE_LIMIT = 20;
 const REFILL_REVIEW_QUEUE_LIMIT = 50;
 const SPELLING_REVIEW_TASK_TYPES = new Set(["listen_spell", "chinese_to_english", "missing_letter", "hidden_recall"]);
@@ -521,14 +521,45 @@ function StudyContent() {
   } | null>(null);
   const [handwritingChecking, setHandwritingChecking] = useState(false);
   const [handwritingError, setHandwritingError] = useState<string | null>(null);
-  // 每日一测 (test mode)：记录每题判定，队列做完后出成绩单。
-  const [testResults, setTestResults] = useState<Array<{
-    word: string;
-    chinese: string;
-    correct: boolean;
-    englishOk: boolean | null;
-    chineseOk: boolean | null;
-  }>>([]);
+  // 每日一测 (test mode)：三关结果按词聚合（同一词的 听/义/写 三关 item id
+  // 各不相同 —— 后端为每关生成临时 uuid，所以必须用 source_item_id ?? 归一化
+  // 单词做聚合 key，绝不能按 item.id），队列做完后出成绩单。
+  const [testResults, setTestResults] = useState<Array<TestReportEntry & { key: string }>>([]);
+  // 每日一测：把某一关的判定 upsert 到对应词上。listen_choose_chinese→listen，
+  // english_to_chinese→meaning，handwriting_dictation→spell，手写关后的跟读→speak。
+  // 只在 test 模式记录；其余模式调用是 no-op。
+  const recordTestGateResult = useCallback(function recordTestGateResult(
+    item: LearningItem,
+    gate: "listen" | "meaning" | "spell" | "speak",
+    ok: boolean,
+  ) {
+    if (studyMode !== "test") {
+      return;
+    }
+    const key = item.source_item_id ?? normalizeEnglishKey(item.english_text || "");
+    if (!key) {
+      return;
+    }
+    const field = gate === "listen" ? "listenOk" : gate === "meaning" ? "meaningOk" : gate === "spell" ? "spellOk" : "speakOk";
+    setTestResults((prev) => {
+      const index = prev.findIndex((entry) => entry.key === key);
+      if (index < 0) {
+        return [...prev, {
+          key,
+          word: (item.english_text || "").trim(),
+          chinese: (item.chinese_text || "").trim(),
+          listenOk: null,
+          meaningOk: null,
+          spellOk: null,
+          speakOk: null,
+          [field]: ok,
+        }];
+      }
+      const next = [...prev];
+      next[index] = { ...next[index], [field]: ok };
+      return next;
+    });
+  }, [studyMode]);
   const handwritingCanvasRef = useRef<HandwritingCanvasHandle | null>(null);
   const handwritingStartedAtRef = useRef<number>(0);
   const [previewMistakePracticeWord, setPreviewMistakePracticeWord] = useState(false);
@@ -925,7 +956,28 @@ function StudyContent() {
     const primary = (currentItem?.chinese_text || "").split(/[；;]/)[0].trim();
     return Math.min(10, Math.max(3, [...primary].length + 2));
   })();
-  const progressPercent = items.length > 0 ? ((currentIndex + 1) / items.length) * 100 : 0;
+  // 每日一测：进度按词（而非按卡）展示 —— 每词连续三关共用同一
+  // source_item_id，去重后才是「第 X 词 / 共 Y 词」。
+  const testWordProgress = (() => {
+    if (studyMode !== "test") {
+      return null;
+    }
+    const wordKeys: string[] = [];
+    const seenWordKeys = new Set<string>();
+    items.forEach((item) => {
+      const key = item.source_item_id ?? normalizeEnglishKey(item.english_text || "");
+      if (key && !seenWordKeys.has(key)) {
+        seenWordKeys.add(key);
+        wordKeys.push(key);
+      }
+    });
+    const currentKey = currentItem ? (currentItem.source_item_id ?? normalizeEnglishKey(currentItem.english_text || "")) : "";
+    const wordIndex = currentKey ? wordKeys.indexOf(currentKey) : -1;
+    return { current: wordIndex >= 0 ? wordIndex + 1 : 1, total: wordKeys.length };
+  })();
+  const progressPercent = items.length > 0
+    ? ((testWordProgress ? testWordProgress.current : currentIndex + 1) / (testWordProgress ? Math.max(1, testWordProgress.total) : items.length)) * 100
+    : 0;
   const packageId = packageIdFromUrl || resolvedPackageId;
   const nextCourse = useMemo<NextCourseTarget | null>(() => {
     if (!packageId || packageCourses.length === 0) {
@@ -2191,6 +2243,8 @@ function StudyContent() {
         expected_english: (item.english_text || "").trim(),
         expected_chinese: (item.chinese_text || "").trim(),
         duration_seconds: Math.max(1, Math.round((Date.now() - handwritingStartedAtRef.current) / 1000)),
+        // 每日一测提交打 daily-test 标记（后端白名单校验，"今日已测不重出"）。
+        context: studyMode === "test" ? "daily-test" : undefined,
       });
       // Stale guard (2026-08-04): the AI check takes seconds and the mode-
       // switch buttons stay tappable mid-flight. If the child switched
@@ -2208,17 +2262,9 @@ function StudyContent() {
         englishOk: result.english_ok ?? null,
         chineseOk: result.chinese_ok ?? null,
       });
-      // 每日一测：每题判定都记下来，队列做完出成绩单（对错一目了然，
+      // 每日一测：手写关判定按词聚合进成绩单（对错一目了然，
       // 错的词后端已自动回炉到纠正循环）。
-      if (studyMode === "test") {
-        setTestResults((prev) => [...prev, {
-          word: (item.english_text || "").trim(),
-          chinese: (item.chinese_text || "").trim(),
-          correct: result.correct,
-          englishOk: result.english_ok ?? null,
-          chineseOk: result.chinese_ok ?? null,
-        }]);
-      }
+      recordTestGateResult(item, "spell", result.correct);
       if (result.correct) {
         setFeedback("🌟 写对啦！真棒！", "success");
         setCelebrationTrigger((value) => value + 1);
@@ -2228,6 +2274,10 @@ function StudyContent() {
         startEchoPrompt(item.english_text, item.chinese_text || "");
       } else {
         setFeedback(result.comment || "差一点点，看看正确答案吧", "error");
+        if (studyMode === "test") {
+          // 每日一测：发音是独立维度，拼写没对也要读出这个词 —— 对错都触发跟读。
+          startEchoPrompt(item.english_text, item.chinese_text || "");
+        }
       }
     } catch (error) {
       setHandwritingError(error instanceof Error ? error.message : "AI 老师暂时不在，请稍后再试");
@@ -2280,9 +2330,9 @@ function StudyContent() {
         let nextItems: LearningItem[] = [];
 
         if (studyMode === "test") {
-          // 每日一测: 今天学过的词优先，其次到期复习、最弱的已学词，共 20 个。
-          // 每个词听发音，在一张卡片上写出英文+中文意思，AI 判双关；
-          // 写错的词后端自动回炉到纠正循环。
+          // 每日一测: 今天学过的词优先，其次到期复习、最弱的已学词，共 20 个词。
+          // 每词连续三关：听音选中文 → 看英文选中文 → 手写英文（听写），
+          // 三关共用同一 source_item_id；写错的词后端自动回炉到纠正循环。
           // 2026-08-04: 不再 .catch(() => []) —— 401/网络错误曾被吞成
           // "空队列"，把加载失败伪装成"今天没有可测的单词"。失败必须
           // 抛到外层 catch 显示错误（可重试），真为空才显示引导卡片。
@@ -2440,7 +2490,9 @@ function StudyContent() {
         setCurrentIndex(safeIndex);
         if (studyMode === "test") {
           setTestResults([]);
-          setFeedback(mergedItems.length > 0 ? `每日一测：今天测 ${mergedItems.length} 个词，听发音，写出英文和中文意思！` : "今天没有可测的单词啦！");
+          // mergedItems 是卡片数（每词连续三关 = 词数×3），提示按词数展示。
+          const testWordCount = new Set(mergedItems.map((item) => item.source_item_id ?? normalizeEnglishKey(item.english_text || "")).filter(Boolean)).size;
+          setFeedback(mergedItems.length > 0 ? `每日一测：今天测 ${testWordCount} 个词，每个词三关：听一听、选一选、写一写！` : "今天没有可测的单词啦！");
         } else if (studyMode === "handwrite") {
           setFeedback(mergedItems.length > 0 ? `今天写 ${mergedItems.length} 个听写，听一听再动手写！` : "今天的听写都写完啦，明天再来吧！");
         } else if (studyMode === "speak") {
@@ -2799,7 +2851,7 @@ function StudyContent() {
     return item.source_item_id ?? (item.id.startsWith("generated-") ? null : item.id);
   }, []);
 
-  function recordWordMemoryReview(expectedWord: string, score: number, reviewMode: string, responseText = "", errorType?: string) {
+  function recordWordMemoryReview(expectedWord: string, score: number, reviewMode: string, responseText = "", errorType?: string, context?: string) {
     const accessToken = getAccessToken();
     if (!accessToken || !currentItem) {
       return;
@@ -2825,6 +2877,8 @@ function StudyContent() {
         duration_seconds: Math.min(MAX_REVIEW_DURATION_SECONDS, Math.max(1, Math.round((Date.now() - startedAt) / 1000))),
         encoding_stage: currentEncodingStage ?? undefined,
         encoding_duration_ms: encodingDurationMs,
+        // undefined 时 JSON.stringify 自动省略该字段 —— 非 test 提交不带标记。
+        context,
       },
       accessToken,
     ).catch(() => undefined);
@@ -2836,9 +2890,15 @@ function StudyContent() {
   // review_log with review_mode="voice-practice" so FSRS gets fed actual
   // signal (unlike the speak-mode echo card which is telemetry-only).
   // Pass score=4 (production-without-hint tier); giveup score=1 (lapse).
+  // 每日一测放宽：手写关（handwriting_dictation）后的跟读是发音关，同样提交
+  // voice-practice 计分 —— 通过 score=4，跳过/放弃 score=2，并打 daily-test 标记。
   function recordVoicePracticeReview(passed: boolean) {
     const item = currentItemRef.current;
-    if (!item || item.review_task_type !== "voice_practice") {
+    if (!item) {
+      return;
+    }
+    const isTestSpeakGate = studyMode === "test" && item.review_task_type === "handwriting_dictation";
+    if (item.review_task_type !== "voice_practice" && !isTestSpeakGate) {
       return;
     }
     const targetText = (item.english_text || "").trim();
@@ -2847,10 +2907,11 @@ function StudyContent() {
     }
     recordWordMemoryReview(
       targetText,
-      passed ? 4 : 1,
+      passed ? 4 : isTestSpeakGate ? 2 : 1,
       "voice-practice",
       echoLastTranscriptRef.current || "",
       passed ? undefined : "pronunciation",
+      isTestSpeakGate ? "daily-test" : undefined,
     );
   }
 
@@ -3294,9 +3355,16 @@ function StudyContent() {
     setEchoStatus("success");
     setEchoVolume(0);
     logReadAloudCompletion(!isManualSkip);
-    // Voice practice task: submit a real review_log so FSRS learns from
-    // the read-aloud outcome. Pass score=4 (production, no hint).
-    if (source === "voice" && currentItemRef.current?.review_task_type === "voice_practice") {
+    // 每日一测：手写关后的跟读是发音关 —— voice 检测通过记 true、manual 跳过
+    // 记 false，并按 voice-practice 计分提交（pass=4 / 跳过=2，daily-test 标记）。
+    // recordVoicePracticeReview 内部有 currentItemRef 的 stale 防护。
+    const testSpeakItem = studyMode === "test" ? currentItemRef.current : null;
+    if (testSpeakItem) {
+      recordTestGateResult(testSpeakItem, "speak", source === "voice");
+      recordVoicePracticeReview(source === "voice");
+    } else if (source === "voice" && currentItemRef.current?.review_task_type === "voice_practice") {
+      // Voice practice task: submit a real review_log so FSRS learns from
+      // the read-aloud outcome. Pass score=4 (production, no hint).
       recordVoicePracticeReview(true);
     }
     if (!isManualSkip) {
@@ -3582,6 +3650,10 @@ function StudyContent() {
         // Voice practice task giveup: submit a lapsed review so FSRS sees
         // the failed attempt (telemetry-only speak-mode echo skips this).
         if (currentItemRef.current?.review_task_type === "voice_practice") {
+          recordVoicePracticeReview(false);
+        } else if (studyMode === "test" && currentItemRef.current) {
+          // 每日一测发音关 5 次放弃：成绩单说关记 false，voice-practice 计分 score=2。
+          recordTestGateResult(currentItemRef.current, "speak", false);
           recordVoicePracticeReview(false);
         }
         window.setTimeout(() => {
@@ -4392,6 +4464,8 @@ function StudyContent() {
               // Real elapsed time, not 0. See the comment in
               // recordWordMemoryReview above.
               duration_seconds: Math.min(MAX_REVIEW_DURATION_SECONDS, Math.max(1, Math.round((Date.now() - startedAt) / 1000))),
+              // 每日一测提交打 daily-test 标记（后端白名单校验，"今日已测不重出"）。
+              context: studyMode === "test" ? "daily-test" : undefined,
             },
             accessToken,
           ),
@@ -4401,13 +4475,34 @@ function StudyContent() {
         // Choice task telemetry should not stop the learning flow.
       }
     }
+    // 每日一测：记录选择关结果 —— 听音选中文→listen，看英文选中文→meaning。
+    if (studyMode === "test") {
+      recordTestGateResult(currentItem, currentItem.review_task_type === "listen_choose_chinese" ? "listen" : "meaning", isCorrect);
+    }
     if (!isCorrect) {
       // A wrong choice breaks the word's focus-mode correct streak
       if (word) {
         focusCorrectCountRef.current.delete(normalizeEnglishKey(word));
       }
-      setFeedback("这个选项不对，已加入错词专项复习。", "error");
       const correctMeaning = (hasChineseText(currentItem.review_answer) ? currentItem.review_answer : "") || (hasChineseText(currentItem.chinese_text) ? currentItem.chinese_text : "") || (hasChineseText(reviewTaskWordTranslation) ? reviewTaskWordTranslation : "");
+      if (studyMode === "test") {
+        // 测验不是练习：答错不重试。展示正确答案与反馈 ~1.5s，然后进入
+        // sentence-complete，让孩子点「下一句」继续（与答对路径一致）。
+        setFeedback(`这个选项不对，正确答案是「${correctMeaning || correctAnswer}」，记住它哦！`, "error");
+        if (word && correctMeaning) {
+          void playEnglishThenChinese(word, correctMeaning);
+        }
+        const errItemId = confirmingItemIdRef.current;
+        window.setTimeout(() => {
+          if (currentItemIdRef.current !== errItemId) return;
+          setSelectedChoice(null);
+          setChoiceResult(null);
+          updateAnswerState("sentence-complete");
+          setFeedback("记住正确答案，点击「下一句」按钮继续。", "success");
+        }, 1500);
+        return;
+      }
+      setFeedback("这个选项不对，已加入错词专项复习。", "error");
       if (word && correctMeaning) {
         void playEnglishThenChinese(word, correctMeaning);
       }
@@ -4443,8 +4538,11 @@ function StudyContent() {
     setChoiceResult(null);
     updateAnswerState("sentence-complete");
     setFeedback("选择正确！请点击「下一句」按钮继续。", "success");
-    startEchoPrompt(word, correctMeaning);
-  }, [currentItem, currentWords, getSourceLearningItemId, isChoiceReviewTask, playEnglishThenChinese, reviewTaskWordTranslation, updateAnswerState]);
+    // 每日一测：每词只在手写关后跟读一次，选择关不触发跟读。
+    if (studyMode !== "test") {
+      startEchoPrompt(word, correctMeaning);
+    }
+  }, [currentItem, currentWords, getSourceLearningItemId, isChoiceReviewTask, playEnglishThenChinese, recordTestGateResult, reviewTaskWordTranslation, studyMode, updateAnswerState]);
 
   function handleMistakePracticeKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     if (event.key === " " || event.key === "Enter") {
@@ -4802,7 +4900,7 @@ function StudyContent() {
           },
           test: {
             label: "📝 每日一测",
-            description: "每天听写 20 个词，英文中文都要写对",
+            description: "每天测 20 个词，每词三关：听音选意思 → 看英文选意思 → 手写英文，最后跟读",
             color: "text-rose-700",
             bg: "bg-rose-50/70 backdrop-blur-xl",
             border: "border-rose-300/60",
@@ -4890,7 +4988,7 @@ function StudyContent() {
               </Link>
               <div>
                 <p className="text-lg font-semibold ipad:text-lg">课程学习</p>
-                <p className="text-sm text-muted-foreground ipad:text-sm">{items.length > 0 ? `第 ${currentIndex + 1} 题 / 共 ${items.length} 题` : "拼写练习"}</p>
+                <p className="text-sm text-muted-foreground ipad:text-sm">{items.length > 0 ? (testWordProgress ? `第 ${testWordProgress.current} 词 / 共 ${testWordProgress.total} 词` : `第 ${currentIndex + 1} 题 / 共 ${items.length} 题`) : "拼写练习"}</p>
               </div>
             </div>
             <div className="flex flex-wrap items-center justify-end gap-3 text-sm font-semibold text-slate-600 ipad:text-base">
@@ -4939,7 +5037,7 @@ function StudyContent() {
             {!isStudyFullscreen ? (
               <div className="flex justify-center gap-3 text-sm font-medium text-slate-500 ipad:text-sm">
               <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1">{itemTypeLabels[currentItem.item_type]}</span>
-              <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1">{currentIndex + 1} / {items.length}</span>
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1">{testWordProgress ? `第 ${testWordProgress.current} 词 / 共 ${testWordProgress.total} 词` : `${currentIndex + 1} / ${items.length}`}</span>
               </div>
             ) : null}
 

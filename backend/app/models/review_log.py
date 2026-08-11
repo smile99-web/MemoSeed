@@ -32,6 +32,11 @@ class ReviewLog(Base):
     encoding_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
 
+    # 复习来源场景（2026-08-11）：区分"每日一测"的提交与普通复习/学习提交。
+    # 每日一测的选词排除（今日已测不重出）依赖这个标记——测试内的选择题/
+    # 手写与日常复习共用 review_mode，只能靠 context 区分。NULL = 日常学习。
+    context: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+
     # FSRS audit fields — populated by schedule_memory_review. See
     # database/init/009_fsrs_audit_fields.sql and docs/fsrs_verification_report.md.
     scheduler_type: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)

@@ -483,6 +483,8 @@ export async function logWordReview(
     error_type?: string;
     encoding_stage?: string;
     encoding_duration_ms?: number;
+    // 提交上下文标记（如 "daily-test"）：后端据此做"今日已测不重出"等处理。
+    context?: string;
   },
   accessToken: string,
 ): Promise<void> {
@@ -691,6 +693,8 @@ export interface HandwritingCheckPayload {
   expected_english: string;
   expected_chinese?: string;
   duration_seconds: number;
+  // 提交上下文标记（如 "daily-test"）：后端据此做"今日已测不重出"等处理。
+  context?: string;
 }
 
 export interface HandwritingCheckResult {

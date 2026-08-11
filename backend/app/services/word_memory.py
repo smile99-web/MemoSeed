@@ -191,6 +191,10 @@ def sync_word_memory_from_review(
 
 # P8: mastery recency gates (window = last N REAL-test reviews for the item)
 RECENT_ACCURACY_WINDOW = 10
+# 2026-08-11: 连错计数的新鲜度窗口。超过 N 天没有新测试的 streak 视为
+# 陈旧（视觉词退休/句子流成功不同步词级计数导致的历史冻结），不再
+# 一票否决毕业、不再单独判 difficult——见 derive_word_status。
+STREAK_STALE_DAYS = 14
 # P21: graduation now requires PROOF, not just cumulative counters. Mastered =
 # enough real tests, decent accuracy, and correct on at least 2 distinct local
 # days (spaced proof — a same-day cram session no longer graduates a word).
@@ -287,7 +291,23 @@ def derive_word_status(
     recent_accuracy: float | None = None,
     recent_correct_days: int | None = None,
     recent_test_count: int | None = None,
+    now: datetime | None = None,
 ) -> str:
+    # 2026-08-11 状态死锁修复：consecutive_error_count 只在"近期仍在失败"
+    # 时有效。历史背景：视觉词退休（08-03）与句子流成功不同步词级计数器，
+    # 使一批词的连错计数永久冻结（生产：with=104 连错但强度 0.85、20 个无
+    # 提示答对日；89 个词因此被扣押在 difficult，占全部词 28%）。这些词不
+    # 再出队 → 永远没有机会清零 streak → 永不毕业。规则：streak 超过
+    # STREAK_STALE_DAYS 天没有新测试就视为陈旧，既不再一票否决毕业，也不
+    # 再单独把词打成 difficult——陈旧词按累计证据定级，等每日一测/复习
+    # 重新测出真实水平。
+    now = now or datetime.now(UTC)
+    raw_ce = word_state.consecutive_error_count or 0
+    last_reviewed = word_state.last_reviewed_at
+    if last_reviewed is not None and last_reviewed.tzinfo is None:
+        last_reviewed = last_reviewed.replace(tzinfo=UTC)
+    streak_is_stale = last_reviewed is None or (now - last_reviewed).days >= STREAK_STALE_DAYS
+    ce = 0 if streak_is_stale else raw_ce
     # Mastered: cumulative recall evidence + spaced practice + (mostly) clean
     # recent error streak.
     #
@@ -318,7 +338,7 @@ def derive_word_status(
             and recent_test_count >= MASTERED_MIN_TEST_COUNT
             and (recent_accuracy or 0) >= MASTERED_MIN_RECENT_ACCURACY
             and (recent_correct_days or 0) >= MASTERED_MIN_CORRECT_DAYS
-            and word_state.consecutive_error_count <= 1
+            and ce <= 1
             and word_state.memory_strength >= 0.6
         ):
             return "mastered"
@@ -335,7 +355,7 @@ def derive_word_status(
             and word_state.memory_strength >= 0.75
             and word_state.recall_correct_count >= 3
             and word_state.no_hint_correct_date_count >= 3
-            and word_state.consecutive_error_count <= 1
+            and ce <= 1
             and (recent_accuracy is None or recent_accuracy >= MASTERED_MIN_RECENT_ACCURACY)
         ):
             return "mastered"
@@ -344,11 +364,13 @@ def derive_word_status(
             and word_state.memory_strength >= 0.72
             and word_state.recall_correct_count >= 2
             and word_state.no_hint_correct_date_count >= 2
-            and word_state.consecutive_error_count == 0
+            and ce == 0
             and (recent_accuracy is None or recent_accuracy >= NEAR_MASTERED_MIN_RECENT_ACCURACY)
         ):
             return "near_mastered"
-    if word_state.consecutive_error_count >= 3 or word_state.priority_score >= 0.78:
+    # priority_score 同样由连错计数推高且只在 sync 时重算——陈旧 streak 的
+    # 词 priority 也冻结在高位，所以这条 veto 同样按新鲜度门控。
+    if ce >= 3 or (not streak_is_stale and word_state.priority_score >= 0.78):
         return "difficult"
     if word_state.preview_correct_count > word_state.recall_correct_count or word_state.last_answer_seen_at is not None:
         return "teaching"

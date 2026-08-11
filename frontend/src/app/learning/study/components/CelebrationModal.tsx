@@ -25,13 +25,14 @@ interface NextCourseTarget {
   isLocked: boolean;
 }
 
-/** 每日一测成绩单的一行：一个词的对错 + 英文/中文分项判定。 */
+/** 每日一测成绩单的一行：一个词在 听/义/写/说 四关的判定（null = 未测到，比如队列中途完成）。 */
 interface TestReportEntry {
   word: string;
   chinese: string;
-  correct: boolean;
-  englishOk: boolean | null;
-  chineseOk: boolean | null;
+  listenOk: boolean | null;
+  meaningOk: boolean | null;
+  spellOk: boolean | null;
+  speakOk: boolean | null;
 }
 
 interface CelebrationModalProps {
@@ -45,7 +46,11 @@ const CelebrationModal = memo(function CelebrationModal({ nextCourse, summary, t
   const nextCourseHref = nextCourse
     ? `/learning/study?course_id=${nextCourse.id}&package_id=${nextCourse.packageId}&course_name=${encodeURIComponent(nextCourse.name)}`
     : "/learning";
-  const testCorrectCount = testReport ? testReport.filter((entry) => entry.correct).length : 0;
+  // 三关全过 = 听+义+写均 true；说（发音）是加分项，不计入全过，单独统计。
+  const testAllPassCount = testReport ? testReport.filter((entry) => entry.listenOk === true && entry.meaningOk === true && entry.spellOk === true).length : 0;
+  const testSpeakPassCount = testReport ? testReport.filter((entry) => entry.speakOk === true).length : 0;
+  const renderGateIcon = (ok: boolean | null) =>
+    ok === null ? <span className="text-slate-300">➖</span> : ok ? <span className="text-emerald-600">✅</span> : <span className="text-rose-500">❌</span>;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-slate-950/45 px-6 backdrop-blur-sm">
@@ -67,30 +72,30 @@ const CelebrationModal = memo(function CelebrationModal({ nextCourse, summary, t
         {testReport && testReport.length > 0 ? (
           <div className="relative mt-5 rounded-2xl border border-rose-200/80 bg-rose-50/80 px-4 py-4 text-left shadow-soft ipad:mt-6 ipad:px-6 ipad:py-5">
             <p className="text-sm font-semibold text-rose-700 ipad:text-base">
-              📝 每日一测成绩单：{testCorrectCount} / {testReport.length} 全对
+              📝 每日一测成绩单：{testAllPassCount} / {testReport.length} 个词三关全过
             </p>
+            <p className="mt-1 text-xs text-slate-600 ipad:text-sm">🎤 发音全过 {testSpeakPassCount} 个（加分项，不计入三关全过）</p>
             <ul className="mt-3 max-h-56 space-y-1.5 overflow-y-auto pr-1 ipad:max-h-64">
-              {testReport.map((entry, index) => (
-                <li key={`${entry.word}-${index}`} className={`flex items-center justify-between gap-2 rounded-xl border px-3 py-1.5 text-sm ipad:text-base ${entry.correct ? "border-emerald-200 bg-emerald-50/80" : "border-amber-200 bg-amber-50/80"}`}>
-                  <span className="min-w-0">
-                    <span className="font-bold text-slate-900">{entry.word}</span>
-                    <span className="ml-2 text-slate-600">{entry.chinese}</span>
-                  </span>
-                  <span className="shrink-0 text-xs font-bold ipad:text-sm">
-                    {entry.englishOk === null && entry.chineseOk === null ? (
-                      <span className={entry.correct ? "text-emerald-600" : "text-amber-600"}>{entry.correct ? "✓ 全对" : "✗ 再练练"}</span>
-                    ) : (
-                      <>
-                        <span className={entry.englishOk ? "text-emerald-600" : "text-rose-500"}>英文{entry.englishOk ? "✓" : "✗"}</span>
-                        <span className={`ml-2 ${entry.chineseOk ? "text-emerald-600" : "text-rose-500"}`}>中文{entry.chineseOk ? "✓" : "✗"}</span>
-                      </>
-                    )}
-                  </span>
-                </li>
-              ))}
+              {testReport.map((entry, index) => {
+                const allPass = entry.listenOk === true && entry.meaningOk === true && entry.spellOk === true;
+                return (
+                  <li key={`${entry.word}-${index}`} className={`flex items-center justify-between gap-2 rounded-xl border px-3 py-1.5 text-sm ipad:text-base ${allPass ? "border-emerald-200 bg-emerald-50/80" : "border-amber-200 bg-amber-50/80"}`}>
+                    <span className="min-w-0">
+                      <span className="font-bold text-slate-900">{entry.word}</span>
+                      <span className="ml-2 text-slate-600">{entry.chinese}</span>
+                    </span>
+                    <span className="flex shrink-0 items-center gap-1.5 text-xs font-bold ipad:gap-2 ipad:text-sm">
+                      <span className="flex items-center gap-0.5" title="听音选中文"><span className="text-slate-500">听</span>{renderGateIcon(entry.listenOk)}</span>
+                      <span className="flex items-center gap-0.5" title="看英文选中文"><span className="text-slate-500">义</span>{renderGateIcon(entry.meaningOk)}</span>
+                      <span className="flex items-center gap-0.5" title="手写英文"><span className="text-slate-500">写</span>{renderGateIcon(entry.spellOk)}</span>
+                      <span className="flex items-center gap-0.5" title="跟读发音"><span className="text-slate-500">说</span>{renderGateIcon(entry.speakOk)}</span>
+                    </span>
+                  </li>
+                );
+              })}
             </ul>
-            {testCorrectCount < testReport.length ? (
-              <p className="mt-3 text-xs text-amber-700 ipad:text-sm">写错的词已经自动加入复习队列，会在复习里再次练习。</p>
+            {testAllPassCount < testReport.length ? (
+              <p className="mt-3 text-xs text-amber-700 ipad:text-sm">没全过的词已经自动加入复习队列，会在复习里再次练习。</p>
             ) : null}
           </div>
         ) : null}

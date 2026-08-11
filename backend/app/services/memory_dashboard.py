@@ -1140,6 +1140,26 @@ def build_today_plan(db: Session, user_id: UUID) -> dict[str, object]:
             "item_count": unresolved_mistake_count,
         })
 
+    # 2026-08-11: 每日一测进入今日计划——"每天 20 词、三关（听/义/写）"
+    # 是家长定的掌握闭环，此前不在计划里，孩子可以整天跳过。三关提交记账
+    # 在同一 word-memory twin item 上，distinct item 数 = 今日已测词数。
+    from app.models.review_log import ReviewLog as _ReviewLog
+    today_start_utc = datetime(now_utc.astimezone(LOCAL_TIMEZONE).year, now_utc.astimezone(LOCAL_TIMEZONE).month, now_utc.astimezone(LOCAL_TIMEZONE).day, tzinfo=LOCAL_TIMEZONE).astimezone(UTC)
+    tested_today = db.scalar(
+        select(func.count(func.distinct(_ReviewLog.learning_item_id))).where(
+            _ReviewLog.user_id == user_id,
+            _ReviewLog.context == "daily-test",
+            _ReviewLog.reviewed_at >= today_start_utc,
+        )
+    ) or 0
+    remaining_test_words = max(0, 20 - tested_today)
+    items.append({
+        "task_type": "daily_test",
+        "task_description": f"每日一测 {remaining_test_words} 个词（听/义/写三关）" if remaining_test_words > 0 else "每日一测已完成 ✅",
+        "estimated_minutes": 20 if remaining_test_words > 0 else 0,
+        "item_count": remaining_test_words,
+    })
+
     total_minutes = sum(int(item["estimated_minutes"]) for item in items)  # type: ignore[arg-type]
 
     return {

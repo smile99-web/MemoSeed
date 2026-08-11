@@ -319,7 +319,7 @@ export default function LearningStartPage() {
             <div>
               <p className="text-base font-bold text-rose-700 ipad:text-lg">📝 每日一测</p>
               <p className="mt-1 text-xs text-slate-600 ipad:text-sm">
-                每天听写 20 个词，英文和中文意思都写对才算过
+                每天测 20 个词，每词三关：听音选意思、看英文选意思、手写英文，外加跟读发音
               </p>
             </div>
             <span className="shrink-0 rounded-full bg-rose-500 px-3 py-1 text-sm font-bold text-white ipad:text-base">

@@ -118,7 +118,9 @@ from app.services.word_memory import (
     build_task_prompt,
     choose_task_sequence,
     complete_word_review_task,
+    derive_word_status,
     get_or_create_word_memory_state,
+    get_recent_word_test_stats,
     schedule_micro_review_tasks_for_mistake,
     supersede_stale_pending_tasks_for_reviewed_words,
     sync_word_memory_from_review,
@@ -128,6 +130,15 @@ from app.utils import extract_mistake_words, normalize_word, string_setting, tok
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# 每日一测（2026-08-11 三关重构）：每词连续三关——听音选中文（发音→意思）、
+# 看英文选中文（形→意思）、手写英文（拼写）。提交统一打 context="daily-test"。
+DAILY_TEST_CONTEXT = "daily-test"
+DAILY_TEST_GATES: list[tuple[str, str | None]] = [
+    ("listen_choose_chinese", "听英文发音，选择正确的中文意思"),
+    ("english_to_chinese", "选择 {word} 的中文意思"),
+    ("handwriting_dictation", None),
+]
 
 WORD_MEMORY_SOURCE = "word-memory"
 MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024  # 10 MB upload cap for imports
@@ -2610,9 +2621,11 @@ def list_daily_test_items(
     db: Annotated[Session, Depends(get_db)],
     limit: int = DAILY_TEST_WORD_LIMIT,
 ) -> list[LearningItemRead]:
-    """每日一测（家长 2026-08-02 要求）：每天听写 20 个词，英文+中文意思
-    都要手写，AI 判双关——当天的学习效果当天检查，错词自动回炉，
-    "不能光学习没有反馈，不然任务只会积累的越来越多"。
+    """每日一测（2026-08-11 三关重构）：每天测 20 个词，每词连续三关——
+    ① 听音选中文（发音→意思）② 看英文选中文（形→意思）③ 手写英文（拼写）。
+    三关全过 = 今日真正掌握。旧版要求手写中文意思（handwriting_both），
+    中文写错会拖垮整个词的判定（生产通过率仅 6%）；中文意思改为选择判定，
+    检查意图不变、判定可靠。
 
     选词优先级：今日所学（当天任何模式复习过的词，最弱在前）→ 到期复习词
     → 学过的最弱词补齐。今日已测过的词不重出（重测只出剩余）。
@@ -2626,8 +2639,9 @@ def list_daily_test_items(
     # 档每天进测验,与复习队列的熔断口径矛盾。
     park_leech_words(db, current_user.id, now)
 
-    # 今日已测：手写提交记账在 word-memory 专属 item 上（id 与候选的课程
-    # item 不同），所以 id 与归一化词文本都要收集，双重排除才不会漏。
+    # 今日已测：三关提交统一打 context="daily-test" 标记（选择题/手写与
+    # 日常复习共用 review_mode，只能靠 context 区分）；旧版 handwriting-both
+    # 事件一并收集，保证改版当天不重复出词。id 与归一化词文本双重排除。
     tested_rows = db.execute(
         select(LearningEvent.learning_item_id, LearningItem.english_text)
         .outerjoin(LearningItem, LearningItem.id == LearningEvent.learning_item_id)
@@ -2637,9 +2651,18 @@ def list_daily_test_items(
             LearningEvent.occurred_at >= today_start,
         )
     ).all()
-    tested_today_ids = {row_id for row_id, _text in tested_rows if row_id is not None}
+    tested_context_rows = db.execute(
+        select(ReviewLog.learning_item_id, LearningItem.english_text)
+        .outerjoin(LearningItem, LearningItem.id == ReviewLog.learning_item_id)
+        .where(
+            ReviewLog.user_id == current_user.id,
+            ReviewLog.context == DAILY_TEST_CONTEXT,
+            ReviewLog.reviewed_at >= today_start,
+        )
+    ).all()
+    tested_today_ids = {row_id for row_id, _text in tested_rows + tested_context_rows if row_id is not None}
     tested_today_words = {
-        (text or "").strip().lower() for _row_id, text in tested_rows if (text or "").strip()
+        (text or "").strip().lower() for _row_id, text in tested_rows + tested_context_rows if (text or "").strip()
     }
 
     def _testable(item: LearningItem) -> bool:
@@ -2727,12 +2750,44 @@ def list_daily_test_items(
         tested_today_words=tested_today_words,
         limit=capped_limit,
     )
-    return [
-        LearningItemRead.model_validate(item).model_copy(
-            update={"review_task_type": HANDWRITING_BOTH_TASK_TYPE, "source": "每日一测"}
-        )
-        for item in picked
-    ]
+
+    # 每词展开为连续三关。选择关的 6 个选项来自用户自己的词库
+    # （与复习队列同一套 _enrich_choices_for_word）；手写关复用复习队列的
+    # handwriting_dictation 卡。三关共用同一 source_item_id（真实课程词条），
+    # 前端按它把三关聚合成成绩单的一行。
+    stored_settings = get_private_model_settings(db, current_user.id)
+    choice_settings = build_llm_translation_settings(None, None, None, None, stored_settings)
+    test_items: list[LearningItemRead] = []
+    for item in picked:
+        normalized = normalize_word(item.english_text or "")
+        choices, correct_answer = _enrich_choices_for_word(db, current_user.id, normalized, item, choice_settings)
+        if not choices or not correct_answer:
+            continue
+        for gate_index, (gate_type, gate_prompt) in enumerate(DAILY_TEST_GATES):
+            test_items.append(
+                LearningItemRead(
+                    id=uuid4(),
+                    source_item_id=item.id,
+                    user_id=current_user.id,
+                    course_id=item.course_id,
+                    item_type="word",
+                    english_text=item.english_text,
+                    chinese_text=item.chinese_text,
+                    phonetic=item.phonetic,
+                    syllables=item.syllables,
+                    grapheme_phoneme_map=item.grapheme_phoneme_map,
+                    difficulty_level=item.difficulty_level,
+                    source=f"每日一测·第{gate_index + 1}关",
+                    review_task_type=gate_type,
+                    review_prompt=gate_prompt.format(word=normalized) if gate_prompt else None,
+                    review_choices=choices if gate_type != "handwriting_dictation" else [],
+                    review_answer=correct_answer if gate_type != "handwriting_dictation" else None,
+                    focus_words=[normalized],
+                    created_at=item.created_at,
+                    updated_at=item.updated_at,
+                )
+            )
+    return test_items
 
 
 @router.post("/handwriting-check", response_model=HandwritingCheckResponse)
@@ -2847,6 +2902,8 @@ async def check_handwriting(
         duration_seconds=max(int(payload.duration_seconds or 0), 0),
         error_type=error_type,
     )
+    if payload.context == DAILY_TEST_CONTEXT:
+        result.review_log.context = DAILY_TEST_CONTEXT
     if not is_sentence_answer:
         sync_word_memory_from_review(
             db, current_user.id, review_target_item.english_text, result.memory_state, review_mode,
@@ -3021,6 +3078,21 @@ def create_word_review(
             if review_mode == "word-preview":
                 word_state.hidden_recall_correct_count += 1
                 word_state.last_answer_seen_at = now_utc
+            elif review_mode == "word-context":
+                # 2026-08-11 状态死锁修复：句中拼写成功是真实产出（词本身
+                # 并未预先展示，只是借助句子语境），但 assisted 分支不动
+                # FSRS、不清连错——失败（word-spelling 错词端点）却照常
+                # +1。单向棘轮让"with"这类词连错冻结在 104。这里给成功一
+                # 条解冻通道：连错 -1（不清零，真困难词的熔断信号要保留），
+                # 并按现有门槛重算状态。
+                word_state.context_correct_count += 1
+                word_state.consecutive_error_count = max(0, (word_state.consecutive_error_count or 0) - 1)
+                if (word_state.memory_strength or 0) >= 0.5:
+                    stats = get_recent_word_test_stats(db, current_user.id, word_state.learning_item_id)
+                    if stats is not None:
+                        word_state.status = derive_word_status(word_state, stats[0], stats[1], stats[2])
+                    else:
+                        word_state.status = derive_word_status(word_state)
             db.add(word_state)
         complete_word_review_task(db, current_user.id, payload.review_task_id, True)
         try:
@@ -3076,6 +3148,7 @@ def create_word_review(
             review_mode=review_mode,
             error_type=error_type,
             score=review_score,
+            context=payload.context if payload.context == DAILY_TEST_CONTEXT else None,
             is_correct=review_score >= 3,
             response_text=(payload.response_text or "").strip(),
             duration_seconds=payload.duration_seconds,
@@ -3113,6 +3186,10 @@ def create_word_review(
         encoding_stage=payload.encoding_stage,
         encoding_duration_ms=payload.encoding_duration_ms,
     )
+    # 每日一测标记：测试队列"今日已测不重出"的排除依赖 context（见
+    # list_daily_test_items）。只接受白名单值，客户端不能写任意场景。
+    if payload.context == DAILY_TEST_CONTEXT:
+        result.review_log.context = DAILY_TEST_CONTEXT
     word_state = None if is_sentence_word_payload else sync_word_memory_from_review(db, current_user.id, word_item.english_text, result.memory_state, review_mode, result.review_log.is_correct, error_type)
 
     # Plan E (2026-08-07): confusable-word bookkeeping. When the child fails a

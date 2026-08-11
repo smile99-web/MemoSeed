@@ -219,6 +219,8 @@ def _mastered_namespace(**overrides):
         hidden_recall_correct_count=1,
         no_hint_correct_date_count=5,
         last_answer_seen_at=None,
+        # 新鲜 streak（2026-08-11 derive 新鲜度门控）
+        last_reviewed_at=datetime.now(UTC),
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -227,6 +229,36 @@ def _mastered_namespace(**overrides):
 class TestDeriveWordStatusRecencyGate:
     def test_no_recency_data_keeps_legacy_behavior(self):
         assert derive_word_status(_mastered_namespace()) == "mastered"
+
+    def test_stale_error_streak_no_longer_blocks_mastery(self):
+        """2026-08-11 死锁修复：冻结的连错计数（>14 天无新测试，如视觉词
+        退休后的 'with' ce=104）不再一票否决毕业，也不再单独判 difficult。"""
+        stale = datetime.now(UTC) - timedelta(days=30)
+        word = _mastered_namespace(consecutive_error_count=104, last_reviewed_at=stale)
+        assert derive_word_status(word) == "mastered"
+
+    def test_fresh_error_streak_still_demotes(self):
+        """新鲜 streak 保持原语义：连错 >=3 且近期仍在失败 → difficult。
+        （recent_accuracy 低于 DEMOTION 门槛，先被 recency  veto 掉两个
+        毕业档，再落入 difficult——与旧版判定顺序一致。）"""
+        word = _mastered_namespace(
+            consecutive_error_count=5,
+            last_reviewed_at=datetime.now(UTC),
+        )
+        assert derive_word_status(word, recent_accuracy=0.5, recent_correct_days=1, recent_test_count=6) == "difficult"
+
+    def test_stale_streak_without_mastery_evidence_is_not_difficult(self):
+        """陈旧 streak 但累计证据也不够毕业 → 回落到普通档位，不是 difficult。"""
+        stale = datetime.now(UTC) - timedelta(days=30)
+        word = _mastered_namespace(
+            consecutive_error_count=10,
+            last_reviewed_at=stale,
+            memory_strength=0.4,
+            recall_correct_count=0,
+            no_hint_correct_date_count=0,
+            priority_score=0.9,  # 陈旧 priority 也不再单独判 difficult
+        )
+        assert derive_word_status(word) != "difficult"
 
     def test_high_recent_accuracy_stays_mastered(self):
         assert derive_word_status(_mastered_namespace(), recent_accuracy=0.9) == "mastered"
