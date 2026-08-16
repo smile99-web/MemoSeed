@@ -79,7 +79,6 @@ from app.services.memory_scheduler import (
     schedule_memory_review,
     smooth_overdue_backlog,
     stuck_word_daily_cap_filter_clause,
-    stuck_word_filter_clause,
 )
 from app.services.pronunciation import recognize_speech_flash, score_pronunciation
 from app.services.secure_model_settings import get_private_model_settings
@@ -1088,16 +1087,18 @@ def list_due_review_items(
     has_task_updates = supersede_stale_pending_tasks_for_reviewed_words(db, current_user.id, now)
 
     # Word-centric: prioritize word-type items first, then sentences as context
-    # The stuck-word filter and per-day review cap prevent a handful of
-    # unlearnable words from dominating the queue (see memory_scheduler
-    # STUCK_WORD_LAPSE_THRESHOLD / MAX_DAILY_REVIEWS_PER_WORD).
+    # Per-day review caps prevent a handful of unlearnable words from
+    # dominating the queue (see memory_scheduler MAX_DAILY_REVIEWS_PER_WORD).
+    # 2026-08-16: the old lapse>=10&strength<0.3 queue filter was removed —
+    # the Q1 park system replaced that definition, and the filter made
+    # "recovering" words (consecutive_correct>0 but lapse>=10, strength<0.3)
+    # invisible: not served, not parked, not counted anywhere.
     due_statement = (
         select(LearningItem, MemoryState)
         .join(MemoryState, MemoryState.learning_item_id == LearningItem.id)
         .where(
             LearningItem.user_id == current_user.id,
             MemoryState.next_review_at <= now,
-            stuck_word_filter_clause(),
             exceeded_daily_review_filter_clause(current_user.id, today_start),
             stuck_word_daily_cap_filter_clause(current_user.id, today_start),
         )
@@ -2480,17 +2481,22 @@ def create_read_aloud_event(
             )
     try:
         from app.services.learning_replay import record_assisted_learning_event
-        record_assisted_learning_event(
-            db,
-            current_user.id,
-            learning_item,
-            READ_ALOUD_REVIEW_MODE if payload.source == "speak-mode" else ECHO_READ_REVIEW_MODE,
-            3 if payload.passed else 1,
-            response_text=(payload.transcript or "").strip() or None,
-            duration_ms=min(int(payload.duration_seconds * 1000), 5 * 60 * 1000) or 10_000,
-            is_correct=payload.passed,
-            fallback_english_text=payload.english_text,
-        )
+        # Savepoint containment (2026-08-16): a failed flush inside the
+        # recorder would otherwise abort the outer transaction and the
+        # db.commit() below would raise PendingRollbackError → 500 (same
+        # 2026-07-30 incident class the other call sites guard against).
+        with db.begin_nested():
+            record_assisted_learning_event(
+                db,
+                current_user.id,
+                learning_item,
+                READ_ALOUD_REVIEW_MODE if payload.source == "speak-mode" else ECHO_READ_REVIEW_MODE,
+                3 if payload.passed else 1,
+                response_text=(payload.transcript or "").strip() or None,
+                duration_ms=min(int(payload.duration_seconds * 1000), 5 * 60 * 1000) or 10_000,
+                is_correct=payload.passed,
+                fallback_english_text=payload.english_text,
+            )
     except Exception as exc:
         logger.warning("Failed to record read-aloud learning event: %s", exc)
     db.commit()
@@ -2911,6 +2917,12 @@ def list_daily_flow_new_words(
     stored_settings = get_private_model_settings(db, current_user.id)
     translation_settings = build_llm_translation_settings(None, None, None, None, stored_settings)
     translations = ensure_word_translations(db, current_user.id, picked, translation_settings)
+    # 2026-08-16: persist the translation cache writes. This GET endpoint has
+    # no other commit, so the WordTranslation rows ensure_word_translations
+    # flushed rolled back at request end — every page fetch re-billed the LLM
+    # for the same words (same fix as the task-word ~1287 and focus-word
+    # ~1618 paths, which commit explicitly).
+    db.commit()
     now = datetime.now(UTC)
     items: list[LearningItemRead] = []
     for word in picked:
@@ -3125,6 +3137,53 @@ async def check_handwriting(
     else:
         review_target_item = get_or_create_word_memory_item(db, current_user.id, expected_english, learning_item)
     word_item = review_target_item  # response/points keep the historical name
+    # 2026-08-16: P18 daily attempt cap — create_word_review has enforced
+    # MAX_DAILY_REVIEWS_PER_WORD for keyboard reviews, but this handwriting
+    # path scheduled unconditionally: 每日一测 gate 3 (handwriting_dictation)
+    # put a 3rd FSRS mutation on a word already attempted twice today (复习
+    # 阶段 2 次 + 三关各 1 次). Beyond the cap: log for telemetry, settle the
+    # task, no FSRS mutation, no points (same 2026-08-09 anti-farming rule).
+    today_start = datetime.now(LOCAL_TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0)
+    attempts_today = db.scalar(
+        select(func.count(ReviewLog.id)).where(
+            ReviewLog.user_id == current_user.id,
+            ReviewLog.learning_item_id == review_target_item.id,
+            ReviewLog.reviewed_at >= today_start,
+        )
+    ) or 0
+    if attempts_today >= MAX_DAILY_REVIEWS_PER_WORD:
+        log_only_review_log = ReviewLog(
+            user_id=current_user.id,
+            learning_item_id=review_target_item.id,
+            review_mode=review_mode,
+            error_type=error_type,
+            score=4 if verdict.correct else 1,
+            context=payload.context if payload.context == DAILY_TEST_CONTEXT else None,
+            is_correct=verdict.correct,
+            response_text=verdict.recognized[:200],
+            duration_seconds=max(int(payload.duration_seconds or 0), 0),
+        )
+        db.add(log_only_review_log)
+        db.flush()
+        db.refresh(log_only_review_log)
+        complete_word_review_task(db, current_user.id, payload.review_task_id, log_only_review_log.is_correct)
+        try:
+            from app.services.learning_replay import record_learning_event
+            capped_ms = min(max(int(payload.duration_seconds or 0), 0) * 1000, 5 * 60 * 1000)
+            with db.begin_nested():
+                record_learning_event(db, current_user.id, log_only_review_log, review_target_item, duration_ms=capped_ms or 30_000)
+        except Exception as exc:
+            logger.warning("Failed to record learning replay event for capped handwriting review: %s", exc)
+        db.commit()
+        return HandwritingCheckResponse(
+            recognized=verdict.recognized,
+            correct=verdict.correct,
+            comment=verdict.comment,
+            expected=expected_english,
+            learning_item_id=word_item.id,
+            english_ok=verdict.english_ok,
+            chinese_ok=verdict.chinese_ok,
+        )
     result = schedule_memory_review(
         db=db,
         user_id=current_user.id,
@@ -3303,7 +3362,14 @@ def create_word_review(
     # FSRS stability and poisoned every accuracy metric. The teaching value
     # is preserved: the task completes, points are awarded, and the event is
     # recorded for the replay timeline.
-    if review_mode in ASSISTED_REVIEW_MODES:
+    # 2026-08-16: word-context (句中拼写) 并入 assisted 门控。该模式
+    # 提交只可能是"成功"（失败走 word-spelling 错词端点），此前漏进
+    # 门控导致它走真实测试路径：FSRS 照常推进、连错被清零（熔断信号
+    # 丢失）、记 review_log、发 +10——与下方 2026-08-11 死锁修复注释
+    # 的设计意图完全相反，那条 elif 手臂实际是死代码。常量
+    # ASSISTED_REVIEW_MODES 保持不变（统计口径与测试钉死了它），
+    # 仅在此门控放行。
+    if review_mode in ASSISTED_REVIEW_MODES or review_mode == "word-context":
         now_utc = datetime.now(UTC)
         if not is_sentence_word_payload:
             word_state = get_or_create_word_memory_state(db, current_user.id, word_item.english_text, word_item.id)
@@ -3345,16 +3411,21 @@ def create_word_review(
             from app.services.learning_replay import record_assisted_learning_event
             encoding_ms = int(payload.encoding_duration_ms or 0)
             total_ms = int(payload.duration_seconds or 0) * 1000
-            record_assisted_learning_event(
-                db,
-                current_user.id,
-                word_item,
-                review_mode,
-                review_score,
-                response_text=(payload.response_text or "").strip() or None,
-                duration_ms=min(encoding_ms or total_ms or 20_000, 5 * 60 * 1000),
-                error_type=error_type,
-            )
+            # Savepoint containment (2026-08-16): without it a recorder
+            # failure aborts the outer transaction and the commit below
+            # raises PendingRollbackError — also rolling back the word_state
+            # unfreeze, task completion and points staged above.
+            with db.begin_nested():
+                record_assisted_learning_event(
+                    db,
+                    current_user.id,
+                    word_item,
+                    review_mode,
+                    review_score,
+                    response_text=(payload.response_text or "").strip() or None,
+                    duration_ms=min(encoding_ms or total_ms or 20_000, 5 * 60 * 1000),
+                    error_type=error_type,
+                )
         except Exception as exc:
             logger.warning("Failed to record assisted learning event: %s", exc)
         db.commit()
@@ -3444,8 +3515,16 @@ def create_word_review(
                 counts = dict(word_state.error_type_counts or {})
                 key = f"confusable:{typed}"
                 existing = counts.get(key)
-                new_count = (int(existing.get("count", 0)) if isinstance(existing, dict) else int(existing or 0)) + 1
-                counts[key] = {"count": new_count, "last": datetime.now(UTC).isoformat()}
+                # 2026-08-16: legacy rows stored non-numeric strings here;
+                # int(existing) raised ValueError AFTER the review had
+                # already committed (old mid-request commit), so the client
+                # retried and double-graded the answer. Parse defensively.
+                raw_count = existing.get("count", 0) if isinstance(existing, dict) else (existing or 0)
+                try:
+                    prev_count = int(raw_count)
+                except (TypeError, ValueError):
+                    prev_count = 0
+                counts[key] = {"count": prev_count + 1, "last": datetime.now(UTC).isoformat()}
                 word_state.error_type_counts = counts
                 db.add(word_state)
                 logger.info("confusable-pair target=%r typed=%r user=%s", target, typed, current_user.id)
@@ -3572,7 +3651,11 @@ async def import_learning_items_file(
     if extension not in SUPPORTED_IMPORT_EXTENSIONS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only .txt and .xlsx files are supported")
 
-    content = await file.read()
+    # 2026-08-16: bounded read — the previous `await file.read()` buffered
+    # the ENTIRE upload before the size check below, so one oversized POST
+    # could balloon RSS on the single uvicorn worker (the pronunciation
+    # endpoint at ~2342 already uses this pattern).
+    content = await file.read(MAX_IMPORT_FILE_BYTES + 1)
     if not content:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty")
     if len(content) > MAX_IMPORT_FILE_BYTES:

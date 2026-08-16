@@ -114,6 +114,8 @@ export async function register(payload: RegisterPayload): Promise<AuthResponse> 
   return apiRequest<AuthResponse, RegisterPayload>("/auth/register", {
     method: "POST",
     body: payload,
+    // 注册失败的 401 是业务错误，不能触发 refresh 旋转/清会话。
+    skipAuthRefresh: true,
   });
 }
 
@@ -125,6 +127,8 @@ export async function login(payload: LoginPayload): Promise<AuthResponse> {
   return apiRequest<AuthResponse, LoginPayload>("/auth/login", {
     method: "POST",
     body: payload,
+    // 密码错误等 401 是业务错误，不能触发 refresh 旋转/清会话。
+    skipAuthRefresh: true,
   });
 }
 

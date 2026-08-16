@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models.generated_sentence import GeneratedSentence
@@ -80,8 +80,14 @@ _FALLBACK_ADJ_SETS = {
 }
 
 
-def _compute_words_hash(focus_words: list[str]) -> str:
+def _compute_words_hash(focus_words: list[str], known_words: list[str] | None = None) -> str:
     key = ",".join(sorted(set(normalize_word(w) for w in focus_words if w)))
+    if known_words:
+        # 2026-08-16 fix: generation consumes the user-specific known-word
+        # pool, so a short hash of it must be part of the cache key —
+        # otherwise user A's cached sentences get served to user B.
+        known_key = ",".join(sorted(set(normalize_word(w) for w in known_words if w)))
+        key += "|" + hashlib.sha256(known_key.encode("utf-8")).hexdigest()[:16]
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
@@ -172,7 +178,7 @@ def _difficulty_sentence_bounds(difficulty_level: int) -> tuple[int, int]:
         return (7, 9)
 
 
-def build_mastery_word_pools(db: Session, user_id: UUID, course_id: UUID | None) -> tuple[list[str], list[str], dict[str, float]]:
+def build_mastery_word_pools(db: Session, user_id: UUID, course_id: UUID | None) -> tuple[list[str], list[str], list[str], dict[str, float]]:
     statement = select(LearningItem, MemoryState).outerjoin(MemoryState, MemoryState.learning_item_id == LearningItem.id).where(LearningItem.user_id == user_id)
     if course_id is not None:
         statement = statement.where(LearningItem.course_id == course_id)
@@ -180,6 +186,7 @@ def build_mastery_word_pools(db: Session, user_id: UUID, course_id: UUID | None)
     candidate_known_words: list[str] = []
     word_strengths: dict[str, float] = {}
     weak_words: list[str] = []
+    unpracticed_words: list[str] = []
     for learning_item, memory_state in db.execute(statement).all():
         item_words = tokenize_words(learning_item.english_text)
         is_direct_word = learning_item.item_type == "word" and learning_item.source == WORD_MEMORY_SOURCE
@@ -198,8 +205,16 @@ def build_mastery_word_pools(db: Session, user_id: UUID, course_id: UUID | None)
                 nw = normalize_word(w)
                 if nw not in word_strengths or memory_state.memory_strength > word_strengths[nw]:
                     word_strengths[nw] = memory_state.memory_strength
+        elif memory_state is None:
+            # 2026-08-16 fix: no MemoryState means the child has never
+            # practiced these words — the old else lumped them into the
+            # known pool, so brand-new users got "known words" they had
+            # never seen. Keep them in a separate unpracticed pool that is
+            # never presented to the LLM as known.
+            unpracticed_words.extend(item_words)
         else:
-            candidate_known_words.extend(item_words)
+            # Has a MemoryState but below the known threshold — weak, not known.
+            weak_words.extend(item_words)
 
     mistake_statement = select(MistakeLog.mistake_type, MistakeLog.expected_answer, MistakeLog.actual_answer).where(
         MistakeLog.user_id == user_id,
@@ -213,7 +228,12 @@ def build_mastery_word_pools(db: Session, user_id: UUID, course_id: UUID | None)
     weak_words = unique_preserve_order(weak_words)
     weak_set = set(weak_words)
     known_words = [word for word in unique_preserve_order(candidate_known_words) if word not in weak_set]
-    return known_words, weak_words, word_strengths
+    known_set = set(known_words)
+    unpracticed_words = [
+        word for word in unique_preserve_order(unpracticed_words)
+        if word not in weak_set and word not in known_set
+    ]
+    return known_words, weak_words, unpracticed_words, word_strengths
 
 
 def _sort_known_by_strength(known_words: list[str], word_strengths: dict[str, float]) -> list[str]:
@@ -229,12 +249,19 @@ def generate_dynamic_review_sentence(
     settings: LlmTranslationSettings,
     difficulty_level: int = 3,
 ) -> DynamicSentenceResult:
-    known_words, historical_weak_words, word_strengths = build_mastery_word_pools(db, user_id, course_id)
+    known_words, historical_weak_words, unpracticed_words, word_strengths = build_mastery_word_pools(db, user_id, course_id)
     focus_words = unique_preserve_order([*mistaken_words, *historical_weak_words])[:3]
     if not focus_words:
         focus_words = unique_preserve_order(tokenize_words(current_sentence))[:1]
 
-    words_hash = _compute_words_hash(focus_words)
+    known_by_strength = _sort_known_by_strength(known_words, word_strengths)
+    selected_known_words = [word for word in known_by_strength if word not in set(focus_words)][:15]
+    required_words = unique_preserve_order(mistaken_words) or focus_words
+
+    # 2026-08-16 fix: mix the user-specific known-word pool into the cache
+    # key — the LLM consumes it, so a key built only from focus words would
+    # serve user A's sentences to user B.
+    words_hash = _compute_words_hash(focus_words, selected_known_words)
     min_len, max_len = _difficulty_sentence_bounds(difficulty_level)
     mastered_count = _count_mastered_words(db, user_id)
     known_ratio = _known_word_ratio(mastered_count)
@@ -251,10 +278,6 @@ def generate_dynamic_review_sentence(
             weak_words=historical_weak_words[:12],
             candidates=cached,
         )
-
-    known_by_strength = _sort_known_by_strength(known_words, word_strengths)
-    selected_known_words = [word for word in known_by_strength if word not in set(focus_words)][:15]
-    required_words = unique_preserve_order(mistaken_words) or focus_words
 
     # Generate 2-3 candidate sentences in parallel under a total time budget
     # (see DYNAMIC_SENTENCE_TIME_BUDGET) — a slow LLM must never push this
@@ -323,6 +346,9 @@ def _get_cached_sentences(db: Session, words_hash: str, difficulty_level: int) -
     return [{"english_text": row.english_text, "chinese_text": row.chinese_text} for row in rows]
 
 
+GENERATED_SENTENCE_CACHE_CAP = 50  # max rows kept per (words_hash, difficulty_level)
+
+
 def _cache_sentences(db: Session, words_hash: str, difficulty_level: int, candidates: list[dict[str, str]]) -> None:
     for candidate in candidates:
         sentence = GeneratedSentence(
@@ -332,6 +358,20 @@ def _cache_sentences(db: Session, words_hash: str, difficulty_level: int, candid
             chinese_text=candidate["chinese_text"],
         )
         db.add(sentence)
+    db.flush()
+    # 2026-08-16 fix: bound table growth — keep only the newest
+    # GENERATED_SENTENCE_CACHE_CAP rows for this key, in the same transaction.
+    stale_ids = db.scalars(
+        select(GeneratedSentence.id)
+        .where(
+            GeneratedSentence.focus_words_hash == words_hash,
+            GeneratedSentence.difficulty_level == difficulty_level,
+        )
+        .order_by(GeneratedSentence.created_at.desc(), GeneratedSentence.id.desc())
+        .offset(GENERATED_SENTENCE_CACHE_CAP)
+    ).all()
+    if stale_ids:
+        db.execute(delete(GeneratedSentence).where(GeneratedSentence.id.in_(stale_ids)))
     db.commit()
 
 
@@ -381,7 +421,9 @@ def _normalize_sentence_length(sentence: str, known_words: list[str], focus_word
 
 def _build_fallback_sentence(known_words: list[str], focus_words: list[str]) -> str:
     focus_word = focus_words[0] if focus_words else "word"
-    return _pick_fallback_template(focus_word, known_words)
+    # Brand-new users have an empty known pool — use the focus words as
+    # support words so the template still yields a real sentence.
+    return _pick_fallback_template(focus_word, known_words or focus_words)
 
 
 TRANSLATION_FALLBACK_PLACEHOLDER = "AI 生成复习句"

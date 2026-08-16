@@ -22,7 +22,6 @@ from app.services.memory_scheduler import (
     park_stuck_words,
     schedule_memory_review,
     stuck_word_daily_cap_filter_clause,
-    stuck_word_filter_clause,
 )
 
 router = APIRouter()
@@ -51,7 +50,8 @@ def get_review_queue(
             .where(
                 LearningItem.user_id == current_user.id,
                 MemoryState.next_review_at <= now,
-                stuck_word_filter_clause(),
+                # 2026-08-16: retired lapse>=10 stuck filter removed (see
+                # learning/router.py review-items for the rationale).
                 exceeded_daily_review_filter_clause(current_user.id, today_start),
                 stuck_word_daily_cap_filter_clause(current_user.id, today_start),
             )
@@ -89,6 +89,9 @@ def create_review_log(
         duration_seconds=payload.duration_seconds,
         error_type=payload.error_type,
     )
+    # 2026-08-16: schedule_memory_review no longer commits internally —
+    # the endpoint owns the transaction.
+    db.commit()
 
     return MemoryScheduleResponse(
         memory_state=MemoryStateRead.model_validate(result.memory_state),

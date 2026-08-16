@@ -130,10 +130,13 @@ def record_answer(
     )
     db.add(answer)
     if is_correct:
-        # Atomic increment — avoids read-modify-write race when two
-        # answers land in the same request.
-        session.correct_count = (session.correct_count or 0) + 1
+        # Atomic increment: assigning a SQL expression emits
+        # UPDATE ... SET correct_count = COALESCE(correct_count, 0) + 1
+        # on flush, so two answers landing concurrently can't lose each
+        # other's increment (the old Python read-modify-write could).
+        session.correct_count = func.coalesce(GrammarSession.correct_count, 0) + 1
     db.commit()
+    # Re-read the counter computed by the DB-side expression above.
     db.refresh(session)
     db.refresh(answer)
     return session, answer

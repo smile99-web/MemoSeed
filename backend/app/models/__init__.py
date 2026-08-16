@@ -19,6 +19,11 @@ from app.models.user_points import UserPoints, PointsLog
 from app.models.word_memory_state import WordMemoryState
 from app.models.word_review_task import WordReviewTask
 from app.models.word_translation import WordTranslation
+# 2026-08-16: keep in sync with db/base.py — these three were missing,
+# leaving grammar_sessions/grammar_answers/listening_stories out of
+# Base.metadata (Alembic autogenerate would drop the live tables).
+from app.models.grammar_session import GrammarAnswer, GrammarSession
+from app.models.listening_story import ListeningStory
 
 __all__ = [
     "AiDailyReport",
@@ -29,7 +34,10 @@ __all__ = [
     "LearningEvent",
     "LearningMinuteStat",
     "GeneratedSentence",
+    "GrammarAnswer",
+    "GrammarSession",
     "LearningItem",
+    "ListeningStory",
     "MemoryState",
     "MistakeLog",
     "RefreshToken",

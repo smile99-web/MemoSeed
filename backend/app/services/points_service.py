@@ -47,13 +47,32 @@ LEVEL_THRESHOLDS = [
 ]
 
 
-def _get_or_create_points(db: Session, user_id: UUID) -> UserPoints:
-    points = db.scalar(select(UserPoints).where(UserPoints.user_id == user_id))
+def _get_or_create_points(db: Session, user_id: UUID, *, lock: bool = False) -> UserPoints:
+    stmt = select(UserPoints).where(UserPoints.user_id == user_id)
+    if lock:
+        # Serialize all award paths per user: the row lock is held until the
+        # endpoint's commit, so a concurrent award blocks instead of losing
+        # updates (2026-08-16 fix — prod ledger drifted 6172 points from
+        # read-modify-write races: two threads each committed their PointsLog
+        # but last-writer-wins clobbered the counter).
+        stmt = stmt.with_for_update()
+    points = db.scalar(stmt)
     if points is None:
         points = UserPoints(user_id=user_id)
         db.add(points)
         db.flush()
     return points
+
+
+def lock_user_points(db: Session, user_id: UUID) -> UserPoints:
+    """Acquire the per-user points row lock for check-then-award callers.
+
+    Any endpoint that must make an award decision based on points state
+    (e.g. a daily-cap SUM over points_logs) calls this FIRST; award_points
+    then re-uses the same locked row, making check+award atomic against
+    concurrent requests.
+    """
+    return _get_or_create_points(db, user_id, lock=True)
 
 
 def compute_level(total_points: int) -> tuple[int, str]:
@@ -78,7 +97,7 @@ def award_points(
     if points_change == 0:
         return _points_response(db, user_id)
 
-    user_points = _get_or_create_points(db, user_id)
+    user_points = _get_or_create_points(db, user_id, lock=True)
     old_total = user_points.total_points
     old_level = user_points.level
 
@@ -87,22 +106,28 @@ def award_points(
     level_up = new_level > old_level
     user_points.level = new_level
 
-    # Log the transaction
-    log = PointsLog(
-        user_id=user_id,
-        points_changed=points_change,
-        reason=reason,
-        detail=detail,
-        learning_item_id=learning_item_id,
-    )
-    db.add(log)
+    # Log the ACTUAL applied delta, not the requested one: the max(0, ...)
+    # clamp would otherwise leave sum(points_logs) permanently below the
+    # counter (e.g. -2 logged while the counter only dropped 1), making
+    # ledger reconciliation impossible. PointsLog.points_changed has a
+    # <> 0 check constraint, so a fully-clamped award writes no log row.
+    applied_change = user_points.total_points - old_total
+    if applied_change != 0:
+        log = PointsLog(
+            user_id=user_id,
+            points_changed=applied_change,
+            reason=reason,
+            detail=detail,
+            learning_item_id=learning_item_id,
+        )
+        db.add(log)
     db.add(user_points)
 
     return {
         "total_points": user_points.total_points,
         "level": user_points.level,
         "level_label": new_label,
-        "points_changed": points_change,
+        "points_changed": applied_change,
         "level_up": level_up,
         "old_level": old_level if level_up else None,
         "new_level": new_level if level_up else None,
@@ -118,7 +143,11 @@ def award_daily_study_points(db: Session, user_id: UUID) -> dict[str, Any]:
     the streak counters on UserPoints were never actually incremented
     (the previous 'yesterday' calculation always yielded today).
     """
-    user_points = _get_or_create_points(db, user_id)
+    # Lock the row FIRST: the already-awarded check + streak update + award
+    # below are check-then-act; without the per-user lock two concurrent
+    # heartbeats both pass the check and double-award +30 / double-bump the
+    # streak (2026-08-16).
+    user_points = _get_or_create_points(db, user_id, lock=True)
     today = datetime.now(LOCAL_TIMEZONE).date()
 
     # Compute the date of the previous award in LOCAL time. The

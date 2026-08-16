@@ -78,13 +78,31 @@ def ensure_word_translations(
                     )
                 )
                 if translation is None:
-                    db.add(WordTranslation(
+                    new_row = WordTranslation(
                         user_id=user_id,
                         course_id=course_id,
                         word=word,
                         chinese_text=builtin,
                         source="dictionary",
-                    ))
+                    )
+                    try:
+                        # Savepoint: same uq_word_translations_user_word race
+                        # as the LLM branch below (2026-08-09 fix pattern) —
+                        # a concurrent request caching the same dictionary
+                        # word re-reads the winner instead of 500ing.
+                        with db.begin_nested():
+                            db.add(new_row)
+                            db.flush()
+                    except IntegrityError:
+                        db.expunge(new_row)
+                        winner = db.scalar(
+                            select(WordTranslation).where(
+                                WordTranslation.user_id == user_id,
+                                WordTranslation.word == word,
+                            )
+                        )
+                        if winner is not None:
+                            translations[word] = winner.chinese_text
                 else:
                     translation.chinese_text = builtin
                     translation.source = "dictionary"

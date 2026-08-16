@@ -32,10 +32,17 @@ _login_rate_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=60
 
 
 def _client_ip(request: Request) -> str:
-    """Client IP, trusting X-Forwarded-For only because nginx sets it."""
+    """Client IP, trusting X-Forwarded-For only because nginx sets it.
+
+    2026-08-16: use the LAST XFF element, not the first. nginx appends the
+    real peer IP with $proxy_add_x_forwarded_for, so a client-supplied
+    X-Forwarded-For header survives as the FIRST element(s) — an attacker
+    rotating it bypassed the 5/min login limiter. The last element is the
+    one nginx itself appended and cannot be spoofed through the proxy.
+    """
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        return forwarded.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
 

@@ -340,7 +340,13 @@ def get_course_lock_status(
                     LearningItem.item_type == "word",
                 )
             ).all()
-            word_texts = [w.lower().strip() for w in word_items]
+            # 2026-08-16: dedupe — mastered_count counts DISTINCT
+            # WordMemoryState rows, so duplicate words in the prerequisite
+            # course (possible via package import) deflated the ratio and the
+            # course stayed locked although every distinct word was mastered.
+            # get_course_progress (~line 284) already dedupes for the same
+            # reason.
+            word_texts = list({w.lower().strip() for w in word_items})
             total_words = len(word_texts)
             if total_words > 0:
                 mastered_count = db.scalar(

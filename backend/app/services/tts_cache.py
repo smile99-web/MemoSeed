@@ -2,6 +2,7 @@ import hashlib
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 
 logger = logging.getLogger("tts_cache")
@@ -36,7 +37,12 @@ def store_cached_audio(text: str, voice: str, speech_rate: int, audio: bytes, su
     cache_dir = _get_cache_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
     file_path = cache_dir / f"{cache_key}.{suffix}"
-    file_path.write_bytes(audio)
+    # 原子写入：先写同目录的临时文件再 os.replace。直接 write_bytes 时进程
+    # 崩溃会留下半截文件且永久 cache HIT，并发读者也可能读到部分前缀；
+    # 同目录 rename 在 Linux 上是原子操作，读者无需改动。
+    tmp_path = cache_dir / f".{cache_key}.{os.getpid()}.{threading.get_ident()}.tmp"
+    tmp_path.write_bytes(audio)
+    os.replace(tmp_path, file_path)
     logger.info("TTS cache STORE: key=%s size=%d", cache_key, len(audio))
 
 

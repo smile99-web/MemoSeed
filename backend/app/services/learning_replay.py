@@ -99,6 +99,11 @@ def record_learning_event(
     except IntegrityError:
         # Unique index on review_log_id — a concurrent request already
         # recorded this event. Treat as "no new event" instead of a 500.
+        # CRITICAL: expunge the losing object. After a savepoint rollback
+        # SQLAlchemy keeps it in session.new, so the NEXT flush would retry
+        # the INSERT, hit the unique index again, and 500 the whole request
+        # (2026-07-30 incident, same rationale as _fill_gap_minutes).
+        db.expunge(event)
         return None
     _increment_minute_stat(db, event)
     return event

@@ -281,9 +281,12 @@ class TestNormalizeQuestion:
             index=0,
             level=5,
         )
-        # First option gets replaced with the answer so the answer IS in options
+        # The answer replaces one option at a random position (not pinned
+        # to index 0) so the correct choice position stays uniform.
         assert q.answer == "X"
-        assert q.options[0] == "X"
+        assert q.options.count("X") == 1
+        assert len(q.options) == 4
+        assert len(set(q.options)) == 4
 
     def test_default_explanation_when_missing(self):
         raw = self._raw_choice()

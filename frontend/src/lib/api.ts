@@ -80,6 +80,8 @@ export async function apiRequest<TResponse, TBody extends object | undefined = u
     method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
     body?: TBody;
     accessToken?: string;
+    /** 为 true 时 401 不触发 refresh 重试 —— 登录/注册等凭据校验接口的 401 是业务失败（密码错误等），不是会话过期。 */
+    skipAuthRefresh?: boolean;
   } = {},
 ): Promise<TResponse> {
   const apiBaseUrl = getApiBaseUrl();
@@ -109,21 +111,25 @@ export async function apiRequest<TResponse, TBody extends object | undefined = u
   };
 
   // First attempt: use the caller's token (or no token for unauthenticated
-  // endpoints like /auth/login). On 401, try to refresh the access token
+  // endpoints). On 401, try to refresh the access token
   // via the refresh-token cookie and retry once. If the refresh fails or
   // the retry still returns 401, surface the original 401 error.
   //
   // Without this, callers that go through apiRequest (export/import,
   // reports) fail on token expiry until the user manually re-logs in.
+  //
+  // skipAuthRefresh 的调用方（/auth/login、/auth/register）跳过整个
+  // 401→refresh→retry 分支：它们的 401 是凭据校验失败，refresh 只会
+  // 无谓旋转令牌，失败时还会误清会话并广播 session-expired。
   let response = await executeFetch(options.accessToken);
-  if (response.status === 401 && !options.accessToken) {
+  if (response.status === 401 && !options.accessToken && !options.skipAuthRefresh) {
     // No caller-supplied token but we got 401 — try a refresh in case a
     // refresh-cookie is still valid.
     const refreshed = await getFreshAccessToken();
     if (refreshed) {
       response = await executeFetch(refreshed);
     }
-  } else if (response.status === 401 && options.accessToken) {
+  } else if (response.status === 401 && options.accessToken && !options.skipAuthRefresh) {
     const refreshed = await getFreshAccessToken();
     if (refreshed && refreshed !== options.accessToken) {
       response = await executeFetch(refreshed);

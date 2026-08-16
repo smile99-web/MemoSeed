@@ -5,7 +5,12 @@ from app.models.course_completion_log import CourseCompletionLog
 from app.models.course_package import CoursePackage
 from app.models.daily_plan import DailyPlan
 from app.models.generated_sentence import GeneratedSentence
+# 2026-08-16: these three were missing, so Base.metadata never knew about
+# grammar_sessions / grammar_answers / listening_stories — an Alembic
+# autogenerate would have emitted drop_table() for live tables.
+from app.models.grammar_session import GrammarAnswer, GrammarSession
 from app.models.learning_event import LearningEvent, LearningMinuteStat
+from app.models.listening_story import ListeningStory
 from app.models.learning_item import LearningItem
 from app.models.memory_state import MemoryState
 from app.models.mistake_log import MistakeLog
@@ -28,9 +33,12 @@ __all__ = [
     "CourseCompletionLog",
     "CoursePackage",
     "DailyPlan",
+    "GrammarAnswer",
+    "GrammarSession",
     "LearningEvent",
     "LearningMinuteStat",
     "GeneratedSentence",
+    "ListeningStory",
     "LearningItem",
     "MemoryState",
     "MistakeLog",

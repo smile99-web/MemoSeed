@@ -1060,13 +1060,16 @@ def build_today_plan(db: Session, user_id: UUID) -> dict[str, object]:
     # apply. Without this, build_today_plan's due_count would be 100+
     # words higher than the real queue, showing a misleading number on
     # the dashboard.
-    from app.services.memory_scheduler import park_leech_words, park_mastered_words, park_stuck_words, park_cliff_words
+    from app.services.memory_scheduler import park_chronic_failure_words, park_leech_words, park_mastered_words, park_stuck_words, park_cliff_words
     # 漏词熔断最先执行,与 /review-items 保持一致(否则短周期 park 会先
     # 抢走同时满足条件的漏词,计划页 due_count 与真实队列持续不符)。
     park_leech_words(db, user_id, now_utc)
     park_mastered_words(db, user_id, now_utc)
     park_stuck_words(db, user_id, now_utc)
     park_cliff_words(db, user_id, now_utc)
+    # 2026-08-16: chronic-failure park 也要执行 —— /review-items 会停
+    # (lapse>=40 且连败>=3) 的词,少了这步计划页 due_count 持续虚高。
+    park_chronic_failure_words(db, user_id, now_utc)
 
     due_count = db.scalar(
         select(func.count(MemoryState.id))
@@ -1195,7 +1198,10 @@ def build_word_history(db: Session, user_id: UUID, word: str) -> dict[str, objec
         if li is not None:
             item_texts[item_id] = li.english_text.lower()
 
-    word_item_ids = {lid for lid, text in item_texts.items() if normalized_word in text.split()}
+    # 2026-08-16: use tokenize_words (strips punctuation) instead of
+    # text.split() — "I like apples." split()s to "apples." and silently
+    # missed reviews of "apples" (sentence-final words are common).
+    word_item_ids = {lid for lid, text in item_texts.items() if normalized_word in tokenize_words(text)}
 
     mistake_logs = db.execute(
         select(MistakeLog).where(

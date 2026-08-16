@@ -118,6 +118,39 @@ def ensure_lightweight_schema_upgrades() -> None:
             logger.warning("Schema upgrade statement failed (will retry on next boot): %s", exc)
 
 
+def warn_on_schema_drift() -> None:
+    """Scream when a model column is missing from the live DB.
+
+    The six tables below are created with create(checkfirst=True) and have
+    NO column-evolution path (no Alembic versions exist — 2026-08-16 audit):
+    a newly added model column silently never reaches prod, and the first
+    request selecting/inserting it 500s with UndefinedColumn. Detect drift
+    at startup so the deploy log shows the real problem instead of a
+    per-request 500 days later.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    checkfirst_models = (CourseCompletionLog, SpeechAsset, WordMemoryState, WordReviewTask, WordTranslation, ListeningStory)
+    try:
+        with engine.connect() as connection:
+            inspector = sa_inspect(connection)
+            for model in checkfirst_models:
+                table = model.__table__
+                if not inspector.has_table(table.name):
+                    continue  # fresh install — create(checkfirst) covers it
+                db_columns = {column["name"] for column in inspector.get_columns(table.name)}
+                missing = [column.name for column in table.columns if column.name not in db_columns]
+                if missing:
+                    logger.critical(
+                        "Schema drift on %s: model columns missing in DB: %s "
+                        "— add matching ALTERs to ensure_lightweight_schema_upgrades()",
+                        table.name,
+                        ", ".join(missing),
+                    )
+    except Exception:
+        logger.exception("Schema drift check failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     CourseCompletionLog.__table__.create(bind=engine, checkfirst=True)
@@ -127,6 +160,7 @@ async def lifespan(app: FastAPI):
     WordTranslation.__table__.create(bind=engine, checkfirst=True)
     ListeningStory.__table__.create(bind=engine, checkfirst=True)
     ensure_lightweight_schema_upgrades()
+    warn_on_schema_drift()
     yield
 
 

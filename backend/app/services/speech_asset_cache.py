@@ -4,6 +4,7 @@ from collections.abc import Callable
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings as app_settings
@@ -104,7 +105,35 @@ def upsert_speech_asset(
         suffix=suffix,
         cached=cached,
     )
-    db.add(speech_asset)
+    try:
+        # Savepoint: 并发请求为同一文本建仓时在 uq_speech_assets_user_voice_text
+        # 上输掉竞争的一方在此回滚，然后重读胜者行而不是 500
+        # （同 word_translation_cache 2026-08-09 的修复模式）。
+        with db.begin_nested():
+            db.add(speech_asset)
+            db.flush()
+    except IntegrityError:
+        # Savepoint 回滚后 SQLAlchemy 仍把输家对象留在 session.new，必须
+        # expunge，否则下一次 flush 会重放 INSERT 毒化整个会话。
+        db.expunge(speech_asset)
+        winner = db.scalar(
+            select(SpeechAsset).where(
+                SpeechAsset.user_id == user_id,
+                SpeechAsset.provider == provider,
+                SpeechAsset.language == target.language,
+                SpeechAsset.voice == target.voice,
+                SpeechAsset.speech_rate == target.speech_rate,
+                SpeechAsset.text_hash == text_hash,
+            )
+        )
+        if winner is None:  # pragma: no cover - defensive: 输掉竞争后胜者行必存在
+            raise
+        winner.course_id = winner.course_id or course_id
+        winner.text = normalized_text
+        winner.audio_url = audio_url
+        winner.suffix = suffix
+        winner.cached = cached
+        return winner
     return speech_asset
 
 

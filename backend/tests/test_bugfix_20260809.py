@@ -100,9 +100,13 @@ class TestPointsAwardWhitelist:
         from app.api.v1.memory.router import award_points_endpoint
 
         db = MagicMock()
-        # First scalar = today's read-aloud sum (at the 20/day cap);
-        # second = _get_or_create_points inside the 0-point no-op response.
-        db.scalar.side_effect = [20, SimpleNamespace(total_points=50, level=1)]
+        # 2026-08-16: the endpoint now takes the per-user points row lock
+        # BEFORE the cap sum (kills the check-then-award race), so the scalar
+        # order is: 1st = lock_user_points row, 2nd = today's read-aloud sum
+        # (at the 20/day cap), 3rd = _get_or_create_points inside the 0-point
+        # no-op response.
+        points_row = SimpleNamespace(total_points=50, level=1)
+        db.scalar.side_effect = [points_row, 20, points_row]
         payload = SimpleNamespace(points_change=2, reason="read-aloud", detail="x", learning_item_id=None)
         # Must not raise; the award itself is a 0-point no-op.
         award_points_endpoint(payload, SimpleNamespace(id=uuid4()), db)

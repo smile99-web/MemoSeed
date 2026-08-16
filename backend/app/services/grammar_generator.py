@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import random
 import re
 from typing import Any
 
@@ -220,8 +221,11 @@ def _normalize_question(raw: dict[str, Any], index: int, level: int) -> GrammarQ
             options.append(f"Option {chr(ord('A') + len(options))}")
         # Make sure the answer is one of the options (auto-add if not)
         if answer not in options:
-            options[0] = answer
-            logger.warning("Question #%d: answer not in options, replaced first option", index + 1)
+            # Replace at a random position — pinning the answer at index 0
+            # made the correct choice position predictable.
+            position = random.randrange(len(options))
+            options[position] = answer
+            logger.warning("Question #%d: answer not in options, replaced option %d", index + 1, position)
 
     qid = str(raw.get("id", "")).strip()
     if not qid:

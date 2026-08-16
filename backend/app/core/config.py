@@ -64,8 +64,19 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_security_defaults(self) -> "Settings":
-        if self.app_env.lower() in {"production", "prod"} and self.jwt_secret_key == "change_me_to_a_long_random_secret":
-            raise ValueError("JWT_SECRET_KEY must be changed before running in production")
+        if self.jwt_secret_key == "change_me_to_a_long_random_secret":
+            # 2026-08-16: previously the default secret was only rejected when
+            # APP_ENV was literally "production"/"prod" — any other value
+            # ("staging", a typo, unset with a prod .env) ran with a publicly
+            # known secret, i.e. forgeable tokens for every account. Now the
+            # default is only tolerated in explicit dev/test, and even there
+            # it logs a warning.
+            if self.app_env.lower() not in {"development", "dev", "test", "testing"}:
+                raise ValueError("JWT_SECRET_KEY must be changed before running outside development/test")
+            import logging
+            logging.getLogger(__name__).warning(
+                "JWT_SECRET_KEY is the built-in default — acceptable only for local development/tests"
+            )
         return self
 
     @cached_property

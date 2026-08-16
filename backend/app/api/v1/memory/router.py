@@ -372,7 +372,14 @@ def record_study_time(
         db.commit()
     except Exception:
         db.rollback()  # points must never break study-time recording
-    check_and_generate_daily_report(db, current_user.id)
+    # The heartbeat (and any points award) is already committed — a daily
+    # report failure must NOT 500 this request (2026-08-16): the client would
+    # retry and double-record study time.
+    try:
+        check_and_generate_daily_report(db, current_user.id)
+    except Exception:
+        db.rollback()
+        logger.exception("Daily report generation failed for user %s", current_user.id)
 
 
 @router.post("/course-completions", status_code=status.HTTP_204_NO_CONTENT)
@@ -528,9 +535,14 @@ def award_points_endpoint(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> dict:
-    from app.services.points_service import award_points
+    from app.services.points_service import award_points, lock_user_points
     if payload.reason != READ_ALOUD_AWARD_REASON:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unsupported points reason")
+    # Lock the per-user points row BEFORE the cap check: otherwise N
+    # concurrent requests all observe awarded_today < cap and all award,
+    # bypassing the 20/day limit (2026-08-16). award_points re-uses this
+    # locked row, so check + award are atomic.
+    lock_user_points(db, current_user.id)
     today_start = datetime.now(LOCAL_TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0)
     awarded_today = db.scalar(
         select(func.coalesce(func.sum(PointsLog.points_changed), 0)).where(
@@ -589,9 +601,12 @@ def generate_review_advice_endpoint(
     try:
         recommendations = generate_review_advice(db, current_user.id, llm_settings, force=True)
     except Exception as exc:
+        # Don't leak internals (LLM base URL, provider, request IDs) to the
+        # client — log server-side, return a generic message (2026-08-16).
+        logger.exception("Review advice generation failed for user %s", current_user.id)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"AI 分析失败: {exc}",
+            detail="AI 分析失败，请稍后重试",
         ) from exc
 
     return {"has_recommendations": True, **recommendations}

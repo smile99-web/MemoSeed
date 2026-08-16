@@ -435,22 +435,13 @@ def is_stuck_word(memory_state: MemoryState) -> bool:
     return lapse >= STUCK_WORD_LAPSE_THRESHOLD and strength < STUCK_WORD_STRENGTH_THRESHOLD
 
 
-def stuck_word_filter_clause() -> ColumnElement[bool]:
-    """Return a SQLAlchemy `not_(...)` clause that excludes stuck words.
-
-    Use in due-queue queries:
-
-        .where(MemoryState.next_review_at <= now, ~stuck_word_filter_clause())
-
-    Note: `~` is the bitwise-not operator which inverts a boolean column
-    expression in SQLAlchemy 2.x.
-    """
-    return not_(
-        and_(
-            MemoryState.lapse_count >= STUCK_WORD_LAPSE_THRESHOLD,
-            MemoryState.memory_strength < STUCK_WORD_STRENGTH_THRESHOLD,
-        )
-    )
+# 2026-08-16: stuck_word_filter_clause was deleted. It implemented the
+# pre-Q1 "lapse >= 10 AND strength < 0.3" exclusion that Q1 parking
+# deliberately replaced — but it stayed wired into both due queues, so a
+# recovering word (consecutive_correct > 0, lapse >= 10, strength < 0.3)
+# was excluded from every queue yet never parked (cc gate) nor counted by
+# count_paused_words: completely invisible. Park/release is now the single
+# mechanism; the queues only apply the daily caps below.
 
 
 def exceeded_daily_review_filter_clause(
@@ -527,7 +518,9 @@ def count_paused_words(db: Session, user_id: UUID) -> int:
                 LearningItem.user_id == user_id,
                 LearningItem.item_type == "word",
                 MemoryState.memory_strength < STUCK_WORD_STRENGTH_THRESHOLD,
-                WordMemoryState.consecutive_correct_count == 0,
+                # 2026-08-16: coalesce NULL (no WMS row) to 0 — must match
+                # park_stuck_words exactly or the dashboard count diverges.
+                func.coalesce(WordMemoryState.consecutive_correct_count, 0) == 0,
                 MemoryState.last_reviewed_at < abandoned_cutoff,
             )
         )
@@ -610,7 +603,11 @@ def park_stuck_words(db: Session, user_id: UUID, now: datetime | None = None) ->
             MemoryState.memory_strength < STUCK_WORD_STRENGTH_THRESHOLD,
             # Strict recovery gate: cc must be 0 (not just < 3). A word the
             # child has nailed even once recently is NOT stuck.
-            WordMemoryState.consecutive_correct_count == 0,
+            # 2026-08-16: coalesce — the deliberate outerjoin means a word
+            # WITHOUT a WordMemoryState row (legacy imports, broken links)
+            # has cc=NULL; `== 0` filtered exactly those words out, so they
+            # were never parked. NULL means "no tracked success" → treat as 0.
+            func.coalesce(WordMemoryState.consecutive_correct_count, 0) == 0,
             # Truly abandoned: not reviewed in 7+ days.
             MemoryState.last_reviewed_at < abandoned_cutoff,
             # Idempotency: only re-park if the word is currently due AND
@@ -852,7 +849,9 @@ def park_cliff_words(db: Session, user_id: UUID, now: datetime | None = None) ->
             # Only park if we have enough data to detect the plateau.
             func.coalesce(review_count_subquery.c.total_reviews, 0) >= CLIFF_REVIEW_THRESHOLD,
             # Recovery gate: a word with any recent success is NOT on a cliff.
-            WordMemoryState.consecutive_correct_count == 0,
+            # 2026-08-16: coalesce NULL (no WMS row) to 0 — same outerjoin
+            # trap as park_stuck_words.
+            func.coalesce(WordMemoryState.consecutive_correct_count, 0) == 0,
         )
     )
     result = db.execute(
@@ -1000,6 +999,16 @@ def scheduled_stability_days(memory_state: MemoryState) -> float:
     if memory_state.last_reviewed_at is not None:
         scheduled_days = max((memory_state.next_review_at - memory_state.last_reviewed_at).total_seconds() / 86400, 0.0)
         if scheduled_days > 0:
+            # 2026-08-16: park_*/smooth_overdue_backlog push next_review_at
+            # forward for queue hygiene WITHOUT a review, so the raw
+            # date-diff overstates stability (a +30d leech park made the
+            # weakest words look rock-solid and earned multi-week intervals
+            # after one post-park answer). interval_days is rewritten from
+            # the real FSRS delay on EVERY review (ceil'd up, so it is never
+            # below the true scheduled delay), while the date-diff is exact
+            # for un-parked rows — min() picks the right value in both cases.
+            if memory_state.interval_days > 0:
+                scheduled_days = min(scheduled_days, float(memory_state.interval_days))
             return constrain_stability(scheduled_days)
 
     if memory_state.interval_days > 0:
@@ -1830,7 +1839,15 @@ def schedule_memory_review(
         learning_item.difficulty_level = new_difficulty
         db.add(learning_item)
     db.add(memory_state)
-    db.commit()
+    # 2026-08-16: flush, do NOT commit. This function used to commit
+    # mid-request, so every submit endpoint was non-atomic: a failure in the
+    # follow-up writes (points, task completion, replay event, confusable
+    # bookkeeping) returned 500 with the review already persisted, and a
+    # client retry graded the same answer twice (double lapse/points). The
+    # endpoint now owns the transaction boundary; every caller commits at
+    # the end of its own post-processing. refresh() works on flushed rows —
+    # server defaults (reviewed_at) are populated by the flush.
+    db.flush()
     db.refresh(memory_state)
     db.refresh(review_log)
     if mistake_log is not None:

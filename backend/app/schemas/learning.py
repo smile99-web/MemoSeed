@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class LearningItemBase(BaseModel):
@@ -17,6 +17,15 @@ class LearningItemBase(BaseModel):
     sort_order: int = 0
     unit_label: str | None = None
     source: str | None = None
+
+    @field_validator("english_text", "chinese_text")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        # 2026-08-16: create_learning_item duplicate-checks the STRIPPED
+        # text but stored the RAW payload, so " apple" and "apple" bypassed
+        # the guard and diverged in scheduling / distractor pools / twin
+        # resolution. Normalize at the boundary.
+        return value.strip()
 
 
 class LearningItemCreate(LearningItemBase):

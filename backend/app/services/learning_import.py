@@ -1,3 +1,5 @@
+import logging
+import threading
 from dataclasses import dataclass
 from io import BytesIO
 from re import search
@@ -14,6 +16,24 @@ from app.services.speech_asset_cache import precache_learning_speech_assets
 from app.services.word_translation_cache import ensure_word_translations, extract_unique_words, sanitize_word_translation
 
 SUPPORTED_IMPORT_EXTENSIONS = {".txt", ".xlsx"}
+
+logger = logging.getLogger("learning_import")
+
+# 同一用户的并发导入会同时通过各自的 in-memory 去重，插入重复的
+# learning_items（表上没有唯一约束——存量数据可能已有重复，不能补约束）。
+# 用 per-user 锁串行化整个导入。该方案成立的前提是生产只跑单个 uvicorn
+# worker，进程内锁足够；若将来改为多 worker，必须换成 DB 级锁/约束。
+_import_locks: dict[UUID, threading.Lock] = {}
+_import_locks_guard = threading.Lock()
+
+
+def _get_import_lock(user_id: UUID) -> threading.Lock:
+    with _import_locks_guard:
+        lock = _import_locks.get(user_id)
+        if lock is None:
+            lock = threading.Lock()
+            _import_locks[user_id] = lock
+        return lock
 
 
 @dataclass(frozen=True)
@@ -167,6 +187,21 @@ def import_learning_items(
     translation_settings: LlmTranslationSettings | None = None,
     stored_settings: dict[str, object] | None = None,
 ) -> tuple[list[LearningItem], list[ImportSkippedItem]]:
+    # 持锁贯穿整个导入（含 LLM 翻译/precache 等慢步骤），理由见上方锁注释。
+    with _get_import_lock(user_id):
+        return _import_learning_items_locked(
+            db, user_id, course_id, parsed_items, translation_settings, stored_settings,
+        )
+
+
+def _import_learning_items_locked(
+    db: Session,
+    user_id: UUID,
+    course_id: UUID,
+    parsed_items: list[ParsedLearningItem],
+    translation_settings: LlmTranslationSettings | None = None,
+    stored_settings: dict[str, object] | None = None,
+) -> tuple[list[LearningItem], list[ImportSkippedItem]]:
     imported_items: list[LearningItem] = []
     skipped_items: list[ImportSkippedItem] = []
     seen_keys: set[tuple[str, str]] = set()
@@ -232,9 +267,66 @@ def import_learning_items(
     for item in imported_items:
         db.refresh(item)
 
+    # 重试补偿（2026-08-16）：items commit 之后还有翻译、音标 enrichment、
+    # 词翻译缓存、语音 precache 多步；此前任一步以非 ValueError 失败都会
+    # 留下"条目已建但 enrichment 未做"的半成品，且重试时这些条目全部按
+    # "Already exists" 被跳过、永远不会补齐。这里把本次 parsed 命中的
+    # 已存在条目捞回来：缺 enrichment 产物的交给下面的步骤补做，
+    # precache 对全部命中条目幂等重跑。
+    parsed_keys = {
+        (normalize_english_text(parsed_item.english_text), parsed_item.item_type)
+        for parsed_item in parsed_items
+    }
+    imported_ids = {item.id for item in imported_items}
+    retry_items: list[LearningItem] = []
+    if parsed_keys:
+        for item in db.scalars(
+            select(LearningItem).where(
+                LearningItem.user_id == user_id,
+                LearningItem.course_id == course_id,
+            )
+        ).all():
+            if item.id in imported_ids:
+                continue
+            if (normalize_english_text(item.english_text), item.item_type) in parsed_keys:
+                retry_items.append(item)
+
+    # items 已提交，后续每一步的失败只允许降级为部分成功响应，不允许再把
+    # 整个请求 500 掉——统一 except Exception + logger.exception。
+
+    # 补齐中文释义：重试命中但缺中文的已有条目在这里翻译，不重新建条目。
+    if translation_settings is not None:
+        translated_any = False
+        for item in retry_items:
+            if not needs_translation(item.chinese_text or ""):
+                continue
+            try:
+                if item.item_type == "word":
+                    chinese_text = sanitize_word_translation(
+                        translate_english_to_chinese(item.english_text, translation_settings, multiple_meanings=True),
+                        source_word=item.english_text,
+                    )
+                    if not chinese_text:
+                        raise ValueError("LLM translation failed: empty after sanitize")
+                else:
+                    chinese_text = translate_english_to_chinese(item.english_text, translation_settings)
+                item.chinese_text = chinese_text
+                translated_any = True
+            except Exception:
+                logger.exception("Import retry translation failed: english_text=%s", item.english_text)
+        if translated_any:
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("Import retry translation commit failed: user_id=%s course_id=%s", user_id, course_id)
+
     # Enrich word-type items with phonetic data (syllables + grapheme-phoneme map + IPA)
     if translation_settings is not None:
         word_items = [item for item in imported_items if item.item_type == "word"]
+        # 重试命中的 word 条目缺音节数据时一并补做（syllables 与 enrichment
+        # 同事务写入，缺失即代表上次 enrichment 未完成）
+        word_items.extend(item for item in retry_items if item.item_type == "word" and not item.syllables)
         for item in word_items:
             try:
                 syllables, gp_map = enrich_word_with_phonetics(item.english_text, translation_settings)
@@ -246,37 +338,57 @@ def import_learning_items(
                         decomposition = generate_phonetic_decomposition(item.english_text, translation_settings)
                         if decomposition.get("ipa"):
                             item.phonetic = str(decomposition["ipa"])
-                    except ValueError:
-                        pass
-            except ValueError:
-                pass
+                    except Exception:
+                        logger.exception("IPA decomposition failed during import: english_text=%s", item.english_text)
+            except Exception:
+                logger.exception("Phonetic enrichment failed during import: english_text=%s", item.english_text)
         if word_items:
-            db.commit()
-            for item in word_items:
-                db.refresh(item)
+            try:
+                db.commit()
+                for item in word_items:
+                    db.refresh(item)
+            except Exception:
+                db.rollback()
+                logger.exception("Phonetic enrichment commit failed during import: user_id=%s course_id=%s", user_id, course_id)
 
-        course_terms = extract_unique_words([item.english_text for item in imported_items])
+        term_source_items = imported_items + retry_items
+        course_terms = extract_unique_words([item.english_text for item in term_source_items])
         course_terms.extend(
             normalize_english_text(item.english_text)
-            for item in imported_items
+            for item in term_source_items
             if item.item_type in {"word", "phrase"} and item.english_text.strip()
         )
         if course_terms:
-            ensure_word_translations(db, user_id, course_terms, translation_settings, course_id)
-            db.commit()
+            try:
+                ensure_word_translations(db, user_id, course_terms, translation_settings, course_id)
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("Word translation cache failed during import: user_id=%s course_id=%s", user_id, course_id)
 
-    if imported_items:
-        precache_learning_speech_assets(
-            db,
-            user_id=user_id,
-            course_id=course_id,
-            learning_items=imported_items,
-            stored_settings=stored_settings,
-        )
-        db.commit()
+    # 语音 precache 幂等（命中缓存即跳过），对本次导入命中的全部条目重跑，
+    # 保证上次在 precache 之前/之中失败时重试能补完。
+    precache_items = imported_items + retry_items
+    if precache_items:
+        try:
+            precache_learning_speech_assets(
+                db,
+                user_id=user_id,
+                course_id=course_id,
+                learning_items=precache_items,
+                stored_settings=stored_settings,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Speech precache failed during import: user_id=%s course_id=%s", user_id, course_id)
 
     # Assign sort order after import
-    resequence_course_items(db, user_id, course_id)
+    try:
+        resequence_course_items(db, user_id, course_id)
+    except Exception:
+        db.rollback()
+        logger.exception("Resequence failed during import: user_id=%s course_id=%s", user_id, course_id)
 
     return imported_items, skipped_items
 

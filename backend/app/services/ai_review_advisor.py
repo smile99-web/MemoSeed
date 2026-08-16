@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import Integer, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from zoneinfo import ZoneInfo
 
@@ -227,7 +228,10 @@ def generate_review_advice(
         result = json.loads(text)
     except json.JSONDecodeError:
         logger.warning("AI review advisor returned invalid JSON: %s", text[:200])
-        return {"error": "LLM returned invalid JSON", "raw": text[:500]}
+        raise ValueError("LLM returned invalid JSON")
+    if not isinstance(result, dict):
+        logger.warning("AI review advisor returned non-dict JSON: %s", text[:200])
+        raise ValueError("LLM returned invalid JSON")
 
     # Normalize — support both old format (recommended_words) and new (priority_bands)
     priority_bands = result.get("priority_bands")
@@ -235,7 +239,10 @@ def generate_review_advice(
         all_words = []
         for band in ("urgent", "high", "medium", "low"):
             words = priority_bands.get(band, []) or []
-            all_words.extend(words)
+            if not isinstance(words, list):
+                # Skip malformed bands instead of crashing on e.g. a string.
+                continue
+            all_words.extend(word for word in words if isinstance(word, str))
         recommendations: dict[str, object] = {
             "recommended_words": result.get("recommended_words", all_words),
             "priority_bands": priority_bands,
@@ -292,7 +299,26 @@ def create_minimal_report_for_recommendations(
         report_date=report_date,
         review_recommendations=recommendations,
     )
-    db.add(report)
+    try:
+        # Savepoint: the daily-report generator may insert the same
+        # (user, report_date) row while our LLM call was in flight —
+        # the loser of the uq_ai_daily_reports_user_date race re-reads the
+        # winner and stores its recommendations there instead of 500ing
+        # (same pattern as word_translation_cache.py, 2026-08-09 fix).
+        with db.begin_nested():
+            db.add(report)
+            db.flush()
+    except IntegrityError:
+        db.expunge(report)
+        report = db.scalar(
+            select(AiDailyReport).where(
+                AiDailyReport.user_id == user_id,
+                AiDailyReport.report_date == report_date,
+            )
+        )
+        if report is None:  # pragma: no cover - defensive
+            raise
+        report.review_recommendations = recommendations
     db.commit()
     db.refresh(report)
     return report
@@ -329,6 +355,11 @@ def generate_review_advice_if_needed(
     try:
         generate_review_advice(db, user_id, settings, force=True)
         return True
+    except ValueError as exc:
+        # LLM returned invalid/non-dict JSON — nothing was stored, so the
+        # day stays ungenerated and can be retried later.
+        logger.warning("AI review advisor got invalid JSON for user=%s: %s", user_id, exc)
+        return False
     except Exception as exc:
         logger.warning("AI review advisor failed for user=%s: %s", user_id, exc)
         return False

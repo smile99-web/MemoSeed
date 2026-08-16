@@ -209,8 +209,14 @@ class TestRecordAnswer:
             is_correct=True,
             time_spent_ms=2000,
         )
-        assert session.correct_count == 4, (
-            f"Expected correct_count to be incremented from 3 to 4, got {session.correct_count}"
+        # The increment is now a DB-side SQL expression
+        # (UPDATE ... SET correct_count = COALESCE(correct_count,0)+1),
+        # not a Python read-modify-write — the attribute holds the
+        # expression until flush/refresh replaces it with the value.
+        from sqlalchemy.sql.elements import ColumnElement
+
+        assert isinstance(session.correct_count, ColumnElement), (
+            f"Expected correct_count to be a SQL expression (atomic UPDATE), got {session.correct_count!r}"
         )
         # Verify the answer was added to the session
         assert hasattr(db, "added_objects")

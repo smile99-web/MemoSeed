@@ -2139,6 +2139,12 @@ function StudyContent() {
     setCelebrationSummary(null);
   }, [courseId]);
 
+  // 庆祝弹窗也要随学习模式切换清除：今日流程换阶段只改 mode、courseId
+  // 恒为 ""，上面的 [courseId] effect 不会触发，弹窗会残留进下一阶段。
+  useEffect(() => {
+    setCelebrationSummary(null);
+  }, [studyMode]);
+
   useEffect(() => {
     function markStudyActivity() {
       const now = Date.now();
@@ -3072,7 +3078,15 @@ function StudyContent() {
         );
       }
       if (options.completedCurrentItem && wrappedIndex === 0) {
-        window.setTimeout(showCourseCompletion, 0);
+        // 今日学习流程：非最终「每日一测」阶段的队列回绕不弹课程完成庆祝 ——
+        // 阶段结束走阶段过场卡；配额恰好落在队列尾时两者会双弹，且庆祝弹窗
+        // 的出口会带离今日流程。测阶段回绕（成绩单）仍是真正的流程完成信号。
+        const flow = dailyFlowRef.current;
+        const suppressFlowCelebration =
+          isDailyFlow && (!flow || DAILY_FLOW_PHASES[flow.phaseIndex].key !== "test");
+        if (!suppressFlowCelebration) {
+          window.setTimeout(showCourseCompletion, 0);
+        }
       }
       return wrappedIndex;
     });
