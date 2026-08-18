@@ -141,6 +141,93 @@ def get_mastered_words(
     return {"words": words}
 
 
+@router.get("/word-collection")
+def get_word_collection(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """四期改造(2026-08-18): 单词收藏册 + 进度地图数据。
+
+    收藏 = mastered / near_mastered / 五维全毕业的词;地图 = 每门课程
+    的去重词数与已收藏数(点亮进度)。孩子看到自己的积累在变多,是最
+    直接的坚持动机。
+    """
+    from app.services.word_memory import word_dimension_progress, word_dimensions_graduated
+
+    word_states = db.scalars(
+        select(WordMemoryState).where(WordMemoryState.user_id == current_user.id)
+    ).all()
+
+    def _is_collected(ws: WordMemoryState) -> bool:
+        return (ws.status or "") in ("mastered", "near_mastered") or word_dimensions_graduated(ws)
+
+    collected_states = [ws for ws in word_states if _is_collected(ws)]
+    collected_states.sort(key=lambda ws: (-(ws.memory_strength or 0), ws.word))
+
+    # 中文释义与音标:优先词级条目的课程内翻译缓存
+    from app.services.word_translation_cache import get_cached_word_translations
+    translations = get_cached_word_translations(db, current_user.id, [ws.word for ws in collected_states])
+    phonetic_by_item_id = {
+        item.id: item.phonetic
+        for item in db.scalars(
+            select(LearningItem).where(
+                LearningItem.user_id == current_user.id,
+                LearningItem.item_type == "word",
+                LearningItem.phonetic.isnot(None),
+            )
+        ).all()
+    }
+
+    mastered_words = [
+        {
+            "word": ws.word,
+            "chinese": translations.get(ws.word, ""),
+            "phonetic": phonetic_by_item_id.get(ws.learning_item_id) or "",
+            "status": ws.status or "",
+            "memory_strength": ws.memory_strength or 0.0,
+            "dimensions": word_dimension_progress(ws),
+        }
+        for ws in collected_states
+    ]
+
+    # 进度地图: 每门课程的去重词数 vs 已收藏数
+    collected_word_set = {ws.word for ws in collected_states}
+    courses = db.scalars(
+        select(Course).where(Course.user_id == current_user.id).order_by(Course.created_at.asc())
+    ).all()
+    course_map: list[dict] = []
+    for course in courses:
+        word_texts = {
+            (text or "").strip().lower()
+            for (text,) in db.execute(
+                select(LearningItem.english_text).where(
+                    LearningItem.course_id == course.id,
+                    LearningItem.item_type == "word",
+                )
+            ).all()
+            if (text or "").strip()
+        }
+        if not word_texts:
+            continue
+        collected_count = len(word_texts & collected_word_set)
+        course_map.append(
+            {
+                "course_id": str(course.id),
+                "course_name": course.name,
+                "total_words": len(word_texts),
+                "collected_count": collected_count,
+                "completed": collected_count == len(word_texts),
+            }
+        )
+
+    return {
+        "total_collected": len(mastered_words),
+        "in_flight_count": len(word_states) - len(mastered_words),
+        "mastered_words": mastered_words,
+        "courses": course_map,
+    }
+
+
 @router.get("/review-forecast", response_model=ReviewForecastResponse)
 def get_review_forecast(
     current_user: Annotated[User, Depends(get_current_user)],

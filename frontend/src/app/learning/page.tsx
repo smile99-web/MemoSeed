@@ -318,6 +318,21 @@ function LearningStartContent() {
           </Link>
 
           <Link
+            className="hover-lift flex items-center justify-between gap-3 rounded-2xl border border-amber-300/70 bg-amber-50/70 px-5 py-4 shadow-soft backdrop-blur-xl transition-colors hover:border-amber-400 ipad:px-6 ipad:py-5"
+            href="/collection"
+          >
+            <div>
+              <p className="text-base font-bold text-amber-700 ipad:text-lg">📖 单词收藏册</p>
+              <p className="mt-1 text-xs text-slate-600 ipad:text-sm">
+                看看你已经点亮了多少单词,点一点还能听发音
+              </p>
+            </div>
+            <span className="shrink-0 rounded-full bg-amber-500 px-3 py-1 text-sm font-bold text-white ipad:text-base">
+              成就
+            </span>
+          </Link>
+
+          <Link
             className="hover-lift flex items-center justify-between gap-3 rounded-2xl border border-rose-300/70 bg-rose-50/70 px-5 py-4 shadow-soft backdrop-blur-xl transition-colors hover:border-rose-400 ipad:px-6 ipad:py-5"
             href="/learning/study?mode=test"
           >
