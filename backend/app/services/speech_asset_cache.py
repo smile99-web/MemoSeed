@@ -50,9 +50,28 @@ def build_volcengine_tts_settings(
     speech_rate: int,
 ) -> VolcengineTtsSettings:
     stored_settings = stored_settings or {}
+    # Security (same rule as /tts/speech 2026-08-04): a user-stored custom
+    # endpoint must be paired with the user's OWN api key. Falling back to
+    # the server env key while honouring the user's endpoint would POST the
+    # production Volcengine key to an attacker-controlled URL (key
+    # exfiltration). No user key => ignore the custom endpoint and use the
+    # server default endpoint + server key instead.
+    custom_endpoint = string_setting(stored_settings, "volcengineTtsEndpoint")
+    custom_api_key = string_setting(stored_settings, "volcengineTtsApiKey")
+    if custom_endpoint and custom_api_key:
+        endpoint = custom_endpoint
+        api_key: str | None = custom_api_key
+    else:
+        if custom_endpoint and not custom_api_key:
+            logger.warning(
+                "Ignoring custom Volcengine TTS endpoint without a user API key "
+                "(refusing to send the server key to a user-supplied URL)"
+            )
+        endpoint = app_settings.volcengine_tts_endpoint or DEFAULT_VOLCENGINE_TTS_ENDPOINT
+        api_key = app_settings.volcengine_tts_api_key
     return VolcengineTtsSettings(
-        endpoint=string_setting(stored_settings, "volcengineTtsEndpoint") or app_settings.volcengine_tts_endpoint or DEFAULT_VOLCENGINE_TTS_ENDPOINT,
-        api_key=string_setting(stored_settings, "volcengineTtsApiKey") or app_settings.volcengine_tts_api_key,
+        endpoint=endpoint,
+        api_key=api_key,
         resource_id=string_setting(stored_settings, "volcengineTtsResourceId") or app_settings.volcengine_tts_resource_id or DEFAULT_VOLCENGINE_TTS_RESOURCE_ID,
         model=string_setting(stored_settings, "volcengineTtsModel") or app_settings.volcengine_tts_model or DEFAULT_VOLCENGINE_TTS_MODEL,
         voice=voice,

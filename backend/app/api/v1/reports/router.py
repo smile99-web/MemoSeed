@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Body, Depends, status
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -99,8 +100,18 @@ def get_today_plan_settings(
             strategy={},
         )
         db.add(plan)
-        db.commit()
-        db.refresh(plan)
+        try:
+            db.commit()
+        except IntegrityError:
+            # Concurrent first-hit of the day: another request inserted the
+            # (user_id, plan_date) row first (uq_daily_plans_user_date).
+            # Re-read the winner instead of 500ing.
+            db.rollback()
+            plan = db.scalar(select(DailyPlan).where(DailyPlan.user_id == current_user.id, DailyPlan.plan_date == today))
+            if plan is None:  # pragma: no cover - defensive; the winner must exist
+                raise
+        else:
+            db.refresh(plan)
     return DailyPlanRead.model_validate(plan)
 
 
@@ -227,12 +238,13 @@ def import_user_data(
         )
         db.add(course_package)
         db.flush()
-        id_maps["course_packages"][str(row.get("id"))] = course_package.id
+        if row.get("id") is not None:
+            id_maps["course_packages"][str(row.get("id"))] = course_package.id
         summary["course_packages"] += 1
 
     existing_course_names: dict[Any, set[str]] = {}
     for row in as_rows(payload.get("courses")):
-        package_id = id_maps["course_packages"].get(str(row.get("package_id")))
+        package_id = id_maps["course_packages"].get(str(row.get("package_id"))) if row.get("package_id") is not None else None
         if package_id is None:
             continue
         names = existing_course_names.setdefault(
@@ -247,7 +259,8 @@ def import_user_data(
         )
         db.add(course)
         db.flush()
-        id_maps["courses"][str(row.get("id"))] = course.id
+        if row.get("id") is not None:
+            id_maps["courses"][str(row.get("id"))] = course.id
         summary["courses"] += 1
 
     existing_item_keys: dict[tuple[str, str, str], Any] = {}
@@ -274,12 +287,14 @@ def import_user_data(
         # id to memory_states/review_logs below).
         item_key = (str(course_id), learning_item.item_type, learning_item.english_text.strip().lower())
         if item_key in existing_item_keys:
-            id_maps["learning_items"][str(row.get("id"))] = existing_item_keys[item_key]
+            if row.get("id") is not None:
+                id_maps["learning_items"][str(row.get("id"))] = existing_item_keys[item_key]
             continue
         db.add(learning_item)
         db.flush()
         existing_item_keys[item_key] = learning_item.id
-        id_maps["learning_items"][str(row.get("id"))] = learning_item.id
+        if row.get("id") is not None:
+            id_maps["learning_items"][str(row.get("id"))] = learning_item.id
         summary["learning_items"] += 1
 
     existing_memory_states: dict[Any, MemoryState] = {}
@@ -290,7 +305,7 @@ def import_user_data(
             for ms in db.scalars(select(MemoryState).where(MemoryState.learning_item_id.in_(mapped_item_ids))).all()
         }
     for row in as_rows(payload.get("memory_states")):
-        learning_item_id = id_maps["learning_items"].get(str(row.get("learning_item_id")))
+        learning_item_id = id_maps["learning_items"].get(str(row.get("learning_item_id"))) if row.get("learning_item_id") is not None else None
         if learning_item_id is None:
             continue
         memory_state = existing_memory_states.get(learning_item_id)
@@ -315,7 +330,8 @@ def import_user_data(
         memory_state.last_reviewed_at = parse_datetime(row.get("last_reviewed_at"))
         memory_state.next_review_at = parse_datetime(row.get("next_review_at")) or datetime.now(UTC)
         db.flush()
-        id_maps["memory_states"][str(row.get("id"))] = memory_state.id
+        if row.get("id") is not None:
+            id_maps["memory_states"][str(row.get("id"))] = memory_state.id
         summary["memory_states"] += 1
 
     existing_review_keys = {
@@ -323,7 +339,7 @@ def import_user_data(
         for rl in db.scalars(select(ReviewLog).where(ReviewLog.user_id == current_user.id)).all()
     }
     for row in as_rows(payload.get("review_logs")):
-        learning_item_id = id_maps["learning_items"].get(str(row.get("learning_item_id")))
+        learning_item_id = id_maps["learning_items"].get(str(row.get("learning_item_id"))) if row.get("learning_item_id") is not None else None
         if learning_item_id is None:
             continue
         reviewed_at = parse_datetime(row.get("reviewed_at")) or datetime.now(UTC)
@@ -351,7 +367,7 @@ def import_user_data(
         for ml in db.scalars(select(MistakeLog).where(MistakeLog.user_id == current_user.id)).all()
     }
     for row in as_rows(payload.get("mistake_logs")):
-        learning_item_id = id_maps["learning_items"].get(str(row.get("learning_item_id")))
+        learning_item_id = id_maps["learning_items"].get(str(row.get("learning_item_id"))) if row.get("learning_item_id") is not None else None
         if learning_item_id is None:
             continue
         occurred_at = parse_datetime(row.get("occurred_at")) or datetime.now(UTC)
@@ -393,7 +409,7 @@ def import_user_data(
         # abort a re-import with a 500.
         word_state.learning_item_id = id_maps["learning_items"].get(str(row.get("learning_item_id"))) if row.get("learning_item_id") else None
         word_state.memory_state_id = id_maps["memory_states"].get(str(row.get("memory_state_id"))) if row.get("memory_state_id") else None
-        word_state.status = str(row.get("status") or "teaching")
+        word_state.status = str(row.get("status") or "teaching")[:32]
         word_state.memory_strength = clamp_float(row.get("memory_strength"), 0.0, 0.0, 1.0)
         word_state.forget_risk = clamp_float(row.get("forget_risk"), 1.0, 0.0, 1.0)
         word_state.priority_score = clamp_float(row.get("priority_score"), 1.0, 0.0, 1.0)
@@ -413,7 +429,8 @@ def import_user_data(
         word_state.micro_review_stage = as_int(row.get("micro_review_stage"), 0)
         word_state.last_reviewed_at = parse_datetime(row.get("last_reviewed_at"))
         db.flush()
-        id_maps["word_memory_states"][str(row.get("id"))] = word_state.id
+        if row.get("id") is not None:
+            id_maps["word_memory_states"][str(row.get("id"))] = word_state.id
         summary["word_memory_states"] += 1
 
     existing_task_keys = {
@@ -477,7 +494,7 @@ def import_user_data(
         for cc in db.scalars(select(CourseCompletionLog).where(CourseCompletionLog.user_id == current_user.id)).all()
     }
     for row in as_rows(payload.get("course_completion_logs")):
-        course_id = id_maps["courses"].get(str(row.get("course_id")))
+        course_id = id_maps["courses"].get(str(row.get("course_id"))) if row.get("course_id") is not None else None
         if course_id is None:
             continue
         completed_at = parse_datetime(row.get("completed_at")) or datetime.now(UTC)
@@ -645,7 +662,14 @@ def clamp_int(value: Any, default: int, low: int, high: int) -> int:
 
 
 def as_bool(value: Any) -> bool:
-    return bool(value) if isinstance(value, bool) else str(value).lower() == "true"
+    # JSON/hand-edited exports often carry integer booleans (1/0) or numeric
+    # strings ("1"/"0"); str(1).lower() == "true" inverted them to False and
+    # flipped is_correct / is_resolved on import.
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in {"true", "1", "yes", "on"}
 
 
 def as_dict(value: Any) -> dict[str, object]:

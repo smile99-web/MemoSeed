@@ -106,8 +106,22 @@ def sanitize_model_settings(settings: dict[str, Any]) -> dict[str, Any]:
         if key not in allowed_keys:
             continue
         if key == "ttsSpeedPreference":
-            if isinstance(value, (int, float, str)):
-                sanitized[key] = value
+            # Volcengine speech_rate accepts [-50, 100] (see SpeechSynthesisRequest).
+            # An out-of-range stored preference was forwarded verbatim to the
+            # provider and 400/500'd every TTS call until the user fixed the
+            # setting — clamp here so a bad slider value can never poison it.
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)):
+                numeric = value
+            elif isinstance(value, str):
+                try:
+                    numeric = float(value.strip())
+                except ValueError:
+                    continue
+            else:
+                continue
+            sanitized[key] = int(max(-50, min(100, numeric)))
             continue
         if key in boolean_keys:
             # Flags arrive as JSON booleans — the previous str-only filter

@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, SmallInteger, String, Text
@@ -15,7 +15,7 @@ class LearningEvent(Base):
     user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     learning_item_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), ForeignKey("learning_items.id", ondelete="SET NULL"), nullable=True)
     review_log_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), ForeignKey("review_logs.id", ondelete="SET NULL"), nullable=True)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(), index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC), index=True)
     event_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     event_hour: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     event_minute: Mapped[int] = mapped_column(SmallInteger, nullable=False)
@@ -30,7 +30,7 @@ class LearningEvent(Base):
     response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
 
 
 class LearningMinuteStat(Base):
@@ -50,4 +50,4 @@ class LearningMinuteStat(Base):
     correct_events: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     incorrect_events: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     study_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))

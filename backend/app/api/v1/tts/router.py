@@ -37,7 +37,7 @@ from app.services.phonics_deck import (
     get_phonics_synth_map,
 )
 from app.services.secure_model_settings import get_private_model_settings
-from app.services.speech_asset_cache import SpeechTarget, upsert_speech_asset
+from app.services.speech_asset_cache import SpeechTarget, build_volcengine_tts_settings, upsert_speech_asset
 from app.services.tts_cache import (
     build_cache_key,
     get_cache_url,
@@ -207,7 +207,7 @@ def synthesize_speech(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
-    _record_speech_asset(db, current_user.id, None, payload.text, payload.language or "", voice, speech_rate, True)
+    _record_speech_asset(db, current_user.id, None, payload.text, payload.language or "", voice, speech_rate, cache_hit)
     _log_tts_usage(db, current_user.id, payload.text, voice, speech_rate, "volcengine", cache_hit)
     return Response(content=audio, media_type="audio/mpeg")
 
@@ -262,14 +262,13 @@ def prefetch_course_audio(
             cache_hits += 1
         else:
             cache_misses += 1
-            # Pre-generate audio for this word
-            tts_settings = VolcengineTtsSettings(
-                endpoint=string_setting(stored_settings, "volcengineTtsEndpoint") or app_settings.volcengine_tts_endpoint or DEFAULT_VOLCENGINE_TTS_ENDPOINT,
-                api_key=string_setting(stored_settings, "volcengineTtsApiKey") or app_settings.volcengine_tts_api_key,
-                resource_id=string_setting(stored_settings, "volcengineTtsResourceId") or app_settings.volcengine_tts_resource_id or DEFAULT_VOLCENGINE_TTS_RESOURCE_ID,
-                model=string_setting(stored_settings, "volcengineTtsModel") or app_settings.volcengine_tts_model or DEFAULT_VOLCENGINE_TTS_MODEL,
+            # Pre-generate audio for this word. build_volcengine_tts_settings
+            # enforces the custom-endpoint-requires-own-key rule (SSRF/key
+            # exfiltration guard, same as /tts/speech).
+            tts_settings = build_volcengine_tts_settings(
+                stored_settings,
                 voice=voice,
-                language=payload.language,
+                language=payload.language or "en-US",
                 speech_rate=speech_rate,
             )
             try:
@@ -347,11 +346,10 @@ def generate_phonics_deck_audio(
             cached_count += 1
             continue
 
-        tts_settings = VolcengineTtsSettings(
-            endpoint=string_setting(stored_settings, "volcengineTtsEndpoint") or app_settings.volcengine_tts_endpoint or DEFAULT_VOLCENGINE_TTS_ENDPOINT,
-            api_key=string_setting(stored_settings, "volcengineTtsApiKey") or app_settings.volcengine_tts_api_key,
-            resource_id=string_setting(stored_settings, "volcengineTtsResourceId") or app_settings.volcengine_tts_resource_id or DEFAULT_VOLCENGINE_TTS_RESOURCE_ID,
-            model=string_setting(stored_settings, "volcengineTtsModel") or app_settings.volcengine_tts_model or DEFAULT_VOLCENGINE_TTS_MODEL,
+        # build_volcengine_tts_settings enforces the custom-endpoint-requires-
+        # own-key rule (SSRF/key exfiltration guard, same as /tts/speech).
+        tts_settings = build_volcengine_tts_settings(
+            stored_settings,
             voice=voice,
             language="en-US",
             speech_rate=speech_rate,

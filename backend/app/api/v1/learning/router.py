@@ -59,7 +59,7 @@ from app.schemas.learning import (
 )
 from app.services.dynamic_sentence import generate_dynamic_review_sentence
 from app.services.learning_import import SUPPORTED_IMPORT_EXTENSIONS, import_learning_items, parse_txt_import, parse_xlsx_import
-from app.services.llm_translation import AGENT_PLAN_DEFAULT_BASE_URL, DEFAULT_LLM_TRANSLATION_SETTINGS, LlmTranslationSettings, generate_learning_text, needs_translation, translate_english_to_chinese, with_agent_plan_primary
+from app.services.llm_translation import AGENT_PLAN_DEFAULT_BASE_URL, DEFAULT_LLM_TRANSLATION_SETTINGS, LlmTranslationSettings, generate_learning_text, needs_translation, resolve_llm_credentials, translate_english_to_chinese, with_agent_plan_primary
 from app.services.memory_dashboard import calculate_word_priority
 from app.services.memory_scheduler import (
     ASSISTED_REVIEW_MODES,
@@ -649,14 +649,14 @@ def build_llm_translation_settings(
     llm_api_key: str | None,
     stored_settings: dict[str, object] | None = None,
 ) -> LlmTranslationSettings:
-    base_settings = DEFAULT_LLM_TRANSLATION_SETTINGS
-    stored_settings = stored_settings or {}
-    provider = llm_provider or string_setting(stored_settings, "llmProvider") or app_settings.ai_provider or base_settings.provider
-    base = LlmTranslationSettings(
-        provider=str(provider),
-        base_url=llm_base_url or string_setting(stored_settings, "llmBaseUrl") or app_settings.ai_base_url or base_settings.base_url,
-        model=llm_model or string_setting(stored_settings, "llmModel") or app_settings.ai_model or base_settings.model,
-        api_key=llm_api_key or string_setting(stored_settings, "llmApiKey") or app_settings.ai_api_key,
+    # resolve_llm_credentials enforces the custom-base_url-requires-own-key
+    # rule (SSRF/key exfiltration guard, same as /tts/speech).
+    base = resolve_llm_credentials(
+        stored_settings,
+        llm_provider=llm_provider,
+        llm_base_url=llm_base_url,
+        llm_model=llm_model,
+        llm_api_key=llm_api_key,
     )
     # Agent Plan as primary (plan quota), legacy config as its fallback.
     # Explicit per-request overrides (cache tooling) skip the wrap.

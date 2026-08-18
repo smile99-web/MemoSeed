@@ -18,12 +18,10 @@ from app.services.listening_stories import (
     warm_story_audio,
 )
 from app.services.secure_model_settings import get_private_model_settings
+from app.services.speech_asset_cache import build_volcengine_tts_settings
 from app.services.volcengine_tts import (
     DEFAULT_VOLCENGINE_TTS_CHINESE_VOICE,
-    DEFAULT_VOLCENGINE_TTS_ENDPOINT,
     DEFAULT_VOLCENGINE_TTS_ENGLISH_VOICE,
-    DEFAULT_VOLCENGINE_TTS_MODEL,
-    DEFAULT_VOLCENGINE_TTS_RESOURCE_ID,
     VolcengineTtsSettings,
 )
 from app.utils import string_setting
@@ -56,17 +54,10 @@ def _tts_settings_factory(db: Session, user_id: UUID, speech_rate: int):
     stored = get_private_model_settings(db, user_id)
 
     def factory(voice: str, language: str) -> VolcengineTtsSettings:
-        return VolcengineTtsSettings(
-            endpoint=string_setting(stored, "volcengineTtsEndpoint")
-            or app_settings.volcengine_tts_endpoint
-            or DEFAULT_VOLCENGINE_TTS_ENDPOINT,
-            api_key=string_setting(stored, "volcengineTtsApiKey") or app_settings.volcengine_tts_api_key,
-            resource_id=string_setting(stored, "volcengineTtsResourceId")
-            or app_settings.volcengine_tts_resource_id
-            or DEFAULT_VOLCENGINE_TTS_RESOURCE_ID,
-            model=string_setting(stored, "volcengineTtsModel")
-            or app_settings.volcengine_tts_model
-            or DEFAULT_VOLCENGINE_TTS_MODEL,
+        # build_volcengine_tts_settings enforces the custom-endpoint-requires-
+        # own-key rule (SSRF/key exfiltration guard, same as /tts/speech).
+        return build_volcengine_tts_settings(
+            stored,
             voice=voice,
             language=language,
             speech_rate=speech_rate,

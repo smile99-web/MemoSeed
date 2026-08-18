@@ -199,33 +199,11 @@ def _resolve_user_llm_settings(db: Session, user_id) -> LlmTranslationSettings:
     configured their own model. Mirrors the pattern used in the
     learning router (see build_llm_translation_settings).
     """
-    from app.core.config import settings as app_settings
-    from app.services.llm_translation import DEFAULT_LLM_TRANSLATION_SETTINGS, with_agent_plan_primary
-    from app.utils import string_setting
+    from app.services.llm_translation import resolve_llm_credentials, with_agent_plan_primary
 
     stored = get_private_model_settings(db, user_id)
-    provider = (
-        string_setting(stored, "llmProvider")
-        or app_settings.ai_provider
-        or DEFAULT_LLM_TRANSLATION_SETTINGS.provider
-    )
-    base_url = (
-        string_setting(stored, "llmBaseUrl")
-        or app_settings.ai_base_url
-        or DEFAULT_LLM_TRANSLATION_SETTINGS.base_url
-    )
-    model = (
-        string_setting(stored, "llmModel")
-        or app_settings.ai_model
-        or DEFAULT_LLM_TRANSLATION_SETTINGS.model
-    )
-    api_key = string_setting(stored, "llmApiKey") or app_settings.ai_api_key
-
-    base = LlmTranslationSettings(
-        provider=str(provider),
-        base_url=str(base_url),
-        model=str(model),
-        api_key=api_key,
-    )
+    # resolve_llm_credentials enforces the custom-base_url-requires-own-key
+    # rule (SSRF/key exfiltration guard, same as /tts/speech).
+    base = resolve_llm_credentials(stored)
     # Agent Plan as primary (plan quota), legacy config as its fallback.
     return with_agent_plan_primary(base, stored)

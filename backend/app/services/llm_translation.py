@@ -34,6 +34,57 @@ AGENT_PLAN_DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/plan/v3"
 AGENT_PLAN_DEFAULT_MODEL = "deepseek-v4-flash-modelhub"
 
 
+def resolve_llm_credentials(
+    stored_settings: dict[str, object] | None,
+    *,
+    llm_provider: str | None = None,
+    llm_base_url: str | None = None,
+    llm_model: str | None = None,
+    llm_api_key: str | None = None,
+) -> LlmTranslationSettings:
+    """Resolve the legacy per-user LLM config with credential pairing enforced.
+
+    Security (same rule as /tts/speech 2026-08-04 and the Volcengine TTS
+    builder): a user-supplied base_url (request payload or stored settings)
+    must be paired with the user's OWN api key. Honouring the custom URL
+    while falling back to the server env key would POST the production LLM
+    key to an attacker-controlled endpoint (key exfiltration). A custom
+    base_url without a user key is therefore IGNORED — the call uses the
+    server default endpoint + server key instead, so the feature keeps
+    working and no credential leaves the box.
+    """
+    from app.core.config import settings as app_settings
+    from app.utils import string_setting
+
+    stored_settings = stored_settings or {}
+    user_base_url = (llm_base_url or "").strip() or string_setting(stored_settings, "llmBaseUrl")
+    user_api_key = (llm_api_key or "").strip() or string_setting(stored_settings, "llmApiKey")
+    if user_base_url and user_api_key:
+        base_url = user_base_url
+        api_key: str | None = user_api_key
+    else:
+        if user_base_url and not user_api_key:
+            logger.warning(
+                "Ignoring custom LLM base_url without a user API key "
+                "(refusing to send the server key to a user-supplied URL)"
+            )
+        base_url = app_settings.ai_base_url or DEFAULT_LLM_TRANSLATION_SETTINGS.base_url
+        api_key = app_settings.ai_api_key
+    provider = (
+        (llm_provider or "").strip()
+        or string_setting(stored_settings, "llmProvider")
+        or app_settings.ai_provider
+        or DEFAULT_LLM_TRANSLATION_SETTINGS.provider
+    )
+    model = (
+        (llm_model or "").strip()
+        or string_setting(stored_settings, "llmModel")
+        or app_settings.ai_model
+        or DEFAULT_LLM_TRANSLATION_SETTINGS.model
+    )
+    return LlmTranslationSettings(provider=str(provider), base_url=str(base_url), model=str(model), api_key=api_key)
+
+
 def with_agent_plan_primary(
     base: LlmTranslationSettings,
     stored_settings: dict[str, object] | None,

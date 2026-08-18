@@ -582,19 +582,14 @@ def generate_review_advice_endpoint(
     Calls the LLM with 7-day review data. May take 5-15 seconds.
     Returns the generated recommendations.
     """
-    from app.core.config import settings as app_settings
-    from app.services.llm_translation import DEFAULT_LLM_TRANSLATION_SETTINGS, LlmTranslationSettings, with_agent_plan_primary
+    from app.services.llm_translation import resolve_llm_credentials, with_agent_plan_primary
     from app.services.secure_model_settings import get_private_model_settings
-    from app.utils import string_setting
 
     stored = get_private_model_settings(db, current_user.id)
+    # resolve_llm_credentials enforces the custom-base_url-requires-own-key
+    # rule (SSRF/key exfiltration guard, same as /tts/speech).
     llm_settings = with_agent_plan_primary(
-        LlmTranslationSettings(
-            provider=str(string_setting(stored, "llmProvider") or app_settings.ai_provider or DEFAULT_LLM_TRANSLATION_SETTINGS.provider),
-            base_url=str(string_setting(stored, "llmBaseUrl") or app_settings.ai_base_url or DEFAULT_LLM_TRANSLATION_SETTINGS.base_url),
-            model=str(string_setting(stored, "llmModel") or app_settings.ai_model or DEFAULT_LLM_TRANSLATION_SETTINGS.model),
-            api_key=string_setting(stored, "llmApiKey") or app_settings.ai_api_key,
-        ),
+        resolve_llm_credentials(stored),
         stored,
     )
 
