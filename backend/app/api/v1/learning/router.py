@@ -544,6 +544,15 @@ VALID_WORD_ERROR_TYPES: frozenset[str] = frozenset({
 # Plan A: an attempt this similar to the target is a near-miss, not a lapse.
 NEAR_MISS_SIMILARITY = 0.8
 
+# 一期改造(2026-08-18): 失误(slip)与不会(gap)分离。
+# 手滑型错误 = 字面高度相似 + 错因属于"笔误类"(相邻字母颠倒/多字母/漏字母/
+# 词尾小错)。这类错误说明孩子其实会这个词,只是手上出错:记 lapse、清连对、
+# 推长间隔都是错误反应——正确反应是原地再答一次。first-letter/middle/unknown
+# 不在此列(那是音形映射没建立,是真不会)。
+SLIP_ERROR_TYPES = frozenset({"sequence", "missing-letter", "extra-letter", "ending"})
+SLIP_MIN_SIMILARITY = 0.75
+SLIP_HANDWRITING_MIN_SIMILARITY = 0.8
+
 
 def spelling_similarity(expected: str, actual: str) -> float:
     """Letter-level similarity between the expected word and the child's attempt.
@@ -2825,8 +2834,14 @@ def list_daily_test_items(
 # 状态的真新词优先，不足时用最弱的在学词补齐）；句子按课序取未练过的。完成的
 # 内容当天即带记忆状态，第二天重进自然得到下一批任务——"按算法重新安排"。
 ZHONGKAO_PACKAGE_NAME = "中考英语"
-DAILY_FLOW_NEW_WORD_LIMIT = 20
+# 一期改造(2026-08-18): 每日新词 20 → 8。7-10 岁儿童每天能稳定留存的
+# 新词约 5-8 个;20 个/天制造 140+ 个"半生不熟"的在途词,复习队列永远
+# 还不完债——"花大量时间却掌握很少"的结构性根因。
+DAILY_FLOW_NEW_WORD_LIMIT = 8
 DAILY_FLOW_SENTENCE_LIMIT = 30
+# 在途词(学过但未毕业)硬上限:到顶即停喂新词,直到旧词毕业腾出位置。
+# 把"还不完的无形债务"变成"看得见的有界队列"。
+IN_FLIGHT_WORD_CAP = 60
 
 
 def _resolve_daily_flow_package(db: Session, user_id: UUID) -> CoursePackage | None:
@@ -2886,6 +2901,18 @@ def list_daily_flow_new_words(
     补齐；全部掌握后返回更少甚至空队列（前端对空队列自动跳过该阶段）。
     """
     capped_limit = max(1, min(limit, 40))
+    # 一期改造(2026-08-18): 在途词硬上限。学过但未毕业(teaching /
+    # consolidating / difficult)的词达到 60 个时不再喂新词——先把存量
+    # 推到毕业,否则新词只会制造明天的失败。返回空队列,前端自动跳过
+    # 该阶段。
+    in_flight_count = int(db.scalar(
+        select(func.count(WordMemoryState.id)).where(
+            WordMemoryState.user_id == current_user.id,
+            WordMemoryState.status.in_(("teaching", "consolidating", "difficult")),
+        )
+    ) or 0)
+    if in_flight_count >= IN_FLIGHT_WORD_CAP:
+        return []
     package = _resolve_daily_flow_package(db, current_user.id)
     if package is None:
         return []
@@ -3137,6 +3164,25 @@ async def check_handwriting(
         error_type = "spelling" if verdict.english_ok is False else "meaning"
     else:
         error_type = "spelling"
+    # 一期改造(2026-08-18): 手滑判定(单词手写)。视觉识别把潦草但高度
+    # 相似的字判错时,不记 lapse、不动 FSRS——孩子重写一遍即可。只对单词
+    # 听写生效(句子手写和双关翻译不适用),门槛比键盘输入更高(0.8):
+    # 手写识别本身有误差,放宽会把真不会也放进来。
+    if not verdict.correct and error_type == "spelling" and len(tokenize_words(expected_english)) == 1:
+        hw_similarity = spelling_similarity(expected_english, verdict.recognized or "")
+        if hw_similarity >= SLIP_HANDWRITING_MIN_SIMILARITY:
+            complete_word_review_task(db, current_user.id, payload.review_task_id, True)
+            db.commit()
+            return HandwritingCheckResponse(
+                recognized=verdict.recognized,
+                correct=verdict.correct,
+                comment=verdict.comment,
+                expected=expected_english,
+                learning_item_id=learning_item.id if learning_item else None,
+                english_ok=verdict.english_ok,
+                chinese_ok=verdict.chinese_ok,
+                is_slip=True,
+            )
     # 2026-08-04 fix: sentence answers must NOT mint word-type word-memory
     # items. Previously get_or_create_word_memory_item received the whole
     # sentence text, creating a permanent item_type="word" item per sentence
@@ -3274,6 +3320,31 @@ def create_word_mistake_log(
 
     word_item = get_or_create_word_memory_item(db, current_user.id, payload.expected_word, learning_item)
     error_type = normalize_word_error_type(payload.error_type)
+    # 一期改造(2026-08-18): 手滑(slip)与真不会(gap)分离。字面高度相似的
+    # 笔误类小错(颠倒/多字母/漏字母/词尾)不记 lapse、不动 FSRS、不进错词
+    # 本——只留回放遥测,响应 is_slip=True 让前端原地温和重答。这本是
+    # word-reviews 端点的同款判定;键盘拼写走本端点,漏掉它等于主入口没改。
+    if error_type in SLIP_ERROR_TYPES:
+        slip_similarity = spelling_similarity(payload.expected_word or "", payload.actual_word or "")
+        if slip_similarity >= SLIP_MIN_SIMILARITY:
+            try:
+                from app.services.learning_replay import record_assisted_learning_event
+                with db.begin_nested():
+                    record_assisted_learning_event(
+                        db,
+                        current_user.id,
+                        word_item,
+                        "word-spelling",
+                        2,
+                        response_text=(payload.actual_word or "").strip() or None,
+                        duration_ms=min(max(int(payload.duration_seconds or 0), 0) * 1000, 5 * 60 * 1000) or 20_000,
+                        error_type=error_type,
+                        is_correct=None,
+                    )
+            except Exception as exc:
+                logger.warning("Failed to record slip telemetry for word mistake: %s", exc)
+            db.commit()
+            return WordMistakeLogResponse(logged_count=0, is_slip=True)
     # P13: partial credit — near-miss spellings (>= 80% letter similarity)
     # record score=2 instead of the flat score=1. Scheduling treats both as
     # failures (rating Again), but the score preserves the difference for
@@ -3442,6 +3513,36 @@ def create_word_review(
             logger.warning("Failed to record assisted learning event: %s", exc)
         db.commit()
         return WordReviewResponse(learning_item_id=word_item.id, word=word_item.english_text)
+
+    # 一期改造(2026-08-18): 失误(slip)与不会(gap)分离。手滑型错误
+    # (字面高度相似的笔误类小错)不是"不会":不记 lapse、不动 FSRS、不扣
+    # 积分、不产生错词本记录——只留一条回放遥测,响应带 is_slip=True 让
+    # 前端原地重答。此前手滑与"完全不认识"同罚,简单词因一次笔误被连错
+    # 计数拖进反复重考的循环。
+    if review_score < 3 and error_type in SLIP_ERROR_TYPES:
+        slip_similarity = payload.spelling_similarity
+        if slip_similarity is None:
+            slip_similarity = spelling_similarity(payload.word or "", payload.response_text or "")
+        if slip_similarity >= SLIP_MIN_SIMILARITY:
+            complete_word_review_task(db, current_user.id, payload.review_task_id, True)
+            try:
+                from app.services.learning_replay import record_assisted_learning_event
+                with db.begin_nested():
+                    record_assisted_learning_event(
+                        db,
+                        current_user.id,
+                        word_item,
+                        review_mode,
+                        review_score,
+                        response_text=(payload.response_text or "").strip() or None,
+                        duration_ms=min(int(payload.duration_seconds or 0) * 1000, 5 * 60 * 1000) or 20_000,
+                        error_type=error_type,
+                        is_correct=None,
+                    )
+            except Exception as exc:
+                logger.warning("Failed to record slip telemetry: %s", exc)
+            db.commit()
+            return WordReviewResponse(learning_item_id=word_item.id, word=word_item.english_text, is_slip=True)
 
     # P18: in-flight daily attempt cap. The due-queue already hides items
     # with >= MAX_DAILY_REVIEWS_PER_WORD reviews today, but task/focus items

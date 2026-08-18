@@ -162,6 +162,10 @@ class WordMistakeLogRequest(BaseModel):
 
 class WordMistakeLogResponse(BaseModel):
     logged_count: int
+    # 一期改造(2026-08-18): 手滑(slip)判定。True 表示这次"错误"是笔误
+    # 类小错,后端未记 lapse/未动 FSRS——前端给孩子温和提示原地重答即可,
+    # 不要计入连错、不要进错词流程。
+    is_slip: bool = False
 
 
 class WordReviewRequest(BaseModel):
@@ -169,16 +173,6 @@ class WordReviewRequest(BaseModel):
     review_task_id: UUID | None = None
     word: str = Field(min_length=1)
     score: int = Field(ge=0, le=5)
-    # Plan A (2026-08-07): optional letter-level similarity (0..1) between the
-    # expected word and the child's typed attempt, computed client-side. Used
-    # to upgrade a bare-miss (score 2) to a pass when the attempt is a clear
-    # near-miss (>= 0.8) — see create_word_review.
-    spelling_similarity: float | None = Field(default=None, ge=0.0, le=1.0)
-    # Plan A (2026-08-07): optional letter-level similarity (0..1) between the
-    # expected word and the child's typed attempt, computed client-side. Used
-    # to upgrade a bare-miss (score 2) to a pass when the attempt is a clear
-    # near-miss (>= 0.8) — see create_word_review.
-    spelling_similarity: float | None = Field(default=None, ge=0.0, le=1.0)
     # Plan A (2026-08-07): optional letter-level similarity (0..1) between the
     # expected word and the child's typed attempt, computed client-side. Used
     # to upgrade a bare-miss (score 2) to a pass when the attempt is a clear
@@ -198,6 +192,10 @@ class WordReviewRequest(BaseModel):
 class WordReviewResponse(BaseModel):
     learning_item_id: UUID
     word: str
+    # 一期改造(2026-08-18): 失误(slip)与不会(gap)分离。is_slip=True 表示
+    # 这是一次手滑(高度相似的字面小错),后端未记 lapse、未动 FSRS,前端
+    # 应原地让孩子重答该词,而不是按"不会"推进。
+    is_slip: bool = False
 
 
 class DynamicSentenceCandidate(BaseModel):
@@ -288,3 +286,6 @@ class HandwritingCheckResponse(BaseModel):
     # 每日一测分项判定（其余任务类型为 None）
     english_ok: bool | None = None
     chinese_ok: bool | None = None
+    # 一期改造(2026-08-18): 识别结果与目标高度相似的单词手写小错判为
+    # 手滑(slip)——未记 lapse、未动 FSRS,前端应原地让孩子重写一遍。
+    is_slip: bool = False

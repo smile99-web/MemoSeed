@@ -2457,6 +2457,15 @@ function StudyContent() {
         englishOk: result.english_ok ?? null,
         chineseOk: result.chinese_ok ?? null,
       });
+      // 一期改造:手滑(slip)——识别结果与目标高度相似,后端未记 lapse。
+      // 不算测试失败、不进错词流程:清画布让孩子原地重写一遍即可。
+      if (!result.correct && result.is_slip) {
+        setHandwritingVerdict(null);
+        setFeedback("差一点点就对了！再仔细看一看,慢慢重写一遍 ✍️");
+        canvas.clear();
+        handwritingStartedAtRef.current = Date.now();
+        return;
+      }
       // 每日一测：手写关判定按词聚合进成绩单（对错一目了然，
       // 错的词后端已自动回炉到纠正循环）。
       recordTestGateResult(item, "spell", result.correct);
@@ -4215,7 +4224,21 @@ function StudyContent() {
       const accessToken = getAccessToken();
       const learningItemId = currentItem ? getSourceLearningItemId(currentItem) : null;
       if (accessToken && learningItemId) {
-        void logWordMistake(learningItemId, expectedWord, actualWord, accessToken, errorType, Math.min(MAX_REVIEW_DURATION_SECONDS, Math.max(1, Math.round((Date.now() - startedAt) / 1000)))).catch(() => undefined);
+        const itemIdAtCall = currentItemIdRef.current;
+        void logWordMistake(learningItemId, expectedWord, actualWord, accessToken, errorType, Math.min(MAX_REVIEW_DURATION_SECONDS, Math.max(1, Math.round((Date.now() - startedAt) / 1000)))).then((result) => {
+          // 一期改造:手滑(slip)——后端未记 lapse,UI 同步回退:不计连错、
+          // 不进错词列表,温和提示原地重答(笔误不是"不会")。
+          if (!result?.is_slip || currentItemIdRef.current !== itemIdAtCall) {
+            return;
+          }
+          setWordErrorCounts((current) => {
+            const next = [...current];
+            next[index] = Math.max(0, (next[index] ?? 0) - 1);
+            return next;
+          });
+          setMistakenWords((current) => current.filter((w) => w !== normalizedExpectedWord));
+          setFeedback("差一点点就对了！看清楚,再慢慢写一次 💪");
+        }).catch(() => undefined);
       }
       if (nextErrorCount === 3 || (errorType === "unknown" && nextErrorCount >= 2)) {
         const itemIdAtError = currentItemIdRef.current;
@@ -4485,7 +4508,15 @@ function StudyContent() {
       const accessToken = getAccessToken();
       const learningItemId = currentItem ? getSourceLearningItemId(currentItem) : null;
       if (accessToken && learningItemId) {
-        void logWordMistake(learningItemId, expectedWord, mistakePracticeAnswer, accessToken, errorType, Math.min(MAX_REVIEW_DURATION_SECONDS, Math.max(1, Math.round((Date.now() - startedAt) / 1000)))).catch(() => undefined);
+        const itemIdAtCall = currentItemIdRef.current;
+        void logWordMistake(learningItemId, expectedWord, mistakePracticeAnswer, accessToken, errorType, Math.min(MAX_REVIEW_DURATION_SECONDS, Math.max(1, Math.round((Date.now() - startedAt) / 1000)))).then((result) => {
+          // 一期改造:手滑(slip)回退——不升连错计数,温和重答。
+          if (!result?.is_slip || currentItemIdRef.current !== itemIdAtCall) {
+            return;
+          }
+          setMistakePracticeErrorCount((current) => Math.max(0, current - 1));
+          setFeedback("差一点点就对了！看清楚,再慢慢写一次 💪");
+        }).catch(() => undefined);
       }
       if (nextErrorCount === 3 || (errorType === "unknown" && nextErrorCount >= 2)) {
         const itemIdAtError = currentItemIdRef.current;

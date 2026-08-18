@@ -20,7 +20,7 @@ export interface DailyFlowPhase {
 }
 export const DAILY_FLOW_PHASES: readonly DailyFlowPhase[] = [
   { key: "review",   label: "复习单词", icon: "📚", mode: "review", quota: 30, quotaUnit: "词" },
-  { key: "learn",    label: "新单词",   icon: "🌱", mode: "learn",  quota: 20, quotaUnit: "词", note: "中考英语课程包" },
+  { key: "learn",    label: "新单词",   icon: "🌱", mode: "learn",  quota: 8,  quotaUnit: "词", note: "中考英语课程包" },
   { key: "sentence", label: "练句子",   icon: "📝", mode: "mix",    quota: 30, quotaUnit: "句", note: "中考英语课程包" },
   { key: "test",     label: "每日一测", icon: "✅", mode: "test" },
 ];

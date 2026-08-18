@@ -438,6 +438,12 @@ function parseCourseCacheProgressLine(line: string): CourseCacheRebuildProgress 
   return JSON.parse(trimmed) as CourseCacheRebuildProgress;
 }
 
+export interface WordMistakeLogResult {
+  logged_count: number;
+  /** 一期改造:手滑(slip)判定——后端未记 lapse/未动 FSRS,前端温和重答即可。 */
+  is_slip?: boolean;
+}
+
 export async function logWordMistake(
   learningItemId: string,
   expectedWord: string,
@@ -445,7 +451,7 @@ export async function logWordMistake(
   accessToken: string,
   errorType = "spelling",
   durationSeconds?: number,
-): Promise<void> {
+): Promise<WordMistakeLogResult> {
   const response = await fetchWithAuth(
     `${getApiBaseUrl()}/learning/word-mistakes`,
     {
@@ -469,6 +475,7 @@ export async function logWordMistake(
   if (!response.ok) {
     throw new Error(await parseApiError(response));
   }
+  return (await response.json()) as WordMistakeLogResult;
 }
 
 export async function logWordReview(
@@ -743,6 +750,8 @@ export interface HandwritingCheckResult {
   // 每日一测分项判定（handwriting_both 才有值）：英文拼写/中文释义各自对错。
   english_ok?: boolean | null;
   chinese_ok?: boolean | null;
+  /** 一期改造:手滑(slip)——识别与目标高度相似,未记 lapse,原地重写即可。 */
+  is_slip?: boolean;
 }
 
 export async function checkHandwriting(accessToken: string, payload: HandwritingCheckPayload): Promise<HandwritingCheckResult> {
