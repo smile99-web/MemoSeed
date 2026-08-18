@@ -707,6 +707,34 @@ export async function listDailyFlowNewWords(accessToken: string, limit = 20): Pr
   return (await response.json()) as LearningItem[];
 }
 
+// 三期改造·毕业冲刺：只差最后一维的词,每词一张对准缺维的卡。
+export async function listDailyFlowSprint(accessToken: string, limit = 10): Promise<LearningItem[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/learning/daily-flow/graduation-sprint?${params.toString()}`,
+    { cache: "no-store" },
+    accessToken,
+  );
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as LearningItem[];
+}
+
+// 三期改造·昨日回炉：昨天真测试失败的词,先识别重建再考弱维。
+export async function listDailyFlowReteach(accessToken: string, limit = 8): Promise<LearningItem[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const response = await fetchWithAuth(
+    `${getApiBaseUrl()}/learning/daily-flow/reteach?${params.toString()}`,
+    { cache: "no-store" },
+    accessToken,
+  );
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return (await response.json()) as LearningItem[];
+}
+
 // 今日流程·句子阶段：中考英语课程包内未练过的句子（带弱词预热/完形填空）。
 export async function listDailyFlowSentences(accessToken: string, limit = 30): Promise<LearningItem[]> {
   const params = new URLSearchParams({ limit: String(limit) });

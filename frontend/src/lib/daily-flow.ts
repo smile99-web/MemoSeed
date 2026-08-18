@@ -7,7 +7,7 @@
 // （复习=到期词，新词/句子=中考英语课程包内未学内容）。
 // 纯前端实现：进度存 localStorage，按本地日期分 key。
 export interface DailyFlowPhase {
-  key: "review" | "learn" | "sentence" | "test";
+  key: "sprint" | "reteach" | "review" | "learn" | "sentence" | "test";
   label: string;
   icon: string;
   /** 对应 study 页的 mode 参数（"mix" = 无 mode 参数）。 */
@@ -18,14 +18,21 @@ export interface DailyFlowPhase {
   /** 内容来源说明（展示用）。 */
   note?: string;
 }
+// 三期改造(2026-08-18): 教学闭环五阶段——先收割(毕业冲刺),再补救
+// (昨日回炉),然后输入(新词启航),再应用(语境应用),最后验证(每日一测)。
+// 空队列的阶段由 study 页自动跳过,孩子永远从"今天有内容"的阶段开始。
 export const DAILY_FLOW_PHASES: readonly DailyFlowPhase[] = [
+  { key: "sprint",   label: "毕业冲刺", icon: "🚀", mode: "review", quota: 10, quotaUnit: "词" },
+  { key: "reteach",  label: "难点回炉", icon: "🔥", mode: "review", quota: 8,  quotaUnit: "词" },
   { key: "review",   label: "复习单词", icon: "📚", mode: "review", quota: 30, quotaUnit: "词" },
-  { key: "learn",    label: "新单词",   icon: "🌱", mode: "learn",  quota: 8,  quotaUnit: "词", note: "中考英语课程包" },
-  { key: "sentence", label: "练句子",   icon: "📝", mode: "mix",    quota: 30, quotaUnit: "句", note: "中考英语课程包" },
+  { key: "learn",    label: "新词启航", icon: "🌱", mode: "learn",  quota: 8,  quotaUnit: "词", note: "中考英语课程包" },
+  { key: "sentence", label: "语境应用", icon: "📝", mode: "mix",    quota: 30, quotaUnit: "句", note: "中考英语课程包" },
   { key: "test",     label: "每日一测", icon: "✅", mode: "test" },
 ];
 export interface DailyFlowState {
-  version: 2;
+  // v3(2026-08-18): 五阶段教学闭环(毕业冲刺/难点回炉/复习/新词/语境/测验),
+  // 与 v2 的四阶段顺序不兼容,版本不符即从初始态开始。
+  version: 3;
   /** 当前阶段下标（进入 DAILY_FLOW_PHASES）。 */
   phaseIndex: number;
   /** 当前阶段在之前的页面会话中已累计的有效学习时长（毫秒）。 */
@@ -48,7 +55,7 @@ export function dailyFlowStorageKey(date: Date = new Date()): string {
 }
 export function createDailyFlowState(): DailyFlowState {
   return {
-    version: 2,
+    version: 3,
     phaseIndex: 0,
     phaseElapsedMs: 0,
     done: false,
@@ -68,8 +75,8 @@ export function loadDailyFlow(): DailyFlowState {
       return createDailyFlowState();
     }
     const parsed = JSON.parse(raw) as Partial<DailyFlowState> | null;
-    // v1（计时制）与 v2 结构不兼容，直接重新开始——当日进度损失可接受。
-    if (!parsed || parsed.version !== 2 || typeof parsed.phaseIndex !== "number") {
+    // v1/v2 与 v3(五阶段闭环)结构不兼容,直接重新开始——当日进度损失可接受。
+    if (!parsed || parsed.version !== 3 || typeof parsed.phaseIndex !== "number") {
       return createDailyFlowState();
     }
     const phaseIndex = Math.min(
@@ -79,7 +86,7 @@ export function loadDailyFlow(): DailyFlowState {
     const durations = Array.isArray(parsed.phaseDurationsMs) ? parsed.phaseDurationsMs : [];
     const counts = Array.isArray(parsed.phaseCounts) ? parsed.phaseCounts : [];
     return {
-      version: 2,
+      version: 3,
       phaseIndex,
       phaseElapsedMs: typeof parsed.phaseElapsedMs === "number" ? Math.max(0, parsed.phaseElapsedMs) : 0,
       done: parsed.done === true,

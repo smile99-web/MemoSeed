@@ -10,7 +10,7 @@ import { getAccessToken } from "@/lib/auth";
 import { useRouter, usePathname } from "next/navigation";
 import { addCourseCompletion } from "@/lib/course-progress";
 import { Course, listCoursePackages, listCourses } from "@/lib/courses";
-import { generateDynamicSentence, generateLearningEncouragement, getWordTranslations, LearningItem, listDailyFlowNewWords, listDailyFlowSentences, listDailyTestItems, listDueReviewItems, listHandwritingItems, listLearningItems, listSpeakItems, logReadAloudEvent, logWordMistake, logWordReview, translateLearningText, checkHandwriting, type HandwritingTaskType } from "@/lib/learning";
+import { generateDynamicSentence, generateLearningEncouragement, getWordTranslations, LearningItem, listDailyFlowNewWords, listDailyFlowReteach, listDailyFlowSentences, listDailyFlowSprint, listDailyTestItems, listDueReviewItems, listHandwritingItems, listLearningItems, listSpeakItems, logReadAloudEvent, logWordMistake, logWordReview, translateLearningText, checkHandwriting, type HandwritingTaskType } from "@/lib/learning";
 import { fetchWithAuth, parseApiError } from "@/lib/api";
 import { getApiBaseUrl } from "@/lib/api-base-url";
 import { isSightWord } from "@/lib/sight-words";
@@ -162,7 +162,7 @@ function isCorrectChoiceAnswer(choice: string, answer: string | null | undefined
 // 今日流程的计数 key：词阶段（复习/新词）按归一化单词去重——同一词的听/说/
 // 读/写多关只计 1 次；句阶段按句子 item id 去重；测阶段不计数（以成绩单完成为准）。
 function dailyFlowItemCountKey(phaseKey: DailyFlowPhase["key"], item: LearningItem): string | null {
-  if (phaseKey === "review" || phaseKey === "learn") {
+  if (phaseKey === "review" || phaseKey === "learn" || phaseKey === "sprint" || phaseKey === "reteach") {
     if (item.item_type !== "word") {
       return null;
     }
@@ -2540,9 +2540,15 @@ function StudyContent() {
           ? DAILY_FLOW_PHASES[dailyFlowRef.current.phaseIndex]
           : null;
         if (flowPhase?.key === "learn") {
-          mergedItems = await listDailyFlowNewWords(accessToken, flowPhase.quota ?? 20);
+          mergedItems = await listDailyFlowNewWords(accessToken, flowPhase.quota ?? 8);
         } else if (flowPhase?.key === "sentence") {
           mergedItems = await listDailyFlowSentences(accessToken, flowPhase.quota ?? 30);
+        } else if (flowPhase?.key === "sprint") {
+          // 三期改造·毕业冲刺: 只差最后一维的词,每词一张对准缺维的卡。
+          mergedItems = await listDailyFlowSprint(accessToken, flowPhase.quota ?? 10);
+        } else if (flowPhase?.key === "reteach") {
+          // 三期改造·昨日回炉: 昨天真失败的词,先识别重建再考弱维。
+          mergedItems = await listDailyFlowReteach(accessToken, flowPhase.quota ?? 8);
         } else if (studyMode === "test") {
           // 每日一测: 今天学过的词优先，其次到期复习、最弱的已学词，共 20 个词。
           // 每词连续三关：听音选中文 → 看英文选中文 → 手写英文（听写），
@@ -2702,7 +2708,13 @@ function StudyContent() {
             : 0;
         setItems(mergedItems);
         setCurrentIndex(safeIndex);
-        if (flowPhase?.key === "learn") {
+        if (flowPhase?.key === "sprint") {
+          const sprintCount = new Set(mergedItems.map((item) => normalizeEnglishKey(item.english_text || "")).filter(Boolean)).size;
+          setFeedback(mergedItems.length > 0 ? `毕业冲刺：${sprintCount} 个词就差最后一关，过了就毕业！` : "今天没有待冲刺的词，继续加油！");
+        } else if (flowPhase?.key === "reteach") {
+          const reteachCount = new Set(mergedItems.map((item) => normalizeEnglishKey(item.english_text || "")).filter(Boolean)).size;
+          setFeedback(mergedItems.length > 0 ? `昨天有 ${reteachCount} 个词没过关，我们先热热身再考一次！` : "昨天没有需要回炉的词，太棒了！");
+        } else if (flowPhase?.key === "learn") {
           const flowWordCount = new Set(mergedItems.map((item) => normalizeEnglishKey(item.english_text || "")).filter(Boolean)).size;
           setFeedback(mergedItems.length > 0 ? `今天学 ${flowWordCount} 个新单词，每个词四关：听一听、读一读、选一选、写一写！` : "中考课程包的新词都学完啦！");
         } else if (flowPhase?.key === "sentence") {

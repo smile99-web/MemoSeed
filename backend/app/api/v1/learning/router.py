@@ -3090,6 +3090,249 @@ def list_daily_flow_sentences(
     return result
 
 
+
+
+# ── 三期改造(2026-08-18): 每日流程新阶段 ─────────────────────────────
+# 毕业冲刺: 五维中四维已毕业、只差一维今天验证的词——一张对准缺维的卡,
+# 通过即五维毕业(判 mastered)。每天最先做,孩子一开场就能"收割"。
+DAILY_FLOW_SPRINT_LIMIT = 10
+# 昨日回炉: 昨天真测试失败的词,先识别重建(低成本热身)再考弱维。
+DAILY_FLOW_RETEACH_LIMIT = 8
+
+_DIM_CARD_TYPE = {
+    "listen": "listen_choose_chinese",
+    "meaning": "english_to_chinese",
+    "speak": "voice_practice",
+    "spell": "handwriting_dictation",
+}
+_DIM_LABEL = {"listen": "听音", "meaning": "释义", "speak": "跟读", "spell": "拼写", "use": "用词"}
+
+
+def _missing_dimensions(word_state: WordMemoryState, today_local) -> list[str]:
+    """今天仍缺验证的维度(已毕业或今天已过的维度不在其列)。"""
+    missing: list[str] = []
+    if (word_state.dim_listen_days or 0) < 2 and word_state.dim_listen_last_date != today_local:
+        missing.append("listen")
+    if (word_state.dim_meaning_days or 0) < 2 and word_state.dim_meaning_last_date != today_local:
+        missing.append("meaning")
+    if not word_state.dim_speak_passed:
+        missing.append("speak")
+    if (word_state.dim_spell_days or 0) < 2 and word_state.dim_spell_last_date != today_local:
+        missing.append("spell")
+    if (word_state.dim_use_days or 0) < 2 and word_state.dim_use_last_date != today_local:
+        missing.append("use")
+    return missing
+
+
+@router.get("/daily-flow/graduation-sprint", response_model=list[LearningItemRead])
+def list_daily_flow_graduation_sprint(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: int = DAILY_FLOW_SPRINT_LIMIT,
+) -> list[LearningItemRead]:
+    """毕业冲刺: 只差最后一维的词,每词一张对准缺维的卡(通过即毕业)。"""
+    capped_limit = max(1, min(limit, 20))
+    now = datetime.now(UTC)
+    today_local = now.astimezone(LOCAL_TIMEZONE).date()
+    word_states = db.scalars(
+        select(WordMemoryState).where(WordMemoryState.user_id == current_user.id)
+    ).all()
+    sprint_words: list[tuple[WordMemoryState, str]] = []
+    for ws in word_states:
+        if (ws.status or "") in ("mastered", "near_mastered"):
+            continue
+        if not ws.word or ws.word in SIGHT_WORDS:
+            continue
+        if (ws.memory_strength or 0) < 0.3:
+            continue  # 太弱的词先走常规教学链,冲刺是给"临门一脚"的词
+        missing = _missing_dimensions(ws, today_local)
+        if len(missing) == 1:
+            sprint_words.append((ws, missing[0]))
+    if not sprint_words:
+        return []
+    # 最弱的排最前(冲刺收益最大)
+    sprint_words.sort(key=lambda row: row[0].memory_strength or 0.0)
+    sprint_words = sprint_words[:capped_limit]
+
+    stored_settings = get_private_model_settings(db, current_user.id)
+    choice_settings = build_llm_translation_settings(None, None, None, None, stored_settings)
+    words = [ws.word for ws, _dim in sprint_words]
+    translations = ensure_word_translations(db, current_user.id, words, choice_settings)
+    db.commit()  # 持久化翻译缓存(与其它 GET 队列同款修复)
+
+    items: list[LearningItemRead] = []
+    for ws, dim in sprint_words:
+        probe = LearningItem(
+            user_id=current_user.id,
+            course_id=None,
+            item_type="word",
+            english_text=ws.word,
+            chinese_text=translations.get(ws.word, "") or "",
+        )
+        card_type = _DIM_CARD_TYPE.get(dim)
+        if dim == "use":
+            # 用词维:从课程包里找一句含该词的句子做完形;找不到退化为手写。
+            sentence_item = db.scalar(
+                select(LearningItem).where(
+                    LearningItem.user_id == current_user.id,
+                    LearningItem.item_type == "sentence",
+                    func.lower(LearningItem.english_text).contains(ws.word),
+                ).limit(1)
+            )
+            if sentence_item is not None:
+                items.append(
+                    LearningItemRead(
+                        id=uuid4(),
+                        source_item_id=sentence_item.id,
+                        user_id=current_user.id,
+                        course_id=sentence_item.course_id,
+                        item_type="sentence",
+                        english_text=sentence_item.english_text,
+                        chinese_text=sentence_item.chinese_text or "",
+                        difficulty_level=sentence_item.difficulty_level,
+                        source="毕业冲刺·用词",
+                        review_task_type="cloze_sentence",
+                        focus_words=[ws.word],
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                continue
+            card_type = "handwriting_dictation"
+        choices: list[str] = []
+        correct_answer: str | None = None
+        if card_type in ("listen_choose_chinese", "english_to_chinese"):
+            choices, correct_answer = _enrich_choices_for_word(db, current_user.id, ws.word, probe, choice_settings)
+            if not choices or not correct_answer:
+                continue
+        items.append(
+            LearningItemRead(
+                id=uuid4(),
+                source_item_id=ws.learning_item_id,
+                user_id=current_user.id,
+                course_id=None,
+                item_type="word",
+                english_text=ws.word,
+                chinese_text=translations.get(ws.word, "") or "",
+                difficulty_level=3,
+                source=f"毕业冲刺·{_DIM_LABEL.get(dim, '')}",
+                review_task_type=card_type,
+                review_choices=choices,
+                review_answer=correct_answer or (ws.word if card_type == "voice_practice" else None),
+                review_prompt="🎤 跟我读一遍" if card_type == "voice_practice" else None,
+                focus_words=[ws.word],
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    return items
+
+
+@router.get("/daily-flow/reteach", response_model=list[LearningItemRead])
+def list_daily_flow_reteach(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: int = DAILY_FLOW_RETEACH_LIMIT,
+) -> list[LearningItemRead]:
+    """昨日回炉: 昨天真测试失败的词,先低成本识别重建,再考最近失败的维度。"""
+    capped_limit = max(1, min(limit, 16))
+    now = datetime.now(UTC)
+    today_start = now.astimezone(LOCAL_TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_start_utc = (today_start - timedelta(days=1)).astimezone(UTC)
+    today_start_utc = today_start.astimezone(UTC)
+    # 昨天真测试(非辅助模式)失败的单词
+    failed_rows = db.execute(
+        select(LearningItem.english_text)
+        .join(ReviewLog, ReviewLog.learning_item_id == LearningItem.id)
+        .where(
+            ReviewLog.user_id == current_user.id,
+            ReviewLog.is_correct.is_(False),
+            ReviewLog.reviewed_at >= yesterday_start_utc,
+            ReviewLog.reviewed_at < today_start_utc,
+            ReviewLog.review_mode.notin_(sorted(ASSISTED_REVIEW_MODES)),
+            LearningItem.item_type == "word",
+        )
+        .group_by(LearningItem.english_text)
+    ).all()
+    failed_words = {normalize_word(text or "") for _text in failed_rows for text in [_text] if normalize_word(text or "")}
+    failed_words.discard("")
+    if not failed_words:
+        return []
+    word_states = db.scalars(
+        select(WordMemoryState).where(
+            WordMemoryState.user_id == current_user.id,
+            WordMemoryState.word.in_(list(failed_words)),
+        )
+    ).all()
+    # 最弱的排最前;视觉词不进回炉(退休口径全局一致)
+    candidates = [ws for ws in word_states if ws.word and ws.word not in SIGHT_WORDS]
+    candidates.sort(key=lambda ws: ws.memory_strength or 0.0)
+    candidates = candidates[:capped_limit]
+    if not candidates:
+        return []
+    stored_settings = get_private_model_settings(db, current_user.id)
+    choice_settings = build_llm_translation_settings(None, None, None, None, stored_settings)
+    translations = ensure_word_translations(db, current_user.id, [ws.word for ws in candidates], choice_settings)
+    db.commit()
+
+    items: list[LearningItemRead] = []
+    for ws in candidates:
+        probe = LearningItem(
+            user_id=current_user.id,
+            course_id=None,
+            item_type="word",
+            english_text=ws.word,
+            chinese_text=translations.get(ws.word, "") or "",
+        )
+        choices, correct_answer = _enrich_choices_for_word(db, current_user.id, ws.word, probe, choice_settings)
+        if not choices or not correct_answer:
+            continue
+        weak_dim = ws.dim_last_failed if ws.dim_last_failed in _DIM_CARD_TYPE else "meaning"
+        # 第一张:识别重建(低成本热身,先赢一次);第二张:弱维验证。
+        items.append(
+            LearningItemRead(
+                id=uuid4(),
+                source_item_id=ws.learning_item_id,
+                user_id=current_user.id,
+                course_id=None,
+                item_type="word",
+                english_text=ws.word,
+                chinese_text=correct_answer,
+                difficulty_level=3,
+                source="昨日回炉·热身",
+                review_task_type="listen_choose_chinese",
+                review_prompt="听英文发音，选择正确的中文意思",
+                review_choices=choices,
+                review_answer=correct_answer,
+                focus_words=[ws.word],
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        verify_type = _DIM_CARD_TYPE[weak_dim]
+        items.append(
+            LearningItemRead(
+                id=uuid4(),
+                source_item_id=ws.learning_item_id,
+                user_id=current_user.id,
+                course_id=None,
+                item_type="word",
+                english_text=ws.word,
+                chinese_text=correct_answer,
+                difficulty_level=3,
+                source="昨日回炉·验证",
+                review_task_type=verify_type,
+                review_prompt="🎤 跟我读一遍" if verify_type == "voice_practice" else None,
+                review_choices=choices if verify_type in ("listen_choose_chinese", "english_to_chinese") else [],
+                review_answer=correct_answer if verify_type in ("listen_choose_chinese", "english_to_chinese") else (ws.word if verify_type == "voice_practice" else None),
+                focus_words=[ws.word],
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    return items
+
+
 @router.post("/handwriting-check", response_model=HandwritingCheckResponse)
 async def check_handwriting(
     payload: HandwritingCheckRequest,
