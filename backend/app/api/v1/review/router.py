@@ -16,10 +16,7 @@ from app.services.memory_scheduler import (
     calculate_current_forget_risk,
     calculate_review_priority,
     exceeded_daily_review_filter_clause,
-    park_cliff_words,
-    park_leech_words,
-    park_mastered_words,
-    park_stuck_words,
+    run_park_suite,
     schedule_memory_review,
     stuck_word_daily_cap_filter_clause,
 )
@@ -34,12 +31,10 @@ def get_review_queue(
 ) -> list[MemoryStateRead]:
     now = datetime.now(UTC)
     # Park plateaued words (R1), mastered words (A), and stuck words (C)
-    # before fetching the queue. 漏词熔断最先执行(与其它入口一致):
-    # 否则短周期 park 会先抢走同时满足条件的漏词。
-    park_leech_words(db, current_user.id, now)
-    park_mastered_words(db, current_user.id, now)
-    park_stuck_words(db, current_user.id, now)
-    park_cliff_words(db, current_user.id, now)
+    # before fetching the queue. run_park_suite keeps the required order
+    # (leech breaker first) and throttles the suite to once per user per
+    # few minutes instead of running 5 bulk UPDATEs on every fetch.
+    run_park_suite(db, current_user.id, now)
     # Today (Asia/Shanghai) — the daily cap uses local-day boundaries so a
     # late-night session doesn't double-count against the next-day morning.
     today_start = (now + timedelta(hours=8)).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=8)

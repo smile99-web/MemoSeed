@@ -30,6 +30,19 @@ if _BACKEND_ROOT not in sys.path:
     sys.path.insert(0, _BACKEND_ROOT)
 
 
+@pytest.fixture(autouse=True)
+def _clear_park_suite_throttle():
+    """Reset the run_park_suite per-user throttle between tests.
+
+    The throttle is process-global (single-worker deploy); without a reset,
+    one test's suite run would suppress the next test's parking behaviour.
+    """
+    from app.services.memory_scheduler import _PARK_SUITE_LAST_RUN
+    _PARK_SUITE_LAST_RUN.clear()
+    yield
+    _PARK_SUITE_LAST_RUN.clear()
+
+
 @pytest.fixture
 def mock_db():
     """A MagicMock DB session. Tests configure `.scalar(...)` per-call."""

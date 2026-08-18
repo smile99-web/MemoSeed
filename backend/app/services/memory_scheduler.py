@@ -696,6 +696,38 @@ def park_chronic_failure_words(db: Session, user_id: UUID, now: datetime | None 
     return int(result.rowcount or 0)
 
 
+# --- Park-suite throttle -------------------------------------------------------
+# The full park suite (leech/mastered/stuck/cliff/chronic) is 5 bulk UPDATEs
+# plus commits per call, and every queue-building endpoint used to invoke the
+# whole suite on EVERY request — a page-refresh-heavy session drove it several
+# times a minute for the same user. The parks are idempotent and their triggers
+# are hour/day-scale, so re-running within a few minutes cannot change the
+# outcome. Run at most once per user per interval; single-process in-memory is
+# right for the single-worker deploy (a restart simply re-runs it, harmless).
+_PARK_SUITE_LAST_RUN: dict[UUID, datetime] = {}
+PARK_SUITE_MIN_INTERVAL_SECONDS = 300
+
+
+def run_park_suite(db: Session, user_id: UUID, now: datetime | None = None, *, min_interval_seconds: int = PARK_SUITE_MIN_INTERVAL_SECONDS) -> bool:
+    """Run the full park suite, throttled to once per user per interval.
+
+    Returns True when the suite actually ran this call. Order matters:
+    park_leech_words must run first (see its docstring for the 2026-08-07
+    review of the short-cycle-steals-leech-words failure mode).
+    """
+    now = now or datetime.now(UTC)
+    last_run = _PARK_SUITE_LAST_RUN.get(user_id)
+    if last_run is not None and 0 <= (now - last_run).total_seconds() < min_interval_seconds:
+        return False
+    park_leech_words(db, user_id, now)
+    park_mastered_words(db, user_id, now)
+    park_stuck_words(db, user_id, now)
+    park_cliff_words(db, user_id, now)
+    park_chronic_failure_words(db, user_id, now)
+    _PARK_SUITE_LAST_RUN[user_id] = now
+    return True
+
+
 # --- 悠悠球漏词熔断 (2026-08-07) ---------------------------------------------
 # park_stuck_words 要求 strength < 0.3、park_chronic_failure_words 要求
 # 连续错 >= 3 —— 两者都只看"当前状态"。悠悠球式漏词(学会→遗忘→重学→再忘)

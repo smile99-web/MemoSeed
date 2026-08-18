@@ -409,12 +409,21 @@ def build_study_time_summary(db: Session, user_id: UUID) -> StudyTimeSummary:
         start_utc = start_local.astimezone(UTC) if start_local is not None else datetime(2000, 1, 1, tzinfo=UTC)
         return _active_study_seconds(db, user_id, start_utc, now_utc)
 
+    # Heartbeats older than 400 days are rolled up into a cumulative offset
+    # by scripts/cleanup_old_data.py (bounded table growth). Only the
+    # all-time total needs it — every window above is < 400 days of raw rows.
+    try:
+        settings_row = db.scalar(select(UserModelSettings).where(UserModelSettings.user_id == user_id))
+        total_offset = int((settings_row.settings or {}).get("studyTimeTotalOffsetSeconds") or 0) if settings_row is not None else 0
+    except ProgrammingError:
+        total_offset = 0
+
     return StudyTimeSummary(
         today_seconds=active_since(today_start),
         week_seconds=active_since(week_start),
         month_seconds=active_since(month_start),
         year_seconds=active_since(year_start),
-        total_seconds=active_since(None),
+        total_seconds=active_since(None) + total_offset,
     )
 
 
@@ -1060,16 +1069,11 @@ def build_today_plan(db: Session, user_id: UUID) -> dict[str, object]:
     # apply. Without this, build_today_plan's due_count would be 100+
     # words higher than the real queue, showing a misleading number on
     # the dashboard.
-    from app.services.memory_scheduler import park_chronic_failure_words, park_leech_words, park_mastered_words, park_stuck_words, park_cliff_words
-    # 漏词熔断最先执行,与 /review-items 保持一致(否则短周期 park 会先
-    # 抢走同时满足条件的漏词,计划页 due_count 与真实队列持续不符)。
-    park_leech_words(db, user_id, now_utc)
-    park_mastered_words(db, user_id, now_utc)
-    park_stuck_words(db, user_id, now_utc)
-    park_cliff_words(db, user_id, now_utc)
-    # 2026-08-16: chronic-failure park 也要执行 —— /review-items 会停
-    # (lapse>=40 且连败>=3) 的词,少了这步计划页 due_count 持续虚高。
-    park_chronic_failure_words(db, user_id, now_utc)
+    from app.services.memory_scheduler import run_park_suite
+    # run_park_suite keeps the required order (leech breaker first, chronic
+    # included) and throttles the suite to once per user per few minutes —
+    # the plan page used to run 5 bulk UPDATEs + commits on every view.
+    run_park_suite(db, user_id, now_utc)
 
     due_count = db.scalar(
         select(func.count(MemoryState.id))

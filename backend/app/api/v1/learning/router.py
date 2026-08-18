@@ -71,11 +71,8 @@ from app.services.memory_scheduler import (
     calculate_review_priority,
     exceeded_daily_review_filter_clause,
     is_leech_word,
-    park_chronic_failure_words,
-    park_cliff_words,
     park_leech_words,
-    park_mastered_words,
-    park_stuck_words,
+    run_park_suite,
     schedule_memory_review,
     smooth_overdue_backlog,
     stuck_word_daily_cap_filter_clause,
@@ -1058,16 +1055,11 @@ def list_due_review_items(
 
     stored_settings = get_private_model_settings(db, current_user.id)
     # Park plateaued (R1), mastered (A), and stuck (C) words before
-    # building the due queue.
-    # 悠悠球漏词熔断必须最先执行(2026-08-07 复核): lapse>=30 到期即推 30 天。
-    # 若 stuck/cliff/chronic 先跑,同时满足条件的漏词会被先推 +7/14 天短周期,
-    # 熔断的 next_review_at<=now 触发条件就匹配不到它们,最差的漏词反而
-    # 以 7 天周期空转。
-    park_leech_words(db, current_user.id, now)
-    park_mastered_words(db, current_user.id, now)
-    park_stuck_words(db, current_user.id, now)
-    park_cliff_words(db, current_user.id, now)
-    park_chronic_failure_words(db, current_user.id, now)
+    # building the due queue. run_park_suite keeps the required order
+    # (leech breaker first) and throttles the whole suite to once per user
+    # per few minutes — it used to run 5 bulk UPDATEs + commits on EVERY
+    # queue fetch.
+    run_park_suite(db, current_user.id, now)
     # P2: spread any oversized overdue backlog across the next few days, then
     # apply the daily review budget (distinct items already served today).
     # Without this, 280+ due items made "priority order" meaningless and the

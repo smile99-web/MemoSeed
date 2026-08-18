@@ -10,10 +10,21 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VPS_HOST="8.148.221.17"
+# 2026-08-18: the target host is NO LONGER hardcoded. This script rsyncs with
+# --delete, and the baked-in address was the DECOMMISSIONED VPS — running it
+# by habit would push stale code to the wrong server (or worse). Export the
+# intended host explicitly every time:
+#   MEMOSEED_VPS_HOST=198.23.236.185 ./sync.sh backend
+VPS_HOST="${MEMOSEED_VPS_HOST:-}"
 VPS_USER="root"
 VPS_PATH="/opt/MemoSeed"
 SSH_KEY="${MEMOSEED_SSH_KEY:-${SCRIPT_DIR}/.vps_key}"
+
+if [ -z "${VPS_HOST}" ]; then
+  echo "ERROR: MEMOSEED_VPS_HOST is not set. Refusing to guess the deploy target." >&2
+  echo "Usage: MEMOSEED_VPS_HOST=<server-ip> $0 [backend|frontend|full]" >&2
+  exit 1
+fi
 
 SSH_CMD="ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=10"
 RSYNC_RSH="ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=10"
