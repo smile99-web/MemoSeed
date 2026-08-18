@@ -110,7 +110,9 @@ from app.services.speak_practice import (
 from app.services.speech_asset_cache import build_learning_speech_targets, ensure_volcengine_speech_asset, precache_learning_speech_assets
 from app.services.tts_cache import build_cache_key, is_audio_cached
 from app.services.word_memory import (
+    DIM_GRADUATION_DAYS,
     TASK_TYPE_LABELS,
+    _update_dimension_progress,
     build_task_choices,
     build_task_prompt,
     choose_task_sequence,
@@ -3111,15 +3113,15 @@ _DIM_LABEL = {"listen": "听音", "meaning": "释义", "speak": "跟读", "spell
 def _missing_dimensions(word_state: WordMemoryState, today_local) -> list[str]:
     """今天仍缺验证的维度(已毕业或今天已过的维度不在其列)。"""
     missing: list[str] = []
-    if (word_state.dim_listen_days or 0) < 2 and word_state.dim_listen_last_date != today_local:
+    if (word_state.dim_listen_days or 0) < DIM_GRADUATION_DAYS and word_state.dim_listen_last_date != today_local:
         missing.append("listen")
-    if (word_state.dim_meaning_days or 0) < 2 and word_state.dim_meaning_last_date != today_local:
+    if (word_state.dim_meaning_days or 0) < DIM_GRADUATION_DAYS and word_state.dim_meaning_last_date != today_local:
         missing.append("meaning")
     if not word_state.dim_speak_passed:
         missing.append("speak")
-    if (word_state.dim_spell_days or 0) < 2 and word_state.dim_spell_last_date != today_local:
+    if (word_state.dim_spell_days or 0) < DIM_GRADUATION_DAYS and word_state.dim_spell_last_date != today_local:
         missing.append("spell")
-    if (word_state.dim_use_days or 0) < 2 and word_state.dim_use_last_date != today_local:
+    if (word_state.dim_use_days or 0) < DIM_GRADUATION_DAYS and word_state.dim_use_last_date != today_local:
         missing.append("use")
     return missing
 
@@ -3172,12 +3174,18 @@ def list_daily_flow_graduation_sprint(
         card_type = _DIM_CARD_TYPE.get(dim)
         if dim == "use":
             # 用词维:从课程包里找一句含该词的句子做完形;找不到退化为手写。
-            sentence_item = db.scalar(
+            # 2026-08-18 回归修复: SQL contains 是子串匹配——"art" 会命中
+            # "start"。拉候选句后在 Python 侧按分词精确匹配。
+            sentence_rows = db.scalars(
                 select(LearningItem).where(
                     LearningItem.user_id == current_user.id,
                     LearningItem.item_type == "sentence",
-                    func.lower(LearningItem.english_text).contains(ws.word),
-                ).limit(1)
+                    func.lower(LearningItem.english_text).contains(ws.word[:4] if len(ws.word) > 4 else ws.word),
+                ).limit(20)
+            ).all()
+            sentence_item = next(
+                (row for row in sentence_rows if ws.word in tokenize_words(row.english_text or "")),
+                None,
             )
             if sentence_item is not None:
                 items.append(
@@ -3727,6 +3735,11 @@ def create_word_review(
                 # 条解冻通道：连错 -1（不清零，真困难词的熔断信号要保留），
                 # 并按现有门槛重算状态。
                 word_state.context_correct_count += 1
+                # 二期配套修复(2026-08-18 回归发现): word-context 是"用"
+                # 维度(句中用词)的唯一供给源,assisted 门控让它绕过了
+                # sync_word_memory_from_review,五维的 dim_use_days 永远不
+                # 增长、五维毕业永远不可达。在此直接更新维度进度。
+                _update_dimension_progress(word_state, review_mode, True, now_utc)
                 word_state.consecutive_error_count = max(0, (word_state.consecutive_error_count or 0) - 1)
                 if (word_state.memory_strength or 0) >= 0.5:
                     stats = get_recent_word_test_stats(db, current_user.id, word_state.learning_item_id)

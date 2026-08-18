@@ -303,7 +303,9 @@ def _increment_minute_stat(db: Session, event: LearningEvent) -> None:
         stat.sentence_events = (stat.sentence_events or 0) + 1
     if event.is_correct:
         stat.correct_events = (stat.correct_events or 0) + 1
-    else:
+    elif event.is_correct is False:
+        # is_correct=None 的是手滑(slip)等中性遥测——既不算对也不算错,
+        # 否则分钟级正确率被无意义地拉低(2026-08-18 一期配套)。
         stat.incorrect_events = (stat.incorrect_events or 0) + 1
     # NOTE: do NOT accumulate event.duration_ms into study_duration_ms.
     # event.duration_ms is a wall-clock span (Date.now() - startedAt on the
