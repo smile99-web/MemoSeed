@@ -37,7 +37,10 @@ def get_review_queue(
     run_park_suite(db, current_user.id, now)
     # Today (Asia/Shanghai) — the daily cap uses local-day boundaries so a
     # late-night session doesn't double-count against the next-day morning.
-    today_start = (now + timedelta(hours=8)).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=8)
+    # Use LOCAL_TIMEZONE (not a hardcoded +8h offset) — same fix pattern as
+    # /learning/review-items.
+    from app.services.memory_scheduler import LOCAL_TIMEZONE
+    today_start = now.astimezone(LOCAL_TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
     memory_states = list(
         db.scalars(
             select(MemoryState)

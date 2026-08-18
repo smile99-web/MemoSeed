@@ -107,6 +107,16 @@ def ensure_lightweight_schema_upgrades() -> None:
                     ON learning_minute_stats (user_id, stat_date, stat_hour, stat_minute);
             END IF;
         END $$;""",
+        # 2026-08-18: the hottest read pattern on review_logs is
+        # "WHERE user_id = ? AND reviewed_at >= ?" (today counts, 7-day
+        # stats, daily caps). Only single-column indexes existed, so every
+        # one of those queries scanned the whole user slice.
+        "CREATE INDEX IF NOT EXISTS ix_review_logs_user_reviewed_at ON review_logs (user_id, reviewed_at)",
+        # Open-mistake lookups (dashboard, queues) filter user_id + is_resolved.
+        "CREATE INDEX IF NOT EXISTS ix_mistake_logs_user_resolved ON mistake_logs (user_id, is_resolved)",
+        # Duplicate index from two naming eras (idx_/ix_) — one B-tree less
+        # to maintain on every review insert.
+        "DROP INDEX IF EXISTS ix_review_logs_scheduler_type",
     ]
     # Each statement in its own transaction: one failure (e.g. table missing
     # on a fresh install) must not block the remaining upgrades or startup.
