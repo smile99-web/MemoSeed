@@ -240,7 +240,7 @@ class TestDialoguePayloadVoices:
         from app.services import listening_stories
 
         synthesized: list[tuple[str, str]] = []
-        monkeypatch.setattr(listening_stories, "get_cached_audio", lambda *a, **k: None)
+        monkeypatch.setattr(listening_stories, "is_audio_cached", lambda *a, **k: False)
 
         def fake_synthesize(text, settings):
             synthesized.append((text, settings.voice))

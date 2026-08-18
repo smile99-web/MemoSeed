@@ -41,7 +41,7 @@ from app.services.speech_asset_cache import SpeechTarget, build_volcengine_tts_s
 from app.services.tts_cache import (
     build_cache_key,
     get_cache_url,
-    get_cached_audio,
+    is_audio_cached,
     resolve_cached_file,
 )
 from app.utils import string_setting, tokenize_words
@@ -81,7 +81,7 @@ def synthesize_cosyvoice_speech_endpoint(
 
     tts_settings = CosyVoiceTtsSettings(base_url=base_url, speaker=speaker)
 
-    cache_hit = get_cached_audio(payload.text, speaker, 0, suffix=COSYVOICE_AUDIO_SUFFIX) is not None
+    cache_hit = is_audio_cached(payload.text, speaker, 0, suffix=COSYVOICE_AUDIO_SUFFIX)
     try:
         audio = synthesize_cosyvoice_speech(payload.text, tts_settings)
     except ValueError as exc:
@@ -200,7 +200,7 @@ def synthesize_speech(
         speech_rate=speech_rate,
     )
 
-    cache_hit = get_cached_audio(payload.text, voice, speech_rate, suffix=AUDIO_SUFFIX) is not None
+    cache_hit = is_audio_cached(payload.text, voice, speech_rate, suffix=AUDIO_SUFFIX)
 
     try:
         audio = synthesize_volcengine_speech(payload.text, tts_settings)
@@ -257,8 +257,8 @@ def prefetch_course_audio(
     voice = payload.voice or select_default_voice(payload.language, stored_settings)
 
     for word in sorted(unique_words):
-        cached = get_cached_audio(word, voice, speech_rate, suffix=AUDIO_SUFFIX)
-        if cached is not None:
+        cached = is_audio_cached(word, voice, speech_rate, suffix=AUDIO_SUFFIX)
+        if cached:
             cache_hits += 1
         else:
             cache_misses += 1
@@ -275,7 +275,7 @@ def prefetch_course_audio(
                 synthesize_volcengine_speech(word, tts_settings)
             except Exception:
                 logger.warning("Failed to prefetch audio for word: %s", word)
-        _record_speech_asset(db, current_user.id, course_uuid, word, payload.language, voice, speech_rate, get_cached_audio(word, voice, speech_rate, suffix=AUDIO_SUFFIX) is not None)
+        _record_speech_asset(db, current_user.id, course_uuid, word, payload.language, voice, speech_rate, is_audio_cached(word, voice, speech_rate, suffix=AUDIO_SUFFIX))
         words_map[word] = get_cache_url(word, voice, speech_rate, suffix=AUDIO_SUFFIX)
 
     return PrefetchCourseAudioResponse(
@@ -295,8 +295,7 @@ def ensure_cached_audio(
     speech_rate = payload.speech_rate
     suffix = payload.suffix
 
-    cached = get_cached_audio(payload.text, voice, speech_rate, suffix=suffix)
-    if cached is not None:
+    if is_audio_cached(payload.text, voice, speech_rate, suffix=suffix):
         return {"cached": True, "url": get_cache_url(payload.text, voice, speech_rate, suffix=suffix)}
 
     return {"cached": False, "url": get_cache_url(payload.text, voice, speech_rate, suffix=suffix)}
@@ -341,8 +340,7 @@ def generate_phonics_deck_audio(
     errors = 0
 
     for phoneme_key, synth_text in synth_map.items():
-        cached = get_cached_audio(synth_text, voice, speech_rate, suffix=AUDIO_SUFFIX)
-        if cached is not None:
+        if is_audio_cached(synth_text, voice, speech_rate, suffix=AUDIO_SUFFIX):
             cached_count += 1
             continue
 

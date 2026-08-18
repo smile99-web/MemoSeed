@@ -48,6 +48,7 @@ from sqlalchemy import delete, select  # noqa: E402
 
 from app.db.session import SessionLocal  # noqa: E402
 from app.models.study_time_log import StudyTimeLog  # noqa: E402
+from app.models.tts_usage_log import TtsUsageLog  # noqa: E402
 from app.models.user_model_settings import UserModelSettings  # noqa: E402
 from app.models.word_review_task import WordReviewTask  # noqa: E402
 from app.services.learning_replay import _active_study_seconds  # noqa: E402
@@ -56,6 +57,10 @@ from app.services.tts_cache import _get_cache_dir  # noqa: E402
 logger = logging.getLogger("cleanup_old_data")
 
 TASK_RETENTION_DAYS = 30
+# tts_usage_logs is the database's LARGEST table (pure billing-style
+# telemetry: one row per TTS call). Nothing reads rows older than a billing
+# window — keep 60 days.
+TTS_USAGE_RETENTION_DAYS = 60
 # 400 days, not 90: the dashboard's longest window is 本年 (365d) and every
 # window must stay fully inside the raw-row range to remain exact. Only the
 # all-time 累计学习时长 reads the rollup offset, so rows older than any
@@ -86,6 +91,20 @@ def cleanup_word_review_tasks(dry_run: bool) -> int:
             logger.info("[dry-run] word_review_tasks: old finished tasks %s", "present" if count else "none")
             return 0
         result = db.execute(stmt)
+        db.commit()
+        return int(result.rowcount or 0)
+
+
+def cleanup_tts_usage_logs(dry_run: bool) -> int:
+    cutoff = datetime.now(UTC) - timedelta(days=TTS_USAGE_RETENTION_DAYS)
+    with SessionLocal() as db:
+        if dry_run:
+            count = db.scalar(
+                select(TtsUsageLog.id).where(TtsUsageLog.created_at < cutoff).limit(1)
+            )
+            logger.info("[dry-run] tts_usage_logs: rows older than %s %s", cutoff.date(), "present" if count else "none")
+            return 0
+        result = db.execute(delete(TtsUsageLog).where(TtsUsageLog.created_at < cutoff))
         db.commit()
         return int(result.rowcount or 0)
 
@@ -197,13 +216,15 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
     tasks_deleted = cleanup_word_review_tasks(args.dry_run)
+    tts_logs_deleted = cleanup_tts_usage_logs(args.dry_run)
     users_rolled, heartbeats_deleted = cleanup_study_time_logs(args.dry_run)
     cache_files, cache_bytes = cleanup_tts_cache(args.dry_run)
 
     logger.info(
-        "%s word_review_tasks deleted=%d; study_time users rolled=%d heartbeats deleted=%d; tts_cache evicted=%d files (%.1f MB)",
+        "%s word_review_tasks deleted=%d; tts_usage_logs deleted=%d; study_time users rolled=%d heartbeats deleted=%d; tts_cache evicted=%d files (%.1f MB)",
         "[dry-run]" if args.dry_run else "[applied]",
         tasks_deleted,
+        tts_logs_deleted,
         users_rolled,
         heartbeats_deleted,
         cache_files,

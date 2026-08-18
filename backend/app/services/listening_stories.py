@@ -23,7 +23,7 @@ from app.models.learning_item import LearningItem
 from app.models.listening_story import ListeningStory
 from app.models.word_memory_state import WordMemoryState
 from app.services.llm_translation import LlmTranslationSettings, generate_learning_text
-from app.services.tts_cache import get_cache_url, get_cached_audio
+from app.services.tts_cache import get_cache_url, is_audio_cached
 from app.services.volcengine_tts import AUDIO_SUFFIX, VolcengineTtsSettings, synthesize_volcengine_speech
 
 logger = logging.getLogger("listening_stories")
@@ -347,7 +347,7 @@ def warm_story_audio(
 
     for text, voice, language in jobs:
         stats["total"] += 1
-        if get_cached_audio(text, voice, speech_rate, suffix=AUDIO_SUFFIX) is not None:
+        if is_audio_cached(text, voice, speech_rate, suffix=AUDIO_SUFFIX):
             stats["cached"] += 1
             continue
         try:

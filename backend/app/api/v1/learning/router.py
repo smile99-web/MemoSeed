@@ -108,7 +108,7 @@ from app.services.speak_practice import (
     select_speak_candidates,
 )
 from app.services.speech_asset_cache import build_learning_speech_targets, ensure_volcengine_speech_asset, precache_learning_speech_assets
-from app.services.tts_cache import build_cache_key, get_cached_audio
+from app.services.tts_cache import build_cache_key, is_audio_cached
 from app.services.word_memory import (
     TASK_TYPE_LABELS,
     build_task_choices,
@@ -1947,15 +1947,35 @@ def get_course_cache_status(
             for row in rows
         }
 
+    # 2026-08-18 perf: the old target_ready re-scanned speech_targets AND
+    # re-read the audio file for EVERY term of EVERY item — O(items × terms
+    # × targets) Python loops plus whole-file reads per probe (a 500-item
+    # course pulled hundreds of MB off disk per status fetch). Precompute
+    # lookup maps once; each probe is then O(1) with at most one stat()
+    # per unique target.
+    target_by_text: dict[tuple[str, str], SpeechTarget] = {}
+    for target in speech_targets:
+        text_key = target.text.strip()
+        if text_key:
+            target_by_text.setdefault((target.language, text_key), target)
+
+    file_ready_by_key: dict[tuple[str, str, int, str], bool] = {}
+
     def target_ready(text: str, language: str) -> bool:
         normalized_text = text.strip()
         if not normalized_text:
             return False
-        for target in speech_targets:
-            if target.language == language and target.text.strip() == normalized_text:
-                key = (target.language, target.voice, target.speech_rate, build_cache_key(target.text.strip(), target.voice, target.speech_rate))
-                return key in cached_asset_keys and get_cached_audio(target.text.strip(), target.voice, target.speech_rate) is not None
-        return False
+        target = target_by_text.get((language, normalized_text))
+        if target is None:
+            return False
+        key = (target.language, target.voice, target.speech_rate, build_cache_key(target.text.strip(), target.voice, target.speech_rate))
+        if key not in cached_asset_keys:
+            return False
+        ready = file_ready_by_key.get(key)
+        if ready is None:
+            ready = is_audio_cached(target.text.strip(), target.voice, target.speech_rate)
+            file_ready_by_key[key] = ready
+        return ready
 
     def terms_translation_ready(terms: list[str]) -> bool:
         return all(term in term_translations for term in terms)

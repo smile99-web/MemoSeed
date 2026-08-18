@@ -32,6 +32,18 @@ def get_cached_audio(text: str, voice: str, speech_rate: int, suffix: str = "mp3
     return None
 
 
+def is_audio_cached(text: str, voice: str, speech_rate: int, suffix: str = "mp3") -> bool:
+    """Existence-only cache probe.
+
+    get_cached_audio(...) is not None reads the whole file into memory just
+    to answer "is it there" — cache-status / precache loops do that once per
+    word per request (a 200-target course re-read every mp3 on every status
+    fetch). One stat() syscall instead.
+    """
+    cache_key = build_cache_key(text, voice, speech_rate)
+    return (_get_cache_dir() / f"{cache_key}.{suffix}").exists()
+
+
 def store_cached_audio(text: str, voice: str, speech_rate: int, audio: bytes, suffix: str = "mp3") -> None:
     cache_key = build_cache_key(text, voice, speech_rate)
     cache_dir = _get_cache_dir()

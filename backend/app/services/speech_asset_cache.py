@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings as app_settings
 from app.models.learning_item import LearningItem
 from app.models.speech_asset import SpeechAsset
-from app.services.tts_cache import build_cache_key, get_cache_url, get_cached_audio
+from app.services.tts_cache import build_cache_key, get_cache_url, is_audio_cached
 from app.services.volcengine_tts import (
     AUDIO_SUFFIX,
     DEFAULT_VOLCENGINE_TTS_CHINESE_VOICE,
@@ -169,7 +169,7 @@ def ensure_volcengine_speech_asset(
     if not normalized_text:
         return None, False
 
-    cached = get_cached_audio(normalized_text, target.voice, target.speech_rate, suffix=AUDIO_SUFFIX) is not None
+    cached = is_audio_cached(normalized_text, target.voice, target.speech_rate, suffix=AUDIO_SUFFIX)
     synthesis_failed = False
     if not cached:
         tts_settings = build_volcengine_tts_settings(
