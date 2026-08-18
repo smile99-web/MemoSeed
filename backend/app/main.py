@@ -26,6 +26,17 @@ logger = logging.getLogger(__name__)
 
 def ensure_lightweight_schema_upgrades() -> None:
     statements = [
+        # 二期改造(2026-08-18): 单词五维独立进度字段(见 word_memory_state.py)。
+        "ALTER TABLE word_memory_states ADD COLUMN IF NOT EXISTS dim_listen_days INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE word_memory_states ADD COLUMN IF NOT EXISTS dim_listen_last_date DATE",
+        "ALTER TABLE word_memory_states ADD COLUMN IF NOT EXISTS dim_meaning_days INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE word_memory_states ADD COLUMN IF NOT EXISTS dim_meaning_last_date DATE",
+        "ALTER TABLE word_memory_states ADD COLUMN IF NOT EXISTS dim_speak_passed BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE word_memory_states ADD COLUMN IF NOT EXISTS dim_spell_days INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE word_memory_states ADD COLUMN IF NOT EXISTS dim_spell_last_date DATE",
+        "ALTER TABLE word_memory_states ADD COLUMN IF NOT EXISTS dim_use_days INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE word_memory_states ADD COLUMN IF NOT EXISTS dim_use_last_date DATE",
+        "ALTER TABLE word_memory_states ADD COLUMN IF NOT EXISTS dim_last_failed VARCHAR(16)",
         "ALTER TABLE memory_states ADD COLUMN IF NOT EXISTS consecutive_correct_count INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE memory_states ADD COLUMN IF NOT EXISTS consecutive_error_count INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE memory_states ADD COLUMN IF NOT EXISTS recall_correct_count INTEGER NOT NULL DEFAULT 0",

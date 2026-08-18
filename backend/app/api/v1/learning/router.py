@@ -1466,6 +1466,20 @@ def list_due_review_items(
             real_tests = intel.get("real_tests", 0)
             unknown_errs = intel.get("unknown_errors", 0)
 
+            # 二期改造(2026-08-18): 分维回炉优先。某维度最近一次失败 →
+            # 该维度的练习排到最前(只回炉这一维,其余维度进度保留)。
+            # listen/meaning 用识别题低成本重建;spell 先确认意思再手写;
+            # use 回到句中语境;speak 由跟读卡独立处理,不在此插队。
+            dim_failed = intel.get("dim_last_failed", "")
+            if dim_failed == "listen":
+                return ["listen_choose_chinese", "english_to_chinese"]
+            if dim_failed == "meaning":
+                return ["english_to_chinese", "listen_choose_chinese", "handwriting_dictation"]
+            if dim_failed == "spell":
+                return ["english_to_chinese", "handwriting_dictation"]
+            if dim_failed == "use":
+                return ["listen_choose_chinese", "english_to_chinese", "handwriting_dictation"]
+
             # 改进2(2026-08-07 修订): lapse > 20 悠悠球词 -> 重教链。
             # 旧版纯识别(不考产出)让高 lapse 词永远毕不了业:识别太简单
             # 强度虚高(0.75-0.85),间隔拉长后产出能力其实没重建,到期再忘,
@@ -1556,6 +1570,8 @@ def list_due_review_items(
                 intel["missing_letter_errors"] = sum(error_count_value(v) for k, v in error_counts.items() if k == "missing-letter")
                 intel["strength"] = max(intel.get("strength", 0), ws.memory_strength or 0)
                 intel["status"] = ws.status or ""
+                # 二期改造: 最近失败维度驱动回炉排序(弱维优先)
+                intel["dim_last_failed"] = ws.dim_last_failed or ""
                 # P1: chronic-failure detection — lapse-heavy words that are
                 # still weak, or words the status engine already flags as
                 # difficult, enter breakthrough mode (assisted forms only).

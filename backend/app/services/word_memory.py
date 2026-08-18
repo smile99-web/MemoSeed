@@ -68,6 +68,87 @@ TEACHING_TIPS = {
 }
 
 
+# ── 二期改造(2026-08-18): 五维归属映射 ────────────────────────────────
+# 每个 review_mode 归属一个能力维度:听(listen)/义(meaning)/读(speak)/
+# 写(spell)/用(use)。维度独立计毕业进度——一个维度失败只回炉该维度。
+WORD_DIMENSIONS = ("listen", "meaning", "speak", "spell", "use")
+# 各维毕业门槛:听/义/写/用 需要跨 2 个不同日期答对(间隔证明),读 1 次通过即可。
+DIM_GRADUATION_DAYS = 2
+
+
+def dimension_for_review_mode(review_mode: str | None) -> str | None:
+    """Map a review_mode to its ability dimension (None = not dimensional)."""
+    if not review_mode:
+        return None
+    mode = review_mode.strip().lower()
+    # 选择/任务题的提交模式带 "word-" 前缀(如 word-listen_choose_chinese)。
+    if mode.startswith("word-") and not mode.startswith(("word-recall", "word-spelling", "word-hinted", "word-preview", "word-context")):
+        mode = mode[len("word-"):]
+    if mode.startswith("listen_choose_chinese") or mode.startswith("listen_spell"):
+        return "listen"
+    if mode.startswith("english_to_chinese") or mode.startswith("match_translation"):
+        return "meaning"
+    if mode.startswith("voice") or mode.startswith("read-aloud") or mode.startswith("echo-read"):
+        return "speak"
+    if mode.startswith(("handwriting", "word-recall", "word-spelling", "chinese_to_english", "listen_spell")):
+        return "spell"
+    if mode.startswith(("word-context", "cloze", "sentence-")):
+        return "use"
+    return None
+
+
+def word_dimensions_graduated(word_state: WordMemoryState) -> bool:
+    """五维全部毕业 = 该词真正掌握(听/义/写/用跨 2 天,读通过)。
+
+    getattr 防御:测试的轻量 mock 与升级前的旧对象没有 dim_* 字段。
+    """
+    return (
+        (getattr(word_state, "dim_listen_days", None) or 0) >= DIM_GRADUATION_DAYS
+        and (getattr(word_state, "dim_meaning_days", None) or 0) >= DIM_GRADUATION_DAYS
+        and bool(getattr(word_state, "dim_speak_passed", False))
+        and (getattr(word_state, "dim_spell_days", None) or 0) >= DIM_GRADUATION_DAYS
+        and (getattr(word_state, "dim_use_days", None) or 0) >= DIM_GRADUATION_DAYS
+    )
+
+
+def word_dimension_progress(word_state: WordMemoryState) -> dict[str, object]:
+    """前端五维进度展示用快照。"""
+    listen_days = getattr(word_state, "dim_listen_days", None) or 0
+    meaning_days = getattr(word_state, "dim_meaning_days", None) or 0
+    speak_passed = bool(getattr(word_state, "dim_speak_passed", False))
+    spell_days = getattr(word_state, "dim_spell_days", None) or 0
+    use_days = getattr(word_state, "dim_use_days", None) or 0
+    return {
+        "listen": {"days": listen_days, "graduated": listen_days >= DIM_GRADUATION_DAYS},
+        "meaning": {"days": meaning_days, "graduated": meaning_days >= DIM_GRADUATION_DAYS},
+        "speak": {"days": 1 if speak_passed else 0, "graduated": speak_passed},
+        "spell": {"days": spell_days, "graduated": spell_days >= DIM_GRADUATION_DAYS},
+        "use": {"days": use_days, "graduated": use_days >= DIM_GRADUATION_DAYS},
+        "last_failed": getattr(word_state, "dim_last_failed", None),
+    }
+
+
+def _update_dimension_progress(word_state: WordMemoryState, review_mode: str, is_correct: bool, now: datetime) -> None:
+    """在每次词级复习同步时更新五维进度(跨天去重计数)。"""
+    dim = dimension_for_review_mode(review_mode)
+    if dim is None:
+        return
+    if not is_correct:
+        word_state.dim_last_failed = dim
+        return
+    if word_state.dim_last_failed == dim:
+        word_state.dim_last_failed = None
+    today_local = now.astimezone(LOCAL_TIMEZONE).date()
+    if dim == "speak":
+        word_state.dim_speak_passed = True
+        return
+    days_attr = f"dim_{dim}_days"
+    date_attr = f"dim_{dim}_last_date"
+    if getattr(word_state, date_attr) != today_local:
+        setattr(word_state, days_attr, (getattr(word_state, days_attr) or 0) + 1)
+        setattr(word_state, date_attr, today_local)
+
+
 def get_or_create_word_memory_state(
     db: Session,
     user_id: UUID,
@@ -161,6 +242,9 @@ def sync_word_memory_from_review(
             new_count = int(existing or 0) + (1 if is_correct else 2)
         counts[error_type] = {"count": new_count, "last": now.isoformat()}
         word_state.error_type_counts = counts
+
+    # 二期改造: 五维进度更新(在状态推导之前,derive_word_status 会读)。
+    _update_dimension_progress(word_state, review_mode, is_correct, now)
 
     word_state.priority_score = calculate_word_memory_priority(word_state, now)
     # P8: recent accuracy gates mastery. Cumulative counters never decrease,
@@ -331,6 +415,12 @@ def derive_word_status(
     # When stats are absent (recent_test_count is None — e.g. legacy tests or
     # a word with no real tests yet) the pre-P21 cumulative path below runs
     # unchanged.
+    # 二期改造: 五维全毕业 = 直接判 mastered。听/义/读/写/用五个维度各自
+    # 通过了跨天证明,就是"这个词真会了"的最强证据——累计计数器与近期
+    # 准确率门都不再需要(它们本来就是五维的近似估计)。
+    if word_dimensions_graduated(word_state) and (word_state.memory_strength or 0) >= 0.5 and ce <= 1:
+        return "mastered"
+
     recency_blocks_mastery = recent_accuracy is not None and recent_accuracy < DEMOTION_RECENT_ACCURACY
     if recent_test_count is not None:
         if (
