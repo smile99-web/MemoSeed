@@ -41,3 +41,7 @@ pnpm-debug.log*
 # vps
 .vps_key
 backend/tts_cache/
+
+# env backups (2026-08-18 leak fix)
+.env.*
+!.env.example
