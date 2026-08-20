@@ -1114,7 +1114,14 @@ def list_due_review_items(
         due_statement = due_statement.where(or_(LearningItem.course_id.is_(None), LearningItem.course_id != exclude_course_id))
 
     due_rows = list(db.execute(due_statement).all())
-    due_rows.sort(key=lambda row: (-calculate_review_priority(row[1], now), row[1].next_review_at))
+    # 2026-08-20 词级别调整: 弱词前置。FSRS 的优先级排序被旧债挤占,
+    # 真正的弱词(red/test/time 之类)反而沉在长队尾。先按强度分桶 —— 弱词
+    # 桶内再按 FSRS 优先级 —— 让"有进展空间"的词绝对跑在沉睡老债前面。
+    due_rows.sort(key=lambda row: (
+        0 if (row[1].memory_strength or 0) < 0.4 else 1,
+        -calculate_review_priority(row[1], now),
+        row[1].next_review_at,
+    ))
     # P2: cap the due queue by the remaining daily budget. Micro-review tasks
     # (below) are still served when the budget is exhausted — they are the
     # in-flight correction machinery, not new due work.
